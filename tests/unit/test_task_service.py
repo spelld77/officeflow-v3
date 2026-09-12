@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
-from officeflow.application.tasks import TaskDraft, TaskRepository, TaskService, TaskView
+from officeflow.application.tasks import (
+    TaskDraft,
+    TaskGroup,
+    TaskPage,
+    TaskQuery,
+    TaskRepository,
+    TaskService,
+    TaskSort,
+    TaskView,
+)
 from officeflow.domain.enums import TaskPriority, TaskStatus
 from officeflow.domain.task import Task
 
@@ -42,15 +51,120 @@ class InMemoryTaskRepository(TaskRepository):
     def get(self, task_id: int) -> Task | None:
         return self.tasks.get(task_id)
 
-    def list(self, *, search: str = "") -> list[Task]:
-        normalized = search.casefold().strip()
-        return [
+    def query(
+        self,
+        query: TaskQuery,
+        *,
+        current: datetime,
+        day_start: datetime,
+        day_end: datetime,
+    ) -> TaskPage:
+        tasks = [
             task
             for task in self.tasks.values()
-            if not normalized
-            or normalized in task.title.casefold()
-            or normalized in task.description.casefold()
+            if self._matches(task, query, current, day_start, day_end)
         ]
+        tasks = self._sort(tasks, query.sort)
+        total = len(tasks)
+        end = None if query.limit is None else query.offset + query.limit
+        return TaskPage(tuple(tasks[query.offset : end]), total, query.offset, query.limit)
+
+    @staticmethod
+    def _matches(
+        task: Task,
+        query: TaskQuery,
+        current: datetime,
+        day_start: datetime,
+        day_end: datetime,
+    ) -> bool:
+        active = {TaskStatus.ACTIVE, TaskStatus.PENDING}
+        task_end = task.ends_at or task.starts_at
+        overlaps_today = bool(
+            task.starts_at
+            and task.starts_at < day_end
+            and (
+                (task.ends_at is not None and task.ends_at > day_start)
+                or (task.ends_at is None and task.starts_at >= day_start)
+            )
+        )
+        if query.group is TaskGroup.OVERDUE:
+            view_match = bool(task.status in active and task_end and task_end <= current)
+        elif query.group is TaskGroup.IN_PROGRESS:
+            view_match = bool(
+                task.status in active
+                and task.starts_at
+                and task.ends_at
+                and task.starts_at <= current < task.ends_at
+            )
+        elif query.group is TaskGroup.UPCOMING:
+            view_match = bool(
+                task.status in active and task.starts_at and current <= task.starts_at < day_end
+            )
+        elif query.group is TaskGroup.COMPLETED:
+            view_match = bool(
+                task.status is TaskStatus.COMPLETED
+                and task.completed_at
+                and day_start <= task.completed_at < day_end
+            )
+        elif query.view is TaskView.TODAY:
+            view_match = task.status is not TaskStatus.ARCHIVED and overlaps_today
+        elif query.view is TaskView.UPCOMING:
+            view_match = bool(
+                task.status in active and task.starts_at and task.starts_at >= day_end
+            )
+        elif query.view is TaskView.IMPORTANT:
+            view_match = task.status in active and task.priority in {
+                TaskPriority.IMPORTANT,
+                TaskPriority.URGENT,
+            }
+        elif query.view is TaskView.PENDING:
+            view_match = task.status is TaskStatus.PENDING
+        elif query.view is TaskView.COMPLETED:
+            view_match = task.status is TaskStatus.COMPLETED
+        else:
+            view_match = task.status is not TaskStatus.ARCHIVED
+        normalized = query.search.casefold().strip()
+        return (
+            view_match
+            and (not normalized or normalized in f"{task.title}\n{task.description}".casefold())
+            and (not query.statuses or task.status in query.statuses)
+            and (not query.priorities or task.priority in query.priorities)
+            and (not query.pinned_only or task.is_pinned)
+        )
+
+    @staticmethod
+    def _sort(tasks: list[Task], sort: TaskSort) -> list[Task]:
+        priority = {
+            TaskPriority.URGENT: 0,
+            TaskPriority.IMPORTANT: 1,
+            TaskPriority.ATTENTION: 2,
+            TaskPriority.NORMAL: 3,
+        }
+        fallback = datetime.max.replace(tzinfo=UTC)
+        if sort is TaskSort.PRIORITY:
+            return sorted(
+                tasks,
+                key=lambda task: (
+                    not task.is_pinned,
+                    priority[task.priority],
+                    task.starts_at or fallback,
+                ),
+            )
+        if sort is TaskSort.UPDATED:
+            return sorted(
+                tasks, key=lambda task: (not task.is_pinned, -task.updated_at.timestamp())
+            )
+        if sort is TaskSort.TITLE:
+            return sorted(tasks, key=lambda task: (not task.is_pinned, task.title.casefold()))
+        return sorted(
+            tasks,
+            key=lambda task: (
+                not task.is_pinned,
+                task.starts_at or fallback,
+                priority[task.priority],
+                task.title,
+            ),
+        )
 
 
 NOW = datetime(2026, 9, 12, 3, 0, tzinfo=UTC)
@@ -143,3 +257,77 @@ def test_summary_counts_time_based_states() -> None:
     assert summary.in_progress == 1
     assert summary.today == 3
     assert summary.completed_today == 1
+
+
+def test_today_groups_are_disjoint_and_include_past_overdue_tasks() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    service.create(
+        TaskDraft(
+            title="지난주 지연 업무",
+            starts_at=NOW - timedelta(days=8),
+            ends_at=NOW - timedelta(days=7),
+        ),
+        now=NOW - timedelta(days=9),
+    )
+    service.create(
+        TaskDraft(
+            title="진행 중 업무",
+            starts_at=NOW - timedelta(hours=1),
+            ends_at=NOW + timedelta(hours=1),
+        ),
+        now=NOW,
+    )
+    service.create(
+        TaskDraft(
+            title="오늘 예정 업무",
+            starts_at=NOW + timedelta(hours=2),
+            ends_at=NOW + timedelta(hours=3),
+        ),
+        now=NOW,
+    )
+    service.create(
+        TaskDraft(
+            title="오늘 완료 업무",
+            status=TaskStatus.COMPLETED,
+            starts_at=NOW - timedelta(hours=1),
+            ends_at=NOW + timedelta(hours=1),
+        ),
+        now=NOW,
+    )
+
+    groups = service.today_groups(now=NOW)
+
+    assert [task.title for task in groups[TaskGroup.OVERDUE].items] == ["지난주 지연 업무"]
+    assert [task.title for task in groups[TaskGroup.IN_PROGRESS].items] == ["진행 중 업무"]
+    assert [task.title for task in groups[TaskGroup.UPCOMING].items] == ["오늘 예정 업무"]
+    assert [task.title for task in groups[TaskGroup.COMPLETED].items] == ["오늘 완료 업무"]
+
+
+def test_query_combines_filters_sorting_and_pagination() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    for index in range(4):
+        service.create(
+            TaskDraft(
+                title=f"검토 업무 {index}",
+                priority=TaskPriority.URGENT if index < 3 else TaskPriority.NORMAL,
+                is_pinned=index == 2,
+            ),
+            now=NOW + timedelta(minutes=index),
+        )
+
+    page = service.query(
+        TaskQuery(
+            search="검토",
+            priorities=frozenset({TaskPriority.URGENT}),
+            sort=TaskSort.TITLE,
+            offset=1,
+            limit=1,
+        ),
+        now=NOW,
+    )
+
+    assert page.total == 3
+    assert page.has_more is True
+    assert [task.title for task in page.items] == ["검토 업무 0"]

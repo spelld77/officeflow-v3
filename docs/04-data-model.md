@@ -99,12 +99,15 @@
 - `tasks(status, priority, updated_at)`
 - `tasks(starts_at, ends_at)`
 - `tasks(is_pinned, status, updated_at)`
+- `tasks(deleted_at, status, ends_at, starts_at)`
+- `tasks(deleted_at, status, completed_at)`
+- `tasks(deleted_at, updated_at)`
 - `task_occurrences(task_id, occurrence_start)` unique
 - `work_logs(log_date, task_id)`
 - `attachments(task_id)`
 - `reminders(enabled, absolute_at)`
 
-인덱스는 실제 5,000개 이상 기준 데이터의 쿼리 계획을 확인한 뒤 확정한다.
+추가 복합 인덱스는 Phase 3A의 5,000건 그룹·필터·검색 측정 결과를 기준으로 확정했다.
 
 ## 4. 반복 일정 규칙
 

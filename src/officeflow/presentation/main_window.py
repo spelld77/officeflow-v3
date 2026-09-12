@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
             self._sidebar_layout.addWidget(button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 2", "brandCaption")
+        self._version_label = self._named_label("v3.0 · Phase 3A", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -535,7 +535,7 @@ class MainWindow(QMainWindow):
             self._workspace_layout.setContentsMargins(margin, 18, margin, 20)
             self._brand_title.setText("OfficeFlow")
             self._brand_caption.show()
-            self._version_label.setText("v3.0 · Phase 2")
+            self._version_label.setText("v3.0 · Phase 3A")
             self._search.setPlaceholderText("업무와 내용 검색  (Ctrl+K)")
             self._add_button.setText("+ 새 업무")
 

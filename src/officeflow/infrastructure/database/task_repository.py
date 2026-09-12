@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from sqlalchemy import Select, select
+from datetime import datetime
+from typing import Any
 
+from sqlalchemy import Select, and_, case, func, or_, select
+
+from officeflow.application.tasks import TaskGroup, TaskPage, TaskQuery, TaskSort, TaskView
 from officeflow.domain.enums import TaskPriority, TaskStatus
 from officeflow.domain.task import Task
 from officeflow.infrastructure.database.models import TaskRecord
@@ -43,20 +47,150 @@ class SqlAlchemyTaskRepository:
             raise LookupError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
         return task
 
-    def list(self, *, search: str = "") -> list[Task]:
-        statement: Select[tuple[TaskRecord]] = select(TaskRecord).where(
-            TaskRecord.deleted_at.is_(None)
+    def query(
+        self,
+        query: TaskQuery,
+        *,
+        current: datetime,
+        day_start: datetime,
+        day_end: datetime,
+    ) -> TaskPage:
+        predicates = self._predicates(
+            query,
+            current=current,
+            day_start=day_start,
+            day_end=day_end,
         )
-        normalized = search.strip()
+        count_statement = select(func.count(TaskRecord.id)).where(*predicates)
+        statement: Select[tuple[TaskRecord]] = (
+            select(TaskRecord).where(*predicates).order_by(*self._order_by(query.sort))
+        )
+        if query.offset:
+            statement = statement.offset(query.offset)
+        if query.limit is not None:
+            statement = statement.limit(query.limit)
+        with self._sessions.transaction() as session:
+            total = int(session.scalar(count_statement) or 0)
+            items = tuple(self._to_domain(record) for record in session.scalars(statement).all())
+        return TaskPage(items=items, total=total, offset=query.offset, limit=query.limit)
+
+    @classmethod
+    def _predicates(
+        cls,
+        query: TaskQuery,
+        *,
+        current: datetime,
+        day_start: datetime,
+        day_end: datetime,
+    ) -> list[Any]:
+        predicates: list[Any] = [TaskRecord.deleted_at.is_(None)]
+        if query.group is None:
+            predicates.extend(cls._view_predicates(query.view, day_start, day_end))
+        else:
+            predicates.extend(cls._group_predicates(query.group, current, day_start, day_end))
+
+        normalized = query.search.strip()
         if normalized:
             escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
-            statement = statement.where(
+            predicates.append(
                 TaskRecord.title.ilike(pattern, escape="\\")
                 | TaskRecord.description.ilike(pattern, escape="\\")
             )
-        with self._sessions.transaction() as session:
-            return [self._to_domain(record) for record in session.scalars(statement).all()]
+        if query.statuses:
+            predicates.append(
+                TaskRecord.status.in_(tuple(status.value for status in query.statuses))
+            )
+        if query.priorities:
+            predicates.append(
+                TaskRecord.priority.in_(tuple(priority.value for priority in query.priorities))
+            )
+        if query.pinned_only:
+            predicates.append(TaskRecord.is_pinned.is_(True))
+        return predicates
+
+    @staticmethod
+    def _view_predicates(view: TaskView, day_start: datetime, day_end: datetime) -> list[Any]:
+        active = (TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)
+        if view is TaskView.TODAY:
+            return [
+                TaskRecord.status != TaskStatus.ARCHIVED.value,
+                TaskRecord.starts_at.is_not(None),
+                TaskRecord.starts_at < day_end,
+                or_(
+                    TaskRecord.ends_at > day_start,
+                    and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at >= day_start),
+                ),
+            ]
+        if view is TaskView.UPCOMING:
+            return [TaskRecord.status.in_(active), TaskRecord.starts_at >= day_end]
+        if view is TaskView.IMPORTANT:
+            return [
+                TaskRecord.status.in_(active),
+                TaskRecord.priority.in_((TaskPriority.IMPORTANT.value, TaskPriority.URGENT.value)),
+            ]
+        if view is TaskView.PENDING:
+            return [TaskRecord.status == TaskStatus.PENDING.value]
+        if view is TaskView.COMPLETED:
+            return [TaskRecord.status == TaskStatus.COMPLETED.value]
+        return [TaskRecord.status != TaskStatus.ARCHIVED.value]
+
+    @staticmethod
+    def _group_predicates(
+        group: TaskGroup,
+        current: datetime,
+        day_start: datetime,
+        day_end: datetime,
+    ) -> list[Any]:
+        active = (TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)
+        if group is TaskGroup.OVERDUE:
+            return [
+                TaskRecord.status.in_(active),
+                TaskRecord.starts_at.is_not(None),
+                or_(
+                    TaskRecord.ends_at <= current,
+                    and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at < current),
+                ),
+            ]
+        if group is TaskGroup.IN_PROGRESS:
+            return [
+                TaskRecord.status.in_(active),
+                TaskRecord.starts_at <= current,
+                TaskRecord.ends_at > current,
+            ]
+        if group is TaskGroup.UPCOMING:
+            return [
+                TaskRecord.status.in_(active),
+                TaskRecord.starts_at >= current,
+                TaskRecord.starts_at < day_end,
+            ]
+        return [
+            TaskRecord.status == TaskStatus.COMPLETED.value,
+            TaskRecord.completed_at >= day_start,
+            TaskRecord.completed_at < day_end,
+        ]
+
+    @staticmethod
+    def _order_by(sort: TaskSort) -> tuple[Any, ...]:
+        pinned_first = TaskRecord.is_pinned.desc()
+        priority_rank = case(
+            {
+                TaskPriority.URGENT.value: 0,
+                TaskPriority.IMPORTANT.value: 1,
+                TaskPriority.ATTENTION.value: 2,
+                TaskPriority.NORMAL.value: 3,
+            },
+            value=TaskRecord.priority,
+            else_=4,
+        )
+        schedule = (TaskRecord.starts_at.is_(None), TaskRecord.starts_at.asc())
+        if sort is TaskSort.PRIORITY:
+            return (pinned_first, priority_rank, *schedule, TaskRecord.title, TaskRecord.id)
+        if sort is TaskSort.UPDATED:
+            return (pinned_first, TaskRecord.updated_at.desc(), TaskRecord.id.desc())
+        if sort is TaskSort.TITLE:
+            return (pinned_first, TaskRecord.title.collate("NOCASE"), TaskRecord.id)
+        return (pinned_first, *schedule, priority_rank, TaskRecord.title, TaskRecord.id)
 
     @staticmethod
     def _to_record(task: Task) -> TaskRecord:

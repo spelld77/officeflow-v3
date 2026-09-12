@@ -29,6 +29,7 @@ dev = [
 [project.scripts]
 officeflow = "officeflow.main:main"
 officeflow-sample-data = "officeflow.tools.sample_data:main"
+officeflow-benchmark = "officeflow.tools.benchmark_tasks:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

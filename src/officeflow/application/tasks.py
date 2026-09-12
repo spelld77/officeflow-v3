@@ -23,6 +23,53 @@ class TaskView(StrEnum):
     ALL = "all"
 
 
+class TaskGroup(StrEnum):
+    OVERDUE = "overdue"
+    IN_PROGRESS = "in_progress"
+    UPCOMING = "upcoming"
+    COMPLETED = "completed"
+
+
+class TaskSort(StrEnum):
+    SCHEDULE = "schedule"
+    PRIORITY = "priority"
+    UPDATED = "updated"
+    TITLE = "title"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskQuery:
+    view: TaskView = TaskView.ALL
+    search: str = ""
+    statuses: frozenset[TaskStatus] = frozenset()
+    priorities: frozenset[TaskPriority] = frozenset()
+    pinned_only: bool = False
+    group: TaskGroup | None = None
+    sort: TaskSort = TaskSort.SCHEDULE
+    offset: int = 0
+    limit: int | None = 100
+
+    def __post_init__(self) -> None:
+        if self.offset < 0:
+            raise ValueError("조회 시작 위치는 0 이상이어야 합니다.")
+        if self.limit is not None and not 1 <= self.limit <= 500:
+            raise ValueError("한 번에 조회할 업무는 1~500개여야 합니다.")
+        if self.group is not None and self.view is not TaskView.TODAY:
+            raise ValueError("업무 그룹은 오늘 보기에서만 사용할 수 있습니다.")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskPage:
+    items: tuple[Task, ...]
+    total: int
+    offset: int
+    limit: int | None
+
+    @property
+    def has_more(self) -> bool:
+        return self.limit is not None and self.offset + len(self.items) < self.total
+
+
 @dataclass(frozen=True, slots=True)
 class TaskDraft:
     title: str
@@ -51,7 +98,14 @@ class TaskRepository(Protocol):
 
     def get(self, task_id: int) -> Task | None: ...
 
-    def list(self, *, search: str = "") -> list[Task]: ...
+    def query(
+        self,
+        query: TaskQuery,
+        *,
+        current: datetime,
+        day_start: datetime,
+        day_end: datetime,
+    ) -> TaskPage: ...
 
 
 class TaskService:
@@ -130,84 +184,61 @@ class TaskService:
             raise TaskNotFoundError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
         return task
 
-    def list(self, view: TaskView, *, search: str = "", now: datetime | None = None) -> list[Task]:
-        current = now or datetime.now(UTC)
-        tasks = self._repository.list(search=search)
-        filtered = [task for task in tasks if self._matches_view(task, view, current)]
-        return sorted(filtered, key=self._sort_key)
-
-    def summary(self, *, now: datetime | None = None) -> TaskSummary:
-        current = now or datetime.now(UTC)
-        zone = ZoneInfo(self._timezone)
-        local_day = current.astimezone(zone).date()
-        day_start = datetime.combine(local_day, time.min, tzinfo=zone).astimezone(UTC)
-        day_end = (
-            datetime.combine(local_day, time.min, tzinfo=zone) + timedelta(days=1)
-        ).astimezone(UTC)
-        tasks = self._repository.list()
-        active = {TaskStatus.ACTIVE, TaskStatus.PENDING}
-        return TaskSummary(
-            overdue=sum(
-                task.status in active
-                and task.starts_at is not None
-                and (task.ends_at or task.starts_at) < current
-                for task in tasks
-            ),
-            in_progress=sum(
-                task.status in active
-                and task.starts_at is not None
-                and task.ends_at is not None
-                and task.starts_at <= current < task.ends_at
-                for task in tasks
-            ),
-            today=sum(self._overlaps(task, day_start, day_end) for task in tasks),
-            completed_today=sum(
-                task.completed_at is not None and day_start <= task.completed_at < day_end
-                for task in tasks
-            ),
+    def query(self, query: TaskQuery, *, now: datetime | None = None) -> TaskPage:
+        current, day_start, day_end = self._time_context(now)
+        return self._repository.query(
+            query,
+            current=current,
+            day_start=day_start,
+            day_end=day_end,
         )
 
-    def _matches_view(self, task: Task, view: TaskView, current: datetime) -> bool:
+    def list(self, view: TaskView, *, search: str = "", now: datetime | None = None) -> list[Task]:
+        page = self.query(TaskQuery(view=view, search=search, limit=None), now=now)
+        return list(page.items)
+
+    def today_groups(
+        self,
+        *,
+        search: str = "",
+        statuses: frozenset[TaskStatus] = frozenset(),
+        priorities: frozenset[TaskPriority] = frozenset(),
+        pinned_only: bool = False,
+        sort: TaskSort = TaskSort.SCHEDULE,
+        limit_per_group: int = 100,
+        now: datetime | None = None,
+    ) -> dict[TaskGroup, TaskPage]:
+        return {
+            group: self.query(
+                TaskQuery(
+                    view=TaskView.TODAY,
+                    search=search,
+                    statuses=statuses,
+                    priorities=priorities,
+                    pinned_only=pinned_only,
+                    group=group,
+                    sort=sort,
+                    limit=limit_per_group,
+                ),
+                now=now,
+            )
+            for group in TaskGroup
+        }
+
+    def summary(self, *, now: datetime | None = None) -> TaskSummary:
+        groups = self.today_groups(limit_per_group=1, now=now)
+        today = self.query(TaskQuery(view=TaskView.TODAY, limit=1), now=now)
+        return TaskSummary(
+            overdue=groups[TaskGroup.OVERDUE].total,
+            in_progress=groups[TaskGroup.IN_PROGRESS].total,
+            today=today.total,
+            completed_today=groups[TaskGroup.COMPLETED].total,
+        )
+
+    def _time_context(self, now: datetime | None) -> tuple[datetime, datetime, datetime]:
+        current = now or datetime.now(UTC)
         zone = ZoneInfo(self._timezone)
         day = current.astimezone(zone).date()
         day_start = datetime.combine(day, time.min, tzinfo=zone).astimezone(UTC)
         day_end = (datetime.combine(day, time.min, tzinfo=zone) + timedelta(days=1)).astimezone(UTC)
-        if view is TaskView.TODAY:
-            return self._overlaps(task, day_start, day_end)
-        if view is TaskView.UPCOMING:
-            return task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING} and bool(
-                task.starts_at and task.starts_at >= day_end
-            )
-        if view is TaskView.IMPORTANT:
-            return task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING} and task.priority in {
-                TaskPriority.IMPORTANT,
-                TaskPriority.URGENT,
-            }
-        if view is TaskView.PENDING:
-            return task.status is TaskStatus.PENDING
-        if view is TaskView.COMPLETED:
-            return task.status is TaskStatus.COMPLETED
-        return task.status is not TaskStatus.ARCHIVED
-
-    @staticmethod
-    def _overlaps(task: Task, start: datetime, end: datetime) -> bool:
-        if task.starts_at is None:
-            return False
-        task_end = task.ends_at or task.starts_at + timedelta(microseconds=1)
-        return task.starts_at < end and task_end > start
-
-    @staticmethod
-    def _sort_key(task: Task) -> tuple[bool, datetime, int, str]:
-        fallback = datetime.max.replace(tzinfo=UTC)
-        priority_order = {
-            TaskPriority.URGENT: 0,
-            TaskPriority.IMPORTANT: 1,
-            TaskPriority.ATTENTION: 2,
-            TaskPriority.NORMAL: 3,
-        }
-        return (
-            not task.is_pinned,
-            task.starts_at or fallback,
-            priority_order[task.priority],
-            task.title,
-        )
+        return current, day_start, day_end

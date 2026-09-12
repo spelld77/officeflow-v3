@@ -37,6 +37,9 @@ class TaskRecord(Base):
         Index("ix_tasks_status_priority_updated", "status", "priority", "updated_at"),
         Index("ix_tasks_starts_ends", "starts_at", "ends_at"),
         Index("ix_tasks_pinned_status_updated", "is_pinned", "status", "updated_at"),
+        Index("ix_tasks_active_schedule", "deleted_at", "status", "ends_at", "starts_at"),
+        Index("ix_tasks_completed_at", "deleted_at", "status", "completed_at"),
+        Index("ix_tasks_deleted_updated", "deleted_at", "updated_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
