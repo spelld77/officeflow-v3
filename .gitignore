@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+.local-data/
+artifacts/
+
+# Build and packaging
+build/
+dist/
+*.spec
+*.egg-info/
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# OfficeFlow user data
+*.db
+*.db-shm
+*.db-wal
+attachments/
+backups/
+logs/
+settings.json
+migration-reports/
+
+# Local environment
+.env
+.env.*
+!.env.example

@@ -1,0 +1,29 @@
+# Reproducible Phase 1 development environment for Python 3.12 on Windows.
+# Refresh intentionally after dependency compatibility checks.
+alembic==1.20.0
+colorama==0.4.6
+coverage==7.16.0
+greenlet==3.5.5
+iniconfig==2.3.0
+librt==0.15.0
+Mako==1.4.1
+MarkupSafe==3.0.3
+mypy==1.20.2
+mypy_extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+platformdirs==4.11.8
+pluggy==1.6.0
+Pygments==2.21.0
+PySide6==6.11.2
+PySide6_Addons==6.11.2
+PySide6_Essentials==6.11.2
+pytest==9.1.1
+pytest-cov==7.1.0
+pytest-qt==4.5.0
+python-dateutil==2.9.0.post0
+ruff==0.16.7
+shiboken6==6.11.2
+six==1.17.0
+SQLAlchemy==2.0.52
+typing_extensions==4.16.0

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "officeflow"
+version = "3.0.0.dev0"
+description = "Modern personal task, schedule, reminder, and work-log manager for Windows"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "alembic>=1.13,<2",
+    "platformdirs>=4.3,<5",
+    "PySide6>=6.7,<7",
+    "python-dateutil>=2.9,<3",
+    "SQLAlchemy>=2.0,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.13,<2",
+    "pytest>=8,<10",
+    "pytest-cov>=6,<8",
+    "pytest-qt>=4.4,<5",
+    "ruff>=0.8,<1",
+]
+
+[project.scripts]
+officeflow = "officeflow.main:main"
+officeflow-sample-data = "officeflow.tools.sample_data:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+officeflow = [
+    "py.typed",
+    "infrastructure/database/migrations/*.py",
+    "infrastructure/database/migrations/versions/*.py",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers --strict-config"
+testpaths = ["tests"]
+qt_api = "pyside6"
+
+[tool.coverage.run]
+omit = ["*/infrastructure/database/migrations/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["officeflow"]
+exclude = ["src/officeflow/infrastructure/database/migrations"]
