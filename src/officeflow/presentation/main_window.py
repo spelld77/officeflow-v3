@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import replace
+from itertools import pairwise
 from typing import ClassVar
 
 from PySide6.QtCore import QModelIndex, QPoint, Qt, QTimer
@@ -85,6 +86,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._sidebar)
         layout.addWidget(self._build_workspace(), 1)
         self.setCentralWidget(root)
+        self._configure_input_tab_order()
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -233,9 +235,10 @@ class MainWindow(QMainWindow):
         self._quick_add_edit.setPlaceholderText("빠른 등록: 제목 입력 후 Enter")
         self._quick_add_edit.returnPressed.connect(self._quick_add_task)
         quick_add.addWidget(self._quick_add_edit, 1)
-        quick_add_button = QPushButton("추가")
-        quick_add_button.clicked.connect(self._quick_add_task)
-        quick_add.addWidget(quick_add_button)
+        self._quick_add_button = QPushButton("추가")
+        self._quick_add_button.setObjectName("quickAddButton")
+        self._quick_add_button.clicked.connect(self._quick_add_task)
+        quick_add.addWidget(self._quick_add_button)
         layout.addLayout(quick_add)
 
         self._task_model = TaskListModel()
@@ -313,6 +316,17 @@ class MainWindow(QMainWindow):
             actions.addWidget(button)
         layout.addLayout(actions)
         return panel
+
+    def _configure_input_tab_order(self) -> None:
+        fields: tuple[QWidget, ...] = (
+            self._search,
+            self._add_button,
+            self._quick_add_edit,
+            self._quick_add_button,
+            self._task_list,
+        )
+        for current, following in pairwise(fields):
+            self.setTabOrder(current, following)
 
     def _create_nav_button(
         self,

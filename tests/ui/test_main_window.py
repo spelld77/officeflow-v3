@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLineEdit, QListView, QWidget
+from PySide6.QtWidgets import QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 from officeflow.application.tasks import TaskService
@@ -92,3 +92,20 @@ def test_quick_add_creates_today_task(qtbot: QtBot, task_service: TaskService) -
     task_list = window.findChild(QListView, "taskList")
     assert task_list is not None
     assert task_list.model().rowCount() == 1
+
+
+def test_tab_moves_from_quick_add_input_to_add_button(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.show()
+    quick_add = window.findChild(QLineEdit, "quickAddEdit")
+    quick_add_button = window.findChild(QPushButton, "quickAddButton")
+    assert quick_add is not None
+    assert quick_add_button is not None
+    quick_add.setFocus()
+
+    qtbot.keyPress(quick_add, Qt.Key.Key_Tab)
+
+    assert window.focusWidget() is quick_add_button

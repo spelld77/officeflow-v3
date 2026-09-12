@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from itertools import pairwise
 from typing import cast
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QDate, Qt, QTime
+from PySide6.QtCore import QDate, QEvent, QObject, Qt, QTime
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -58,6 +60,7 @@ class TaskEditorDialog(QDialog):
         self.description_edit.setObjectName("taskDescriptionEdit")
         self.description_edit.setPlaceholderText("필요한 설명이나 참고 내용을 입력하세요")
         self.description_edit.setMaximumHeight(120)
+        self.description_edit.setTabChangesFocus(True)
         form.addRow("설명", self.description_edit)
 
         self.priority_combo = QComboBox()
@@ -119,6 +122,14 @@ class TaskEditorDialog(QDialog):
         self.end_time_edit = QTimeEdit(QTime(default_end.hour, default_end.minute))
         self.end_time_edit.setDisplayFormat("HH:mm")
         self.schedule_form.addRow("종료 시각", self.end_time_edit)
+        self._schedule_value_edits = (
+            self.start_date_edit,
+            self.start_time_edit,
+            self.end_date_edit,
+            self.end_time_edit,
+        )
+        for edit in self._schedule_value_edits:
+            edit.installEventFilter(self)
         root.addWidget(schedule_group)
 
         self.error_label = QLabel()
@@ -131,10 +142,11 @@ class TaskEditorDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
-        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        save_button.setText("저장")
-        save_button.setObjectName("primaryButton")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        self.save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        self.save_button.setText("저장")
+        self.save_button.setObjectName("primaryButton")
+        self.cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        self.cancel_button.setText("취소")
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -149,12 +161,22 @@ class TaskEditorDialog(QDialog):
             self.schedule_combo.setCurrentIndex(1)
             self.all_day_check.setChecked(True)
         self._update_schedule_visibility()
+        self._configure_tab_order()
         self.title_edit.setFocus()
 
     def draft(self) -> TaskDraft:
         if self._draft is None:
             raise RuntimeError("대화상자가 아직 저장되지 않았습니다.")
         return self._draft
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched in self._schedule_value_edits and event.type() is QEvent.Type.KeyPress:
+            key_event = cast(QKeyEvent, event)
+            if key_event.key() == Qt.Key.Key_Tab:
+                return self.focusNextPrevChild(True)
+            if key_event.key() == Qt.Key.Key_Backtab:
+                return self.focusNextPrevChild(False)
+        return super().eventFilter(watched, event)
 
     def _validate_and_accept(self) -> None:
         try:
@@ -264,6 +286,25 @@ class TaskEditorDialog(QDialog):
         self.end_date_edit.setMinimumDate(start_date)
         if self.end_date_edit.date() < start_date:
             self.end_date_edit.setDate(start_date)
+
+    def _configure_tab_order(self) -> None:
+        fields: tuple[QWidget, ...] = (
+            self.title_edit,
+            self.description_edit,
+            self.priority_combo,
+            self.status_combo,
+            self.pinned_check,
+            self.schedule_combo,
+            self.all_day_check,
+            self.start_date_edit,
+            self.start_time_edit,
+            self.end_date_edit,
+            self.end_time_edit,
+            self.save_button,
+            self.cancel_button,
+        )
+        for current, following in pairwise(fields):
+            self.setTabOrder(current, following)
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: str) -> None:
