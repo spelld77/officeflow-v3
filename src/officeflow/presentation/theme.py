@@ -39,6 +39,10 @@ QPushButton[nav="true"][selected="true"] {
     color: #FFFFFF;
     font-weight: 600;
 }
+QPushButton[nav="true"][compact="true"] {
+    text-align: center;
+    padding: 10px 4px;
+}
 #topBar, #detailPanel, #contentCard {
     background: #FFFFFF;
     border: 1px solid #E1E6EF;

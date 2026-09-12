@@ -16,7 +16,8 @@ def build_application(argv: list[str] | None = None) -> tuple[QApplication, Main
     paths.ensure_directories()
     configure_logging(paths.log_dir)
 
-    settings = JsonSettingsStore(paths.settings_file).load()
+    settings_store = JsonSettingsStore(paths.settings_file)
+    settings = settings_store.load()
     upgrade_database(paths.database_file)
 
     app = QApplication(argv or sys.argv)
@@ -24,7 +25,7 @@ def build_application(argv: list[str] | None = None) -> tuple[QApplication, Main
     app.setApplicationDisplayName("OfficeFlow v3")
     app.setOrganizationName("OfficeFlow")
 
-    window = MainWindow(settings=settings)
+    window = MainWindow(settings=settings, save_settings=settings_store.save)
     return app, window
 
 

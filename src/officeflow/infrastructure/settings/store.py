@@ -14,6 +14,8 @@ class AppSettings:
     timezone: str = "Asia/Seoul"
     window_width: int = 1280
     window_height: int = 800
+    window_x: int | None = None
+    window_y: int | None = None
     compact_list: bool = False
     missed_reminder_grace_minutes: int = 120
 
