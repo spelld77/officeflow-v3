@@ -9,6 +9,9 @@ QWidget {
 QMainWindow, #appRoot {
     background: #F4F6FA;
 }
+QDialog {
+    background: #F4F6FA;
+}
 #sidebar {
     background: #162033;
     border: none;
@@ -39,6 +42,11 @@ QPushButton[nav="true"][selected="true"] {
     color: #FFFFFF;
     font-weight: 600;
 }
+QPushButton[nav="true"]:disabled {
+    color: #66758F;
+    background: transparent;
+    border: none;
+}
 QPushButton[nav="true"][compact="true"] {
     text-align: center;
     padding: 10px 4px;
@@ -60,6 +68,41 @@ QLineEdit {
     border: 1px solid #DCE2EC;
     border-radius: 9px;
     padding: 10px 12px;
+}
+QTextEdit, QComboBox, QDateEdit, QTimeEdit {
+    background: #FFFFFF;
+    border: 1px solid #DCE2EC;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+QTextEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
+    border-color: #2F6FED;
+}
+QGroupBox {
+    background: #FFFFFF;
+    border: 1px solid #E1E6EF;
+    border-radius: 10px;
+    font-weight: 600;
+    margin-top: 10px;
+    padding: 12px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 5px;
+}
+QPushButton {
+    background: #F1F4F8;
+    border: 1px solid #DCE2EC;
+    border-radius: 8px;
+    padding: 8px 12px;
+}
+QPushButton:hover {
+    background: #E8EDF5;
+}
+QPushButton:disabled {
+    color: #9AA5B7;
+    background: #F7F8FA;
 }
 QLineEdit:focus {
     background: #FFFFFF;
@@ -84,5 +127,18 @@ QFrame[summary="true"] {
 QLabel[count="true"] {
     font-size: 20px;
     font-weight: 700;
+}
+QListView#taskList {
+    background: #FFFFFF;
+    border: none;
+    outline: none;
+}
+QListView#taskList::item {
+    background: transparent;
+    border: none;
+}
+QStatusBar {
+    color: #526078;
+    background: #F4F6FA;
 }
 """

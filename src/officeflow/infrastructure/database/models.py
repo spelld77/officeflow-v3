@@ -6,7 +6,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -17,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from officeflow.infrastructure.database.base import Base
+from officeflow.infrastructure.database.types import UTCDateTime
 
 
 class TaskRecord(Base):
@@ -47,16 +47,16 @@ class TaskRecord(Base):
     priority: Mapped[str] = mapped_column(String(16), default="normal")
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     all_day: Mapped[bool] = mapped_column(Boolean, default=False)
-    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    starts_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    ends_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Seoul")
     recurrence_rule: Mapped[str | None] = mapped_column(Text)
-    recurrence_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recurrence_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
     result_note: Mapped[str] = mapped_column(Text, default="")
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class TaskOccurrenceRecord(Base):
@@ -71,12 +71,12 @@ class TaskOccurrenceRecord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
-    occurrence_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    occurrence_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    effective_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    effective_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    occurrence_start: Mapped[datetime] = mapped_column(UTCDateTime())
+    occurrence_end: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    effective_start: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    effective_end: Mapped[datetime | None] = mapped_column(UTCDateTime())
     status: Mapped[str] = mapped_column(String(16), default="pending")
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     result_note: Mapped[str] = mapped_column(Text, default="")
 
 
@@ -90,7 +90,7 @@ class ReminderRecord(Base):
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
     relation: Mapped[str] = mapped_column(String(16))
     offset_minutes: Mapped[int | None] = mapped_column(Integer)
-    absolute_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    absolute_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     last_fired_key: Mapped[str | None] = mapped_column(String(200))
 
@@ -103,7 +103,7 @@ class ChecklistItemRecord(Base):
     content: Mapped[str] = mapped_column(String(500))
     is_done: Mapped[bool] = mapped_column(Boolean, default=False)
     position: Mapped[int] = mapped_column(Integer, default=0)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class AttachmentRecord(Base):
@@ -116,8 +116,8 @@ class AttachmentRecord(Base):
     relative_path: Mapped[str] = mapped_column(String(1000))
     size_bytes: Mapped[int] = mapped_column(Integer)
     checksum: Mapped[str | None] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    missing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    missing_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class WorkLogRecord(Base):
@@ -135,8 +135,8 @@ class WorkLogRecord(Base):
     content: Mapped[str] = mapped_column(Text)
     result: Mapped[str] = mapped_column(Text, default="")
     priority_snapshot: Mapped[str] = mapped_column(String(16), default="normal")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class NoteRecord(Base):
@@ -145,7 +145,7 @@ class NoteRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     note_date: Mapped[date | None] = mapped_column(Date, index=True)
     content: Mapped[str] = mapped_column(Text, default="")
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class AppSettingRecord(Base):
@@ -153,4 +153,4 @@ class AppSettingRecord(Base):
 
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value_json: Mapped[str] = mapped_column(Text)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
