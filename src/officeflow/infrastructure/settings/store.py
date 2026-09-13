@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,8 @@ class AppSettings:
     window_x: int | None = None
     window_y: int | None = None
     compact_list: bool = False
+    collapsed_today_groups: tuple[str, ...] = ("completed",)
+    view_preferences: dict[str, dict[str, str | bool]] = field(default_factory=dict)
     missed_reminder_grace_minutes: int = 120
 
 
@@ -33,6 +35,14 @@ class JsonSettingsStore:
                 return AppSettings()
             allowed = AppSettings.__dataclass_fields__.keys()
             values = {key: value for key, value in raw.items() if key in allowed}
+            collapsed = values.get("collapsed_today_groups")
+            if isinstance(collapsed, list):
+                values["collapsed_today_groups"] = tuple(
+                    value for value in collapsed if isinstance(value, str)
+                )
+            preferences = values.get("view_preferences")
+            if preferences is not None and not isinstance(preferences, dict):
+                values.pop("view_preferences")
             return AppSettings(**values)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return AppSettings()

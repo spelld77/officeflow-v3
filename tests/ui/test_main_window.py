@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLineEdit, QListView, QPushButton, QWidget
+from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
-from officeflow.application.tasks import TaskService
+from officeflow.application.tasks import TaskDraft, TaskGroup, TaskService, TaskView
+from officeflow.domain.enums import TaskPriority, TaskStatus
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.presentation.main_window import MainWindow
+from officeflow.presentation.task_list import GroupHeader
 
 
 def test_main_window_has_phase_two_shell(qtbot: QtBot, task_service: TaskService) -> None:
@@ -91,7 +95,8 @@ def test_quick_add_creates_today_task(qtbot: QtBot, task_service: TaskService) -
 
     task_list = window.findChild(QListView, "taskList")
     assert task_list is not None
-    assert task_list.model().rowCount() == 1
+    assert window._task_model.total_task_count == 1
+    assert window._task_model.index_for_group(TaskGroup.IN_PROGRESS).isValid()
 
 
 def test_tab_moves_from_quick_add_input_to_add_button(
@@ -109,3 +114,91 @@ def test_tab_moves_from_quick_add_input_to_add_button(
     qtbot.keyPress(quick_add, Qt.Key.Key_Tab)
 
     assert window.focusWidget() is quick_add_button
+
+
+def test_today_view_has_collapsible_groups_and_summary_jump(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    now = datetime.now(UTC)
+    task_service.create(
+        TaskDraft(
+            title="완료한 업무",
+            status=TaskStatus.COMPLETED,
+            starts_at=now - timedelta(hours=1),
+            ends_at=now + timedelta(hours=1),
+        ),
+        now=now,
+    )
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.show()
+
+    header = window._task_model.entry_at(window._task_model.index_for_group(TaskGroup.COMPLETED))
+    assert isinstance(header, GroupHeader)
+    assert header.collapsed is True
+
+    jump = window.findChild(QPushButton, "summaryJump-completed")
+    assert jump is not None
+    qtbot.mouseClick(jump, Qt.MouseButton.LeftButton)
+
+    expanded = window._task_model.entry_at(window._task_model.index_for_group(TaskGroup.COMPLETED))
+    assert isinstance(expanded, GroupHeader)
+    assert expanded.collapsed is False
+
+
+def test_filters_combine_and_can_be_cleared(qtbot: QtBot, task_service: TaskService) -> None:
+    task_service.create(TaskDraft(title="긴급 고정", priority=TaskPriority.URGENT, is_pinned=True))
+    task_service.create(TaskDraft(title="일반 업무", priority=TaskPriority.NORMAL))
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    priority = window.findChild(QComboBox, "priorityFilter")
+    pinned = window.findChild(QPushButton, "pinnedFilter")
+    clear = window.findChild(QPushButton, "clearTaskFilters")
+    assert priority is not None
+    assert pinned is not None
+    assert clear is not None
+
+    priority.setCurrentIndex(priority.findData(TaskPriority.URGENT.value))
+    pinned.setChecked(True)
+
+    assert window._task_model.total_task_count == 1
+    assert clear.isEnabled()
+    qtbot.mouseClick(clear, Qt.MouseButton.LeftButton)
+    assert window._task_model.total_task_count == 2
+
+
+def test_flat_view_loads_fifty_rows_then_fetches_more(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    for index in range(120):
+        task_service.create(TaskDraft(title=f"대량 업무 {index:03d}"))
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+
+    window._set_view(TaskView.ALL)
+
+    assert window._task_model.loaded_task_count == 50
+    assert window._task_model.total_task_count == 120
+    assert window._task_model.canFetchMore()
+    window._task_model.fetchMore()
+    assert window._task_model.loaded_task_count == 100
+
+
+def test_view_preferences_and_compact_mode_are_saved(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    saved: list[AppSettings] = []
+    window = MainWindow(AppSettings(), task_service, save_settings=saved.append)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    status = window.findChild(QComboBox, "statusFilter")
+    compact = window.findChild(QPushButton, "compactListToggle")
+    assert status is not None
+    assert compact is not None
+    status.setCurrentIndex(status.findData(TaskStatus.ACTIVE.value))
+    compact.setChecked(True)
+    window.close()
+
+    assert saved[-1].compact_list is True
+    assert saved[-1].view_preferences[TaskView.ALL.value]["status"] == "active"

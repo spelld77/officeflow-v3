@@ -78,7 +78,6 @@ class InMemoryTaskRepository(TaskRepository):
         day_end: datetime,
     ) -> bool:
         active = {TaskStatus.ACTIVE, TaskStatus.PENDING}
-        task_end = task.ends_at or task.starts_at
         overlaps_today = bool(
             task.starts_at
             and task.starts_at < day_end
@@ -88,7 +87,14 @@ class InMemoryTaskRepository(TaskRepository):
             )
         )
         if query.group is TaskGroup.OVERDUE:
-            view_match = bool(task.status in active and task_end and task_end <= current)
+            view_match = bool(
+                task.status in active
+                and task.starts_at
+                and (
+                    (task.ends_at is not None and task.ends_at <= current)
+                    or (task.ends_at is None and task.starts_at < current)
+                )
+            )
         elif query.group is TaskGroup.IN_PROGRESS:
             view_match = bool(
                 task.status in active
@@ -98,7 +104,12 @@ class InMemoryTaskRepository(TaskRepository):
             )
         elif query.group is TaskGroup.UPCOMING:
             view_match = bool(
-                task.status in active and task.starts_at and current <= task.starts_at < day_end
+                task.status in active
+                and task.starts_at
+                and (
+                    task.starts_at > current or (task.starts_at == current and task.ends_at is None)
+                )
+                and task.starts_at < day_end
             )
         elif query.group is TaskGroup.COMPLETED:
             view_match = bool(
@@ -255,6 +266,7 @@ def test_summary_counts_time_based_states() -> None:
 
     assert summary.overdue == 1
     assert summary.in_progress == 1
+    assert summary.upcoming == 0
     assert summary.today == 3
     assert summary.completed_today == 1
 
@@ -302,6 +314,27 @@ def test_today_groups_are_disjoint_and_include_past_overdue_tasks() -> None:
     assert [task.title for task in groups[TaskGroup.IN_PROGRESS].items] == ["진행 중 업무"]
     assert [task.title for task in groups[TaskGroup.UPCOMING].items] == ["오늘 예정 업무"]
     assert [task.title for task in groups[TaskGroup.COMPLETED].items] == ["오늘 완료 업무"]
+
+
+def test_today_groups_do_not_duplicate_exact_start_boundary() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    service.create(
+        TaskDraft(
+            title="지금 시작한 기간 업무",
+            starts_at=NOW,
+            ends_at=NOW + timedelta(hours=1),
+        ),
+        now=NOW,
+    )
+    service.create(TaskDraft(title="현재 시점 업무", starts_at=NOW), now=NOW)
+
+    groups = service.today_groups(now=NOW)
+    grouped_ids = [task.id for page in groups.values() for task in page.items]
+
+    assert len(grouped_ids) == len(set(grouped_ids)) == 2
+    assert [task.title for task in groups[TaskGroup.IN_PROGRESS].items] == ["지금 시작한 기간 업무"]
+    assert [task.title for task in groups[TaskGroup.UPCOMING].items] == ["현재 시점 업무"]
 
 
 def test_query_combines_filters_sorting_and_pagination() -> None:

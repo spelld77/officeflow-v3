@@ -161,7 +161,10 @@ class SqlAlchemyTaskRepository:
         if group is TaskGroup.UPCOMING:
             return [
                 TaskRecord.status.in_(active),
-                TaskRecord.starts_at >= current,
+                or_(
+                    TaskRecord.starts_at > current,
+                    and_(TaskRecord.starts_at == current, TaskRecord.ends_at.is_(None)),
+                ),
                 TaskRecord.starts_at < day_end,
             ]
         return [

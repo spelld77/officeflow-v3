@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar
 from zoneinfo import ZoneInfo
@@ -7,6 +9,7 @@ from zoneinfo import ZoneInfo
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
+    QObject,
     QPersistentModelIndex,
     QRectF,
     QSize,
@@ -15,54 +18,230 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
+from officeflow.application.tasks import TaskGroup, TaskPage
 from officeflow.domain.enums import TaskPriority, TaskStatus
 from officeflow.domain.task import Task
+
+PageLoader = Callable[[int, int], TaskPage]
+GroupPageLoader = Callable[[TaskGroup, int, int], TaskPage]
+
+
+@dataclass(frozen=True, slots=True)
+class GroupHeader:
+    group: TaskGroup
+    label: str
+    total: int
+    collapsed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LoadMoreRow:
+    group: TaskGroup
+    remaining: int
+
+
+@dataclass(slots=True)
+class _GroupState:
+    total: int
+    items: list[Task]
+    collapsed: bool
 
 
 class TaskListModel(QAbstractListModel):
     TASK_ROLE = Qt.ItemDataRole.UserRole + 1
+    ENTRY_ROLE = Qt.ItemDataRole.UserRole + 2
+    PAGE_SIZE = 50
+    GROUP_LABELS: ClassVar[dict[TaskGroup, str]] = {
+        TaskGroup.OVERDUE: "지연",
+        TaskGroup.IN_PROGRESS: "진행 중",
+        TaskGroup.UPCOMING: "오늘 예정",
+        TaskGroup.COMPLETED: "오늘 완료",
+    }
 
     def __init__(self) -> None:
         super().__init__()
-        self._tasks: list[Task] = []
+        self._rows: list[Task | GroupHeader | LoadMoreRow] = []
+        self._flat_items: list[Task] = []
+        self._flat_total = 0
+        self._flat_loader: PageLoader | None = None
+        self._groups: dict[TaskGroup, _GroupState] = {}
+        self._group_loader: GroupPageLoader | None = None
+        self._grouped = False
 
     def rowCount(
         self,
         parent: QModelIndex | QPersistentModelIndex = QModelIndex(),  # noqa: B008
     ) -> int:
-        return 0 if parent.isValid() else len(self._tasks)
+        return 0 if parent.isValid() else len(self._rows)
 
     def data(
         self,
         index: QModelIndex | QPersistentModelIndex,
         role: int = Qt.ItemDataRole.DisplayRole,
     ) -> object:
-        if not index.isValid() or not 0 <= index.row() < len(self._tasks):
+        if not index.isValid() or not 0 <= index.row() < len(self._rows):
             return None
-        task = self._tasks[index.row()]
-        if role == Qt.ItemDataRole.DisplayRole:
-            return task.title
-        if role == Qt.ItemDataRole.ToolTipRole:
-            return task.description or task.title
-        if role == self.TASK_ROLE:
-            return task
+        entry = self._rows[index.row()]
+        if role == self.ENTRY_ROLE:
+            return entry
+        if isinstance(entry, Task):
+            if role == Qt.ItemDataRole.DisplayRole:
+                return entry.title
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return entry.description or entry.title
+            if role == self.TASK_ROLE:
+                return entry
+        elif isinstance(entry, GroupHeader) and role == Qt.ItemDataRole.DisplayRole:
+            return f"{entry.label} ({entry.total})"
+        elif isinstance(entry, LoadMoreRow) and role == Qt.ItemDataRole.DisplayRole:
+            return f"{entry.remaining}개 더 보기"
         return None
 
     def set_tasks(self, tasks: list[Task]) -> None:
+        self.set_page(TaskPage(tuple(tasks), len(tasks), 0, None))
+
+    def set_page(self, page: TaskPage, loader: PageLoader | None = None) -> None:
         self.beginResetModel()
-        self._tasks = list(tasks)
+        self._grouped = False
+        self._groups.clear()
+        self._group_loader = None
+        self._flat_items = list(page.items)
+        self._flat_total = page.total
+        self._flat_loader = loader
+        self._rows = list(self._flat_items)
         self.endResetModel()
 
-    def task_at(self, index: QModelIndex) -> Task | None:
-        if not index.isValid() or not 0 <= index.row() < len(self._tasks):
+    def set_group_pages(
+        self,
+        pages: Mapping[TaskGroup, TaskPage],
+        *,
+        collapsed: frozenset[TaskGroup],
+        loader: GroupPageLoader,
+    ) -> None:
+        self.beginResetModel()
+        self._grouped = True
+        self._flat_items.clear()
+        self._flat_total = 0
+        self._flat_loader = None
+        self._group_loader = loader
+        self._groups = {
+            group: _GroupState(
+                total=pages[group].total,
+                items=list(pages[group].items),
+                collapsed=group in collapsed,
+            )
+            for group in TaskGroup
+        }
+        self._rebuild_group_rows()
+        self.endResetModel()
+
+    def canFetchMore(
+        self,
+        parent: QModelIndex | QPersistentModelIndex = QModelIndex(),  # noqa: B008
+    ) -> bool:
+        return (
+            not parent.isValid()
+            and not self._grouped
+            and self._flat_loader is not None
+            and len(self._flat_items) < self._flat_total
+        )
+
+    def fetchMore(
+        self,
+        parent: QModelIndex | QPersistentModelIndex = QModelIndex(),  # noqa: B008
+    ) -> None:
+        if parent.isValid() or not self.canFetchMore() or self._flat_loader is None:
+            return
+        page = self._flat_loader(len(self._flat_items), self.PAGE_SIZE)
+        if not page.items:
+            self._flat_total = len(self._flat_items)
+            return
+        first = len(self._rows)
+        last = first + len(page.items) - 1
+        self.beginInsertRows(QModelIndex(), first, last)
+        self._flat_items.extend(page.items)
+        self._rows.extend(page.items)
+        self._flat_total = page.total
+        self.endInsertRows()
+
+    def toggle_group(self, group: TaskGroup) -> bool:
+        state = self._groups.get(group)
+        if state is None:
+            return False
+        self.beginResetModel()
+        state.collapsed = not state.collapsed
+        self._rebuild_group_rows()
+        self.endResetModel()
+        return state.collapsed
+
+    def expand_group(self, group: TaskGroup) -> None:
+        state = self._groups.get(group)
+        if state is not None and state.collapsed:
+            self.toggle_group(group)
+
+    def load_more(self, group: TaskGroup) -> None:
+        state = self._groups.get(group)
+        if state is None or self._group_loader is None or len(state.items) >= state.total:
+            return
+        page = self._group_loader(group, len(state.items), self.PAGE_SIZE)
+        self.beginResetModel()
+        state.items.extend(page.items)
+        state.total = page.total
+        self._rebuild_group_rows()
+        self.endResetModel()
+
+    def entry_at(self, index: QModelIndex) -> Task | GroupHeader | LoadMoreRow | None:
+        if not index.isValid() or not 0 <= index.row() < len(self._rows):
             return None
-        return self._tasks[index.row()]
+        return self._rows[index.row()]
+
+    def task_at(self, index: QModelIndex) -> Task | None:
+        entry = self.entry_at(index)
+        return entry if isinstance(entry, Task) else None
 
     def index_for_task(self, task_id: int) -> QModelIndex:
-        for row, task in enumerate(self._tasks):
-            if task.id == task_id:
+        for row, entry in enumerate(self._rows):
+            if isinstance(entry, Task) and entry.id == task_id:
                 return self.index(row, 0)
         return QModelIndex()
+
+    def index_for_group(self, group: TaskGroup) -> QModelIndex:
+        for row, entry in enumerate(self._rows):
+            if isinstance(entry, GroupHeader) and entry.group is group:
+                return self.index(row, 0)
+        return QModelIndex()
+
+    @property
+    def loaded_task_count(self) -> int:
+        if not self._grouped:
+            return len(self._flat_items)
+        return sum(len(state.items) for state in self._groups.values())
+
+    @property
+    def total_task_count(self) -> int:
+        if not self._grouped:
+            return self._flat_total
+        return sum(state.total for state in self._groups.values())
+
+    def _rebuild_group_rows(self) -> None:
+        rows: list[Task | GroupHeader | LoadMoreRow] = []
+        for group in TaskGroup:
+            state = self._groups[group]
+            rows.append(
+                GroupHeader(
+                    group=group,
+                    label=self.GROUP_LABELS[group],
+                    total=state.total,
+                    collapsed=state.collapsed,
+                )
+            )
+            if state.collapsed:
+                continue
+            rows.extend(state.items)
+            remaining = state.total - len(state.items)
+            if remaining > 0:
+                rows.append(LoadMoreRow(group=group, remaining=remaining))
+        self._rows = rows
 
 
 class TaskItemDelegate(QStyledItemDelegate):
@@ -80,17 +259,65 @@ class TaskItemDelegate(QStyledItemDelegate):
         TaskStatus.ARCHIVED: "보관",
     }
 
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._compact = False
+
+    def set_compact(self, compact: bool) -> None:
+        self._compact = compact
+
     def paint(
         self,
         painter: QPainter,
         option: QStyleOptionViewItem,
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
-        task = index.data(TaskListModel.TASK_ROLE)
-        if not isinstance(task, Task):
+        entry = index.data(TaskListModel.ENTRY_ROLE)
+        if isinstance(entry, GroupHeader):
+            self._paint_group_header(painter, option, entry)
+            return
+        if isinstance(entry, LoadMoreRow):
+            self._paint_load_more(painter, option, entry)
+            return
+        if not isinstance(entry, Task):
             super().paint(painter, option, index)
             return
+        self._paint_task(painter, option, entry)
 
+    def _paint_group_header(
+        self, painter: QPainter, option: QStyleOptionViewItem, header: GroupHeader
+    ) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(option.rect.adjusted(4, 3, -4, -3))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#EEF3FA"))
+        painter.drawRoundedRect(rect, 8, 8)
+        font = QFont(option.font)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#27344A"))
+        chevron = "▶" if header.collapsed else "▼"
+        painter.drawText(
+            rect.adjusted(12, 0, -12, 0),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            f"{chevron}  {header.label}  {header.total}",
+        )
+        painter.restore()
+
+    def _paint_load_more(
+        self, painter: QPainter, option: QStyleOptionViewItem, row: LoadMoreRow
+    ) -> None:
+        painter.save()
+        painter.setPen(QColor("#2F6FED"))
+        painter.drawText(
+            option.rect,
+            Qt.AlignmentFlag.AlignCenter,
+            f"{row.remaining}개 더 보기",
+        )
+        painter.restore()
+
+    def _paint_task(self, painter: QPainter, option: QStyleOptionViewItem, task: Task) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(option.rect.adjusted(4, 3, -4, -3))
@@ -106,11 +333,12 @@ class TaskItemDelegate(QStyledItemDelegate):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(marker)
         painter.drawRoundedRect(
-            QRectF(rect.left() + 10, rect.top() + 13, 5, rect.height() - 26), 2, 2
+            QRectF(rect.left() + 10, rect.top() + 10, 5, rect.height() - 20), 2, 2
         )
 
         text_left = int(rect.left() + 27)
-        title_rect = option.rect.adjusted(text_left - option.rect.left(), 10, -92, -31)
+        title_bottom = -8 if self._compact else -31
+        title_rect = option.rect.adjusted(text_left - option.rect.left(), 8, -92, title_bottom)
         title_font = QFont(option.font)
         title_font.setBold(True)
         painter.setFont(title_font)
@@ -123,18 +351,20 @@ class TaskItemDelegate(QStyledItemDelegate):
             ),
         )
 
-        meta_rect = option.rect.adjusted(text_left - option.rect.left(), 34, -18, -8)
-        meta_font = QFont(option.font)
-        meta_font.setPointSize(max(8, option.font.pointSize() - 1))
-        painter.setFont(meta_font)
-        painter.setPen(QColor("#68738A"))
-        painter.drawText(
-            meta_rect,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            format_task_schedule(task),
-        )
+        if not self._compact:
+            meta_rect = option.rect.adjusted(text_left - option.rect.left(), 34, -18, -8)
+            meta_font = QFont(option.font)
+            meta_font.setPointSize(max(8, option.font.pointSize() - 1))
+            painter.setFont(meta_font)
+            painter.setPen(QColor("#68738A"))
+            painter.drawText(
+                meta_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                format_task_schedule(task),
+            )
 
-        status_rect = QRectF(rect.right() - 72, rect.top() + 12, 60, 24)
+        status_top = rect.top() + (7 if self._compact else 12)
+        status_rect = QRectF(rect.right() - 72, status_top, 60, 24)
         painter.setBrush(QColor("#EEF2F7"))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(status_rect, 12, 12)
@@ -145,7 +375,12 @@ class TaskItemDelegate(QStyledItemDelegate):
     def sizeHint(
         self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
     ) -> QSize:
-        return QSize(option.rect.width(), 70)
+        entry = index.data(TaskListModel.ENTRY_ROLE)
+        if isinstance(entry, GroupHeader):
+            return QSize(option.rect.width(), 42)
+        if isinstance(entry, LoadMoreRow):
+            return QSize(option.rect.width(), 38)
+        return QSize(option.rect.width(), 48 if self._compact else 70)
 
 
 def format_task_schedule(task: Task) -> str:

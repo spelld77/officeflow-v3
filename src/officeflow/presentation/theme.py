@@ -100,6 +100,12 @@ QPushButton {
 QPushButton:hover {
     background: #E8EDF5;
 }
+QPushButton:checked {
+    color: #245CCC;
+    background: #E3ECFF;
+    border-color: #AFC5F5;
+    font-weight: 600;
+}
 QPushButton:disabled {
     color: #9AA5B7;
     background: #F7F8FA;
@@ -127,6 +133,20 @@ QFrame[summary="true"] {
 QLabel[count="true"] {
     font-size: 20px;
     font-weight: 700;
+}
+QPushButton[summaryJump="true"] {
+    color: #68738A;
+    background: transparent;
+    border: none;
+    padding: 1px 0;
+    text-align: left;
+}
+QPushButton[summaryJump="true"]:hover {
+    color: #2F6FED;
+    background: transparent;
+}
+#filterBar QComboBox {
+    padding: 6px 8px;
 }
 QListView#taskList {
     background: #FFFFFF;

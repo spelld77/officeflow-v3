@@ -6,8 +6,8 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 ## 현재 상태
 
-- 단계: Phase 3A 완료, Phase 3B 준비
-- 구현 상태: 업무 CRUD, 하루·기간 일정 입력, 대량 업무 조회 기반이 연결된 데스크톱 앱
+- 단계: Phase 3 완료, Phase 4 준비
+- 구현 상태: 업무 CRUD, 기간 일정 입력, 대량 업무 그룹·필터·지연 로딩이 연결된 데스크톱 앱
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
 - 데이터 저장소: SQLite
@@ -36,6 +36,7 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [Phase 1 완료 보고서](docs/phase-reports/phase-1.md)
 - [Phase 2 완료 보고서](docs/phase-reports/phase-2.md)
 - [Phase 3A 완료 보고서](docs/phase-reports/phase-3a.md)
+- [Phase 3 완료 보고서](docs/phase-reports/phase-3.md)
 
 ## 범위 기준
 

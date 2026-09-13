@@ -94,6 +94,7 @@ def test_repository_queries_groups_filters_and_pages(tmp_path: Path) -> None:
             starts_at=now - timedelta(hours=2),
             ends_at=now - timedelta(hours=1),
         ),
+        TaskDraft(title="현재 시점 업무", starts_at=now),
     )
     for task in tasks:
         service.create(task, now=now)
@@ -114,6 +115,6 @@ def test_repository_queries_groups_filters_and_pages(tmp_path: Path) -> None:
     assert [task.title for task in page.items] == ["현재 긴급 업무"]
     assert groups[TaskGroup.OVERDUE].total == 1
     assert groups[TaskGroup.IN_PROGRESS].total == 1
-    assert groups[TaskGroup.UPCOMING].total == 1
+    assert groups[TaskGroup.UPCOMING].total == 2
     assert groups[TaskGroup.COMPLETED].total == 1
     engine.dispose()

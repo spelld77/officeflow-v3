@@ -7,7 +7,12 @@ from officeflow.infrastructure.settings.store import AppSettings, JsonSettingsSt
 
 def test_settings_round_trip(tmp_path: Path) -> None:
     store = JsonSettingsStore(tmp_path / "settings.json")
-    expected = AppSettings(theme="dark", compact_list=True)
+    expected = AppSettings(
+        theme="dark",
+        compact_list=True,
+        collapsed_today_groups=("overdue", "completed"),
+        view_preferences={"all": {"status": "active", "pinned_only": True}},
+    )
 
     store.save(expected)
 

@@ -87,6 +87,7 @@ class TaskDraft:
 class TaskSummary:
     overdue: int
     in_progress: int
+    upcoming: int
     today: int
     completed_today: int
 
@@ -231,6 +232,7 @@ class TaskService:
         return TaskSummary(
             overdue=groups[TaskGroup.OVERDUE].total,
             in_progress=groups[TaskGroup.IN_PROGRESS].total,
+            upcoming=groups[TaskGroup.UPCOMING].total,
             today=today.total,
             completed_today=groups[TaskGroup.COMPLETED].total,
         )
