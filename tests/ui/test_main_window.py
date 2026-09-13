@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
@@ -202,3 +203,79 @@ def test_view_preferences_and_compact_mode_are_saved(
 
     assert saved[-1].compact_list is True
     assert saved[-1].view_preferences[TaskView.ALL.value]["status"] == "active"
+
+
+def test_calendar_navigation_loads_scheduled_tasks_and_day_list(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    zone = ZoneInfo("Asia/Seoul")
+    today = datetime.now(zone).date()
+    start = datetime.combine(today, time.min, tzinfo=zone).astimezone(UTC)
+    task_service.create(
+        TaskDraft(
+            title="캘린더 연결 확인",
+            all_day=True,
+            starts_at=start,
+            ends_at=start + timedelta(days=2),
+        )
+    )
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.show()
+
+    window._calendar_button.click()
+
+    assert window._calendar_active is True
+    assert window._content_stack.currentWidget() is window._calendar_page
+    assert window._calendar_page.day_list.count() == 1
+    assert "캘린더 연결 확인" in window._calendar_page.day_list.item(0).text()
+
+
+def test_calendar_stays_usable_at_minimum_window_size(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.resize(760, 560)
+    window.show()
+    window._show_calendar()
+    qtbot.wait(10)
+
+    assert window._calendar_page.isVisible()
+    assert window._calendar_page.calendar.width() >= 460
+    assert window._calendar_page.day_list.isVisible()
+    assert window._calendar_page.edit_button.text() == "수정"
+    assert (
+        window._calendar_page.calendar.geometry().bottom()
+        < window._calendar_page.day_list.geometry().top()
+    )
+
+
+def test_calendar_overflow_opens_complete_day_list(qtbot: QtBot, task_service: TaskService) -> None:
+    zone = ZoneInfo("Asia/Seoul")
+    today = datetime.now(zone).date()
+    start = datetime.combine(today, time.min, tzinfo=zone).astimezone(UTC)
+    for index in range(6):
+        task_service.create(
+            TaskDraft(
+                title=f"겹친 일정 {index}",
+                all_day=True,
+                starts_at=start,
+                ends_at=start + timedelta(days=1),
+            )
+        )
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.show()
+    window._show_calendar()
+    qtbot.wait(10)
+    window._calendar_page.calendar.grab()
+    overflow = next(rect for rect, day in window._calendar_page.calendar._more_hits if day == today)
+
+    qtbot.mouseClick(
+        window._calendar_page.calendar,
+        Qt.MouseButton.LeftButton,
+        pos=overflow.center().toPoint(),
+    )
+
+    assert window._calendar_page.day_list.count() == 6

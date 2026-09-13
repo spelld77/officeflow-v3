@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 from time import perf_counter
 
@@ -39,4 +40,20 @@ def test_five_thousand_task_window_loads_bounded_first_page(qtbot: QtBot, tmp_pa
     assert elapsed_ms < 500
     assert window._task_model.loaded_task_count <= 200
     assert window._task_model.total_task_count > window._task_model.loaded_task_count
+    engine.dispose()
+
+
+def test_five_thousand_task_calendar_range_meets_budget(tmp_path: Path) -> None:
+    database_file = tmp_path / "calendar-benchmark.db"
+    generate(database_file, 5_000)
+    engine = create_database_engine(database_file)
+    service = TaskService(SqlAlchemyTaskRepository(SessionFactory(engine)))
+    start = date.today() - timedelta(days=14)
+
+    started = perf_counter()
+    tasks = service.calendar_range(start, start + timedelta(days=42))
+    elapsed_ms = (perf_counter() - started) * 1_000
+
+    assert len(tasks) > 0
+    assert elapsed_ms < 200
     engine.dispose()

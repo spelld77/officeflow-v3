@@ -30,7 +30,12 @@ from officeflow.domain.task import Task, TaskValidationError
 
 class TaskEditorDialog(QDialog):
     def __init__(
-        self, *, timezone: str, task: Task | None = None, parent: QWidget | None = None
+        self,
+        *,
+        timezone: str,
+        task: Task | None = None,
+        initial_date: date | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._timezone = timezone
@@ -160,6 +165,10 @@ class TaskEditorDialog(QDialog):
         else:
             self.schedule_combo.setCurrentIndex(1)
             self.all_day_check.setChecked(True)
+            if initial_date is not None:
+                selected = QDate(initial_date.year, initial_date.month, initial_date.day)
+                self.start_date_edit.setDate(selected)
+                self.end_date_edit.setDate(selected)
         self._update_schedule_visibility()
         self._configure_tab_order()
         self.title_edit.setFocus()

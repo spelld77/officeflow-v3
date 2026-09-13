@@ -74,6 +74,42 @@ class SqlAlchemyTaskRepository:
             items = tuple(self._to_domain(record) for record in session.scalars(statement).all())
         return TaskPage(items=items, total=total, offset=query.offset, limit=query.limit)
 
+    def list_overlapping(
+        self,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        search: str = "",
+    ) -> tuple[Task, ...]:
+        if ends_at <= starts_at:
+            raise ValueError("캘린더 조회 종료 시각은 시작 시각보다 늦어야 합니다.")
+        predicates: list[Any] = [
+            TaskRecord.deleted_at.is_(None),
+            TaskRecord.status != TaskStatus.ARCHIVED.value,
+            TaskRecord.starts_at.is_not(None),
+            TaskRecord.starts_at < ends_at,
+            or_(
+                TaskRecord.ends_at > starts_at,
+                and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at >= starts_at),
+            ),
+        ]
+        normalized = search.strip()
+        if normalized:
+            escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            predicates.append(
+                TaskRecord.title.ilike(pattern, escape="\\")
+                | TaskRecord.description.ilike(pattern, escape="\\")
+            )
+        statement = select(TaskRecord).where(*predicates).order_by(
+            TaskRecord.is_pinned.desc(),
+            TaskRecord.starts_at.asc(),
+            TaskRecord.ends_at.asc(),
+            TaskRecord.id.asc(),
+        )
+        with self._sessions.transaction() as session:
+            return tuple(self._to_domain(record) for record in session.scalars(statement).all())
+
     @classmethod
     def _predicates(
         cls,

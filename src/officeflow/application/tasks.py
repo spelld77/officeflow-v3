@@ -108,6 +108,14 @@ class TaskRepository(Protocol):
         day_end: datetime,
     ) -> TaskPage: ...
 
+    def list_overlapping(
+        self,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        search: str = "",
+    ) -> tuple[Task, ...]: ...
+
 
 class TaskService:
     def __init__(self, repository: TaskRepository, *, timezone: str = "Asia/Seoul") -> None:
@@ -197,6 +205,21 @@ class TaskService:
     def list(self, view: TaskView, *, search: str = "", now: datetime | None = None) -> list[Task]:
         page = self.query(TaskQuery(view=view, search=search, limit=None), now=now)
         return list(page.items)
+
+    def calendar_range(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        search: str = "",
+    ) -> tuple[Task, ...]:
+        """Return scheduled tasks overlapping [start_date, end_date) in app time."""
+        if end_date <= start_date:
+            raise ValueError("캘린더 종료일은 시작일보다 늦어야 합니다.")
+        zone = ZoneInfo(self._timezone)
+        starts_at = datetime.combine(start_date, time.min, tzinfo=zone).astimezone(UTC)
+        ends_at = datetime.combine(end_date, time.min, tzinfo=zone).astimezone(UTC)
+        return self._repository.list_overlapping(starts_at, ends_at, search=search)
 
     def today_groups(
         self,

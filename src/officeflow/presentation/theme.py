@@ -51,7 +51,7 @@ QPushButton[nav="true"][compact="true"] {
     text-align: center;
     padding: 10px 4px;
 }
-#topBar, #detailPanel, #contentCard {
+#topBar, #detailPanel, #contentCard, #calendarCard {
     background: #FFFFFF;
     border: 1px solid #E1E6EF;
     border-radius: 12px;
@@ -59,6 +59,43 @@ QPushButton[nav="true"][compact="true"] {
 #pageTitle {
     font-size: 24px;
     font-weight: 700;
+}
+#calendarMonthTitle {
+    font-size: 20px;
+    font-weight: 700;
+    min-width: 120px;
+    qproperty-alignment: AlignCenter;
+}
+#calendarDayTitle {
+    font-size: 16px;
+    font-weight: 700;
+}
+#calendarPrevious, #calendarNext {
+    min-width: 34px;
+    max-width: 34px;
+    font-size: 20px;
+    padding: 5px;
+}
+QPushButton[calendarPrimary="true"] {
+    color: #245CCC;
+    background: #E3ECFF;
+    border-color: #AFC5F5;
+    font-weight: 600;
+}
+QListWidget#calendarDayList {
+    background: #F8FAFD;
+    border: 1px solid #E1E6EF;
+    border-radius: 8px;
+    outline: none;
+    padding: 3px;
+}
+QListWidget#calendarDayList::item {
+    border-radius: 5px;
+    padding: 6px 8px;
+}
+QListWidget#calendarDayList::item:selected {
+    color: #172033;
+    background: #DFE9FF;
 }
 #mutedText {
     color: #68738A;

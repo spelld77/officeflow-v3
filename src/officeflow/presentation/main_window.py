@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import date
 from itertools import pairwise
 from typing import ClassVar
 
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +39,7 @@ from officeflow.application.tasks import (
 from officeflow.domain.enums import TaskPriority, TaskStatus
 from officeflow.domain.task import Task, TaskValidationError
 from officeflow.infrastructure.settings.store import AppSettings
+from officeflow.presentation.month_calendar import CalendarPage
 from officeflow.presentation.task_editor import TaskEditorDialog
 from officeflow.presentation.task_list import (
     GroupHeader,
@@ -79,6 +82,7 @@ class MainWindow(QMainWindow):
         self._on_shutdown = on_shutdown
         self._shutdown_done = False
         self._current_view = TaskView.TODAY
+        self._calendar_active = False
         self._selected_task_id: int | None = None
         self._compact_navigation = False
         self._compact_summaries = False
@@ -160,14 +164,18 @@ class MainWindow(QMainWindow):
             )
 
         self._sidebar_layout.addSpacing(16)
-        for label in ("캘린더", "업무일지", "설정"):
+        self._calendar_button = self._create_nav_button("캘린더")
+        self._calendar_button.clicked.connect(self._show_calendar)
+        self._calendar_button.setToolTip("월간 일정 보기")
+        self._sidebar_layout.addWidget(self._calendar_button)
+        for label in ("업무일지", "설정"):
             button = self._create_nav_button(label)
             button.setEnabled(False)
             button.setToolTip("후속 단계에서 연결됩니다.")
             self._sidebar_layout.addWidget(button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 3", "brandCaption")
+        self._version_label = self._named_label("v3.0 · Phase 4", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -180,7 +188,17 @@ class MainWindow(QMainWindow):
 
         self._body_layout = QHBoxLayout()
         self._body_layout.setSpacing(16)
-        self._body_layout.addWidget(self._build_content(), 3)
+        self._content_stack = QStackedWidget()
+        self._content_stack.setObjectName("workspaceStack")
+        self._task_content = self._build_content()
+        self._calendar_page = CalendarPage(timezone=self._settings.timezone)
+        self._calendar_page.monthChanged.connect(self._refresh_calendar)
+        self._calendar_page.taskSelected.connect(self._on_calendar_task_selected)
+        self._calendar_page.taskActivated.connect(self._open_calendar_task)
+        self._calendar_page.createRequested.connect(self._open_calendar_new)
+        self._content_stack.addWidget(self._task_content)
+        self._content_stack.addWidget(self._calendar_page)
+        self._body_layout.addWidget(self._content_stack, 3)
         self._detail_panel = self._build_detail()
         self._body_layout.addWidget(self._detail_panel, 2)
         self._workspace_layout.addLayout(self._body_layout, 1)
@@ -464,7 +482,9 @@ class MainWindow(QMainWindow):
 
     def _set_view(self, view: TaskView) -> None:
         self._remember_view_preferences()
+        self._calendar_active = False
         self._current_view = view
+        self._content_stack.setCurrentWidget(self._task_content)
         self._restore_view_preferences(view)
         title, caption = self.VIEW_LABELS[view]
         self._page_title.setText(title)
@@ -473,10 +493,27 @@ class MainWindow(QMainWindow):
             button.setProperty("selected", button_view is view)
             button.style().unpolish(button)
             button.style().polish(button)
+        self._set_nav_selected(self._calendar_button, False)
         self._selected_task_id = None
+        self._apply_responsive_layout()
         self._refresh_tasks()
 
+    def _show_calendar(self) -> None:
+        self._remember_view_preferences()
+        self._calendar_active = True
+        self._content_stack.setCurrentWidget(self._calendar_page)
+        for button in self._view_buttons.values():
+            self._set_nav_selected(button, False)
+        self._set_nav_selected(self._calendar_button, True)
+        self._selected_task_id = None
+        self._update_detail(None)
+        self._apply_responsive_layout()
+        self._refresh_calendar()
+
     def _refresh_tasks(self) -> None:
+        if self._calendar_active:
+            self._refresh_calendar()
+            return
         try:
             selected_id = self._selected_task_id
             if self._current_view is TaskView.TODAY:
@@ -524,6 +561,20 @@ class MainWindow(QMainWindow):
         except Exception as error:
             logger.exception("Failed to refresh tasks")
             self.statusBar().showMessage(f"업무를 불러오지 못했습니다: {error}", 5000)
+
+    def _refresh_calendar(self, _year: int | None = None, _month: int | None = None) -> None:
+        try:
+            start_date, end_date = self._calendar_page.visible_date_range
+            tasks = self._task_service.calendar_range(
+                start_date,
+                end_date,
+                search=self._search.text(),
+            )
+            self._calendar_page.set_tasks(tasks)
+            self.statusBar().showMessage(f"캘린더 일정 {len(tasks)}개", 1800)
+        except Exception as error:
+            logger.exception("Failed to refresh calendar")
+            self.statusBar().showMessage(f"캘린더를 불러오지 못했습니다: {error}", 5000)
 
     def _build_query(
         self,
@@ -678,7 +729,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("업무를 등록했습니다.", 2500)
 
     def _open_new_task(self) -> None:
-        self._open_editor(None)
+        initial_date = self._calendar_page.selected_date if self._calendar_active else None
+        self._open_editor(None, initial_date=initial_date)
 
     def _open_selected_task(self) -> None:
         if self._selected_task_id is None:
@@ -694,8 +746,13 @@ class MainWindow(QMainWindow):
             self._selected_task_id = task.id
             self._open_editor(task)
 
-    def _open_editor(self, task: Task | None) -> None:
-        editor = TaskEditorDialog(timezone=self._settings.timezone, task=task, parent=self)
+    def _open_editor(self, task: Task | None, *, initial_date: date | None = None) -> None:
+        editor = TaskEditorDialog(
+            timezone=self._settings.timezone,
+            task=task,
+            initial_date=initial_date,
+            parent=self,
+        )
         editor.setStyleSheet(LIGHT_STYLESHEET)
         if editor.exec() != TaskEditorDialog.DialogCode.Accepted:
             return
@@ -714,6 +771,18 @@ class MainWindow(QMainWindow):
         self._selected_task_id = saved.id
         self._refresh_tasks()
         self.statusBar().showMessage("업무를 저장했습니다.", 2500)
+
+    def _open_calendar_new(self, selected_date: date) -> None:
+        self._open_editor(None, initial_date=selected_date)
+
+    def _open_calendar_task(self, task: Task) -> None:
+        self._selected_task_id = task.id
+        self._open_editor(task)
+
+    def _on_calendar_task_selected(self, task: Task) -> None:
+        self._selected_task_id = task.id
+        self._update_detail(task)
+        self._apply_responsive_layout()
 
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         task = self._task_model.task_at(current)
@@ -785,8 +854,9 @@ class MainWindow(QMainWindow):
         self._detail_panel.setVisible(show_detail)
         self._body_layout.setSpacing(16 if show_detail else 0)
         self._open_selected_button.setVisible(
-            not show_detail and self._selected_task_id is not None
+            not self._calendar_active and not show_detail and self._selected_task_id is not None
         )
+        self._calendar_page.set_compact(compact_navigation)
 
         if compact_navigation:
             self._sidebar.setFixedWidth(88)
@@ -799,8 +869,8 @@ class MainWindow(QMainWindow):
             self._brand_caption.hide()
             self._page_caption.hide()
             self._version_label.setText("v3")
-            self._search.setPlaceholderText("업무 검색")
-            self._add_button.setText("+ 업무")
+            self._search.setPlaceholderText("일정 검색" if self._calendar_active else "업무 검색")
+            self._add_button.setText("+ 일정" if self._calendar_active else "+ 업무")
         else:
             self._sidebar.setFixedWidth(212 if show_detail else 180)
             self._sidebar_layout.setContentsMargins(18, 24, 18, 20)
@@ -812,9 +882,13 @@ class MainWindow(QMainWindow):
             self._brand_title.setText("OfficeFlow")
             self._brand_caption.show()
             self._page_caption.show()
-            self._version_label.setText("v3.0 · Phase 3")
-            self._search.setPlaceholderText("업무와 내용 검색  (Ctrl+K)")
-            self._add_button.setText("+ 새 업무")
+            self._version_label.setText("v3.0 · Phase 4")
+            self._search.setPlaceholderText(
+                "캘린더 일정 검색  (Ctrl+K)"
+                if self._calendar_active
+                else "업무와 내용 검색  (Ctrl+K)"
+            )
+            self._add_button.setText("+ 새 일정" if self._calendar_active else "+ 새 업무")
 
         if compact_navigation != self._compact_navigation:
             self._compact_navigation = compact_navigation
@@ -835,6 +909,12 @@ class MainWindow(QMainWindow):
         if compact_navigation != self._compact_summaries:
             self._arrange_summary_cards(compact=compact_navigation)
         self._result_count.setVisible(not compact_navigation)
+
+    @staticmethod
+    def _set_nav_selected(button: QPushButton, selected: bool) -> None:
+        button.setProperty("selected", selected)
+        button.style().unpolish(button)
+        button.style().polish(button)
 
     def _arrange_summary_cards(self, *, compact: bool) -> None:
         for frame in self._summary_frames:

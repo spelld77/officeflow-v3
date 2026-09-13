@@ -27,6 +27,14 @@ def test_editor_builds_inclusive_multiday_all_day_schedule(qtbot: QtBot) -> None
     assert (draft.ends_at - draft.starts_at).days == 4
 
 
+def test_editor_uses_calendar_date_for_new_schedule(qtbot: QtBot) -> None:
+    editor = TaskEditorDialog(timezone="Asia/Seoul", initial_date=date(2026, 10, 3))
+    qtbot.addWidget(editor)
+
+    assert editor.start_date_edit.date() == QDate(2026, 10, 3)
+    assert editor.end_date_edit.date() == QDate(2026, 10, 3)
+
+
 def test_tab_moves_through_title_and_multiline_description(qtbot: QtBot) -> None:
     editor = TaskEditorDialog(timezone="Asia/Seoul")
     qtbot.addWidget(editor)

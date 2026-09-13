@@ -69,6 +69,27 @@ class InMemoryTaskRepository(TaskRepository):
         end = None if query.limit is None else query.offset + query.limit
         return TaskPage(tuple(tasks[query.offset : end]), total, query.offset, query.limit)
 
+    def list_overlapping(
+        self,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        search: str = "",
+    ) -> tuple[Task, ...]:
+        normalized = search.strip().casefold()
+        return tuple(
+            task
+            for task in self.tasks.values()
+            if task.status is not TaskStatus.ARCHIVED
+            and task.starts_at is not None
+            and task.starts_at < ends_at
+            and (
+                (task.ends_at is not None and task.ends_at > starts_at)
+                or (task.ends_at is None and task.starts_at >= starts_at)
+            )
+            and (not normalized or normalized in f"{task.title}\n{task.description}".casefold())
+        )
+
     @staticmethod
     def _matches(
         task: Task,
@@ -212,6 +233,49 @@ def test_multiday_task_appears_on_every_overlapping_day() -> None:
         assert len(service.list(TaskView.TODAY, now=local_now)) == 1
 
     assert service.list(TaskView.TODAY, now=datetime(2026, 9, 18, 3, 0, tzinfo=UTC)) == []
+
+
+def test_calendar_range_includes_every_overlap_and_excludes_archived() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository, timezone="Asia/Seoul")
+    crossing = service.create(
+        TaskDraft(
+            title="월 경계 출장",
+            all_day=True,
+            starts_at=datetime(2026, 8, 30, 15, 0, tzinfo=UTC),
+            ends_at=datetime(2026, 9, 2, 15, 0, tzinfo=UTC),
+        ),
+        now=NOW,
+    )
+    point = service.create(
+        TaskDraft(title="9월 회의", starts_at=datetime(2026, 9, 15, 1, 0, tzinfo=UTC)),
+        now=NOW,
+    )
+    archived = service.create(
+        TaskDraft(title="보관 일정", starts_at=datetime(2026, 9, 16, 1, 0, tzinfo=UTC)),
+        now=NOW,
+    )
+    assert archived.id is not None
+    service.transition(archived.id, TaskStatus.ARCHIVED, now=NOW)
+
+    tasks = service.calendar_range(date(2026, 9, 1), date(2026, 10, 1))
+
+    assert {task.id for task in tasks} == {crossing.id, point.id}
+    assert [
+        task.id
+        for task in service.calendar_range(date(2026, 9, 1), date(2026, 10, 1), search="회의")
+    ] == [point.id]
+
+
+def test_calendar_range_rejects_empty_or_reversed_range() -> None:
+    service = TaskService(InMemoryTaskRepository())
+
+    try:
+        service.calendar_range(date(2026, 9, 1), date(2026, 9, 1))
+    except ValueError as error:
+        assert "종료일" in str(error)
+    else:
+        raise AssertionError("empty calendar ranges must be rejected")
 
 
 def test_views_and_search_filter_tasks() -> None:
