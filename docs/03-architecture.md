@@ -127,12 +127,16 @@ SQLite 저장소가 필터·정렬·개수 계산을 수행한다. 5,000건 기�
 
 ## 7. 단일 실행과 알림
 
-- 고정 TCP 포트 대신 `QLocalServer` 기반 단일 실행 잠금을 사용한다.
+- 고정 TCP 포트 대신 `QLockFile`로 실행 소유권을 결정하고 `QLocalServer`로 기존 창에
+  활성화·빠른 등록 메시지를 전달한다.
 - 두 번째 실행 요청은 기존 창을 앞으로 가져오는 메시지를 보낸다.
 - 알림 식별자는 `task_id + occurrence_start + reminder_id`로 구성해 중복을 방지한다.
 - 앱 중단 중 발생한 알림은 설정된 유예 시간 안의 것만 한 번 복구한다.
 - 실제 발송 이력은 고유한 `fire_key`로 영구 저장하며 다시 알림은 같은 이력의 상태와
   `snoozed_until`만 변경한다.
+- Windows 전역 단축키는 `RegisterHotKey`/`UnregisterHotKey` 수명 주기를 앱과 함께 관리한다.
+- 시작 시 실행은 현재 사용자 `Run` 레지스트리의 `OfficeFlow v3` 값만 변경하며 기존
+  OfficeFlow 버전의 항목은 건드리지 않는다.
 
 ## 8. 오류 처리와 로그
 

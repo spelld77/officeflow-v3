@@ -8,7 +8,7 @@ from itertools import pairwise
 from typing import ClassVar
 
 from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QKeySequence, QResizeEvent, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -20,15 +20,17 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListView,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
-from officeflow.application.reminders import ReminderService
+from officeflow.application.reminders import ReminderAlert, ReminderService
 from officeflow.application.tasks import (
     ScheduledTask,
     TaskGroup,
@@ -42,8 +44,12 @@ from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPrio
 from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
 from officeflow.infrastructure.settings.store import AppSettings
+from officeflow.infrastructure.windows.hotkey import WindowsGlobalHotkey
+from officeflow.infrastructure.windows.startup import WindowsStartupManager
+from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.month_calendar import CalendarPage
 from officeflow.presentation.reminder_dialog import ReminderDialog
+from officeflow.presentation.settings_dialog import SettingsDialog
 from officeflow.presentation.task_editor import TaskEditorDialog
 from officeflow.presentation.task_list import (
     GroupHeader,
@@ -72,6 +78,10 @@ class MainWindow(QMainWindow):
         TaskView.ALL: ("전체 업무", "일정이 없는 업무를 포함한 전체 목록입니다."),
     }
 
+    @property
+    def tray_available(self) -> bool:
+        return self._tray_icon is not None and self._tray_icon.isVisible()
+
     def __init__(
         self,
         settings: AppSettings,
@@ -79,6 +89,8 @@ class MainWindow(QMainWindow):
         reminder_service: ReminderService | None = None,
         save_settings: Callable[[AppSettings], None] | None = None,
         on_shutdown: Callable[[], None] | None = None,
+        desktop_integration: bool = False,
+        startup_manager: WindowsStartupManager | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -87,6 +99,12 @@ class MainWindow(QMainWindow):
         self._save_settings = save_settings
         self._on_shutdown = on_shutdown
         self._shutdown_done = False
+        self._force_quit = False
+        self._desktop_integration = desktop_integration
+        self._startup_manager = startup_manager or WindowsStartupManager()
+        self._tray_icon: QSystemTrayIcon | None = None
+        self._global_hotkey: WindowsGlobalHotkey | None = None
+        self._tray_hint_shown = False
         self._current_view = TaskView.TODAY
         self._calendar_active = False
         self._selected_task_id: int | None = None
@@ -109,6 +127,7 @@ class MainWindow(QMainWindow):
         self._reminder_dialog: ReminderDialog | None = None
 
         self.setWindowTitle("OfficeFlow v3")
+        self.setWindowIcon(create_app_icon())
         self.resize(settings.window_width, settings.window_height)
         self.setMinimumSize(self.MINIMUM_WIDTH, self.MINIMUM_HEIGHT)
         self.setStyleSheet(LIGHT_STYLESHEET)
@@ -148,6 +167,8 @@ class MainWindow(QMainWindow):
         if self._reminder_service is not None:
             self._reminder_timer.start()
             QTimer.singleShot(0, self._check_reminders)
+        if self._desktop_integration:
+            self._setup_desktop_integration()
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
@@ -182,14 +203,17 @@ class MainWindow(QMainWindow):
         self._calendar_button.clicked.connect(self._show_calendar)
         self._calendar_button.setToolTip("월간 일정 보기")
         self._sidebar_layout.addWidget(self._calendar_button)
-        for label in ("업무일지", "설정"):
-            button = self._create_nav_button(label)
-            button.setEnabled(False)
-            button.setToolTip("후속 단계에서 연결됩니다.")
-            self._sidebar_layout.addWidget(button)
+        work_log_button = self._create_nav_button("업무일지")
+        work_log_button.setEnabled(False)
+        work_log_button.setToolTip("후속 단계에서 연결됩니다.")
+        self._sidebar_layout.addWidget(work_log_button)
+        self._settings_button = self._create_nav_button("설정")
+        self._settings_button.setToolTip("실행, 트레이와 알림 설정")
+        self._settings_button.clicked.connect(self._open_settings)
+        self._sidebar_layout.addWidget(self._settings_button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 5B", "brandCaption")
+        self._version_label = self._named_label("v3.0 · Phase 5C", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -748,6 +772,39 @@ class MainWindow(QMainWindow):
         initial_date = self._calendar_page.selected_date if self._calendar_active else None
         self._open_editor(None, initial_date=initial_date)
 
+    def _open_settings(self) -> None:
+        dialog = SettingsDialog(self._settings, self)
+        dialog.setStyleSheet(LIGHT_STYLESHEET)
+        if dialog.exec() != SettingsDialog.DialogCode.Accepted:
+            return
+        previous = self._settings
+        updated = dialog.settings()
+        try:
+            self._startup_manager.set_enabled(updated.start_with_windows)
+        except OSError as error:
+            self._show_error("Windows 시작 프로그램 설정을 변경하지 못했습니다.", error)
+            updated = replace(
+                updated,
+                start_with_windows=self._settings.start_with_windows,
+            )
+        self._settings = updated
+        self._sync_quit_policy()
+        shortcut_registered = self._register_global_hotkey()
+        if self._desktop_integration and not shortcut_registered:
+            self._settings = replace(
+                self._settings,
+                global_quick_add_shortcut=previous.global_quick_add_shortcut,
+            )
+            self._register_global_hotkey()
+        if self._save_settings is not None:
+            self._save_settings(self._settings)
+        if shortcut_registered or not self._desktop_integration:
+            self.statusBar().showMessage("설정을 적용했습니다.", 3000)
+        else:
+            self.statusBar().showMessage(
+                "설정은 저장했지만 전역 단축키를 등록하지 못했습니다.", 5000
+            )
+
     def _open_selected_task(self) -> None:
         if self._selected_task_id is None:
             return
@@ -931,9 +988,13 @@ class MainWindow(QMainWindow):
             return
         if not alerts:
             return
-        if self._reminder_dialog is not None and self._reminder_dialog.isVisible():
+        self._show_system_reminder(alerts)
+        if self._reminder_dialog is not None:
             self._reminder_dialog.add_alerts(alerts)
-            self._reminder_dialog.raise_()
+            if self.isVisible() and not self.isMinimized():
+                self._reminder_dialog.show()
+                self._reminder_dialog.raise_()
+                self._reminder_dialog.activateWindow()
             return
         self._reminder_dialog = ReminderDialog(
             alerts,
@@ -943,9 +1004,27 @@ class MainWindow(QMainWindow):
         self._reminder_dialog.setStyleSheet(LIGHT_STYLESHEET)
         self._reminder_dialog.actionRequested.connect(self._handle_reminder_action)
         self._reminder_dialog.finished.connect(lambda _result: self._clear_reminder_dialog())
-        self._reminder_dialog.show()
-        self._reminder_dialog.raise_()
-        self._reminder_dialog.activateWindow()
+        if self.isVisible() and not self.isMinimized():
+            self._reminder_dialog.show()
+            self._reminder_dialog.raise_()
+            self._reminder_dialog.activateWindow()
+
+    def _show_system_reminder(self, alerts: tuple[ReminderAlert, ...]) -> None:
+        if self._tray_icon is None or not self._tray_icon.isVisible():
+            return
+        if len(alerts) == 1:
+            alert = alerts[0]
+            title = "OfficeFlow 업무 알림"
+            body = alert.task.title
+        else:
+            title = f"OfficeFlow 알림 {len(alerts)}개"
+            body = "놓친 알림과 예정된 업무를 한 번에 확인하세요."
+        self._tray_icon.showMessage(
+            title,
+            body,
+            QSystemTrayIcon.MessageIcon.Information,
+            8_000,
+        )
 
     def _handle_reminder_action(self, delivery_id: int, action: str) -> None:
         if self._reminder_service is None:
@@ -976,6 +1055,117 @@ class MainWindow(QMainWindow):
 
     def _clear_reminder_dialog(self) -> None:
         self._reminder_dialog = None
+
+    def _setup_desktop_integration(self) -> None:
+        application = QApplication.instance()
+        if application is None:
+            return
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            tray = QSystemTrayIcon(self.windowIcon(), self)
+            tray.setToolTip("OfficeFlow v3")
+            menu = QMenu(self)
+            open_action = QAction("OfficeFlow 열기", menu)
+            open_action.triggered.connect(self._show_from_tray)
+            quick_add_action = QAction("빠른 업무 등록", menu)
+            quick_add_action.triggered.connect(self._show_global_quick_add)
+            quit_action = QAction("완전히 종료", menu)
+            quit_action.triggered.connect(self._quit_application)
+            menu.addAction(open_action)
+            menu.addAction(quick_add_action)
+            menu.addSeparator()
+            menu.addAction(quit_action)
+            tray.setContextMenu(menu)
+            tray.activated.connect(self._on_tray_activated)
+            tray.messageClicked.connect(self._show_from_tray)
+            tray.show()
+            self._tray_icon = tray
+            self._sync_quit_policy()
+        try:
+            self._startup_manager.set_enabled(self._settings.start_with_windows)
+        except OSError:
+            logger.exception("Windows 시작 프로그램 설정을 동기화하지 못했습니다.")
+        if not self._register_global_hotkey():
+            self.statusBar().showMessage(
+                "전역 빠른 등록 단축키를 등록하지 못했습니다. 설정에서 변경하세요.",
+                6000,
+            )
+
+    def _register_global_hotkey(self) -> bool:
+        if self._global_hotkey is not None:
+            self._global_hotkey.stop()
+            self._global_hotkey = None
+        if not self._desktop_integration:
+            return False
+        application = QApplication.instance()
+        if application is None:
+            return False
+        try:
+            hotkey = WindowsGlobalHotkey(
+                application,
+                self._settings.global_quick_add_shortcut,
+                self._show_global_quick_add,
+            )
+            registered = hotkey.start()
+        except (OSError, ValueError):
+            logger.exception("전역 빠른 등록 단축키를 등록하지 못했습니다.")
+            return False
+        self._global_hotkey = hotkey
+        return registered
+
+    def _sync_quit_policy(self) -> None:
+        application = QApplication.instance()
+        if isinstance(application, QApplication):
+            keep_running = self.tray_available and self._settings.minimize_to_tray
+            application.setQuitOnLastWindowClosed(not keep_running)
+
+    def handle_external_command(self, command: str) -> None:
+        if command.strip().casefold() == "quick-add":
+            self._show_global_quick_add()
+        else:
+            self._show_from_tray()
+
+    def _show_from_tray(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        if self._reminder_dialog is not None:
+            self._reminder_dialog.show()
+            self._reminder_dialog.raise_()
+            self._reminder_dialog.activateWindow()
+
+    def _show_global_quick_add(self) -> None:
+        self._show_from_tray()
+        self._set_view(TaskView.ALL)
+        self._quick_add_edit.setFocus()
+        self._quick_add_edit.selectAll()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in {
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        }:
+            self._show_from_tray()
+
+    def _quit_application(self) -> None:
+        self._force_quit = True
+        self.close()
+        application = QApplication.instance()
+        if application is not None:
+            application.quit()
+
+    def shutdown(self) -> None:
+        self._persist_settings()
+        if self._global_hotkey is not None:
+            self._global_hotkey.stop()
+            self._global_hotkey = None
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+        if self._on_shutdown is not None and not self._shutdown_done:
+            self._shutdown_done = True
+            self._on_shutdown()
 
     @staticmethod
     def _format_reminder_rule(rule: ReminderRuleInput) -> str:
@@ -1040,7 +1230,7 @@ class MainWindow(QMainWindow):
             self._brand_title.setText("OfficeFlow")
             self._brand_caption.show()
             self._page_caption.show()
-            self._version_label.setText("v3.0 · Phase 5B")
+            self._version_label.setText("v3.0 · Phase 5C")
             self._search.setPlaceholderText(
                 "캘린더 일정 검색  (Ctrl+K)"
                 if self._calendar_active
@@ -1098,28 +1288,47 @@ class MainWindow(QMainWindow):
             self._apply_responsive_layout()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._save_settings is not None:
-            self._remember_view_preferences()
-            geometry = self.normalGeometry()
-            self._settings = replace(
-                self._settings,
-                window_width=max(self.MINIMUM_WIDTH, geometry.width()),
-                window_height=max(self.MINIMUM_HEIGHT, geometry.height()),
-                window_x=geometry.x(),
-                window_y=geometry.y(),
-                compact_list=self._compact_toggle.isChecked(),
-                collapsed_today_groups=tuple(
-                    group.value for group in TaskGroup if group in self._collapsed_groups
-                ),
-                view_preferences={
-                    view: dict(preferences) for view, preferences in self._view_preferences.items()
-                },
-            )
-            self._save_settings(self._settings)
-        if self._on_shutdown is not None and not self._shutdown_done:
-            self._shutdown_done = True
-            self._on_shutdown()
+        self._persist_settings()
+        if (
+            not self._force_quit
+            and self._settings.minimize_to_tray
+            and self._tray_icon is not None
+            and self._tray_icon.isVisible()
+        ):
+            self.hide()
+            event.ignore()
+            if not self._tray_hint_shown:
+                self._tray_icon.showMessage(
+                    "OfficeFlow가 계속 실행 중입니다.",
+                    "알림을 놓치지 않도록 시스템 트레이에서 실행됩니다.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5_000,
+                )
+                self._tray_hint_shown = True
+            return
+        self.shutdown()
         super().closeEvent(event)
+
+    def _persist_settings(self) -> None:
+        if self._save_settings is None:
+            return
+        self._remember_view_preferences()
+        geometry = self.normalGeometry()
+        self._settings = replace(
+            self._settings,
+            window_width=max(self.MINIMUM_WIDTH, geometry.width()),
+            window_height=max(self.MINIMUM_HEIGHT, geometry.height()),
+            window_x=geometry.x(),
+            window_y=geometry.y(),
+            compact_list=self._compact_toggle.isChecked(),
+            collapsed_today_groups=tuple(
+                group.value for group in TaskGroup if group in self._collapsed_groups
+            ),
+            view_preferences={
+                view: dict(preferences) for view, preferences in self._view_preferences.items()
+            },
+        )
+        self._save_settings(self._settings)
 
     @staticmethod
     def _named_label(text: str, object_name: str) -> QLabel:

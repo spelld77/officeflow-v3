@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt
@@ -28,6 +29,21 @@ from officeflow.presentation.main_window import MainWindow
 from officeflow.presentation.task_list import GroupHeader
 from tests.unit.test_reminder_service import InMemoryReminderRepository
 from tests.unit.test_task_service import InMemoryTaskRepository
+
+
+class FakeTrayIcon:
+    def __init__(self) -> None:
+        self.visible = True
+        self.messages: list[tuple[object, ...]] = []
+
+    def isVisible(self) -> bool:
+        return self.visible
+
+    def showMessage(self, *args: object) -> None:
+        self.messages.append(args)
+
+    def hide(self) -> None:
+        self.visible = False
 
 
 def test_main_window_has_phase_two_shell(qtbot: QtBot, task_service: TaskService) -> None:
@@ -100,6 +116,44 @@ def test_window_geometry_is_saved_on_close(qtbot: QtBot, task_service: TaskServi
     assert saved[-1].window_y is not None
 
 
+def test_close_hides_to_tray_until_explicit_quit(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    shutdowns: list[bool] = []
+    window = MainWindow(
+        AppSettings(minimize_to_tray=True),
+        task_service,
+        on_shutdown=lambda: shutdowns.append(True),
+    )
+    qtbot.addWidget(window)
+    tray = FakeTrayIcon()
+    window._tray_icon = cast(Any, tray)
+    window.show()
+
+    window.close()
+
+    assert window.isHidden()
+    assert shutdowns == []
+    assert tray.messages
+
+    window._force_quit = True
+    window.close()
+    assert shutdowns == [True]
+
+
+def test_external_quick_add_command_opens_all_view_input(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.handle_external_command("quick-add")
+
+    assert window._current_view is TaskView.ALL
+    assert window.focusWidget() is window._quick_add_edit
+
+
 def test_quick_add_creates_today_task(qtbot: QtBot, task_service: TaskService) -> None:
     window = MainWindow(AppSettings(), task_service)
     qtbot.addWidget(window)
@@ -158,6 +212,35 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
 
     delivery = next(iter(reminder_repository.deliveries.values()))
     assert delivery.status is ReminderDeliveryStatus.SNOOZED
+
+
+def test_hidden_app_keeps_alert_queued_until_tray_notification_is_opened(
+    qtbot: QtBot,
+) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    reminder_repository = InMemoryReminderRepository(task_repository)
+    reminder_service = ReminderService(reminder_repository, task_service)
+    now = datetime.now(UTC).replace(microsecond=0)
+    task = task_service.create(
+        TaskDraft(title="숨김 알림", starts_at=now - timedelta(minutes=1)),
+        now=now - timedelta(minutes=2),
+    )
+    assert task.id is not None
+    reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )
+    window = MainWindow(AppSettings(), task_service, reminder_service=reminder_service)
+    qtbot.addWidget(window)
+    tray = FakeTrayIcon()
+    window._tray_icon = cast(Any, tray)
+
+    window._check_reminders()
+
+    assert window._reminder_dialog is not None
+    assert window._reminder_dialog.isHidden()
+    assert tray.messages
 
 
 def test_today_view_has_collapsible_groups_and_summary_jump(

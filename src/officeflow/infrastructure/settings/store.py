@@ -21,10 +21,15 @@ class AppSettings:
     collapsed_today_groups: tuple[str, ...] = ("completed",)
     view_preferences: dict[str, dict[str, str | bool]] = field(default_factory=dict)
     missed_reminder_grace_minutes: int = 120
+    minimize_to_tray: bool = True
+    start_with_windows: bool = False
+    global_quick_add_shortcut: str = "Ctrl+Alt+O"
 
     def __post_init__(self) -> None:
         if not 1 <= self.missed_reminder_grace_minutes <= 43_200:
             raise ValueError("놓친 알림 복구 범위는 1분에서 30일 사이여야 합니다.")
+        if not self.global_quick_add_shortcut.strip():
+            raise ValueError("전역 빠른 등록 단축키가 비어 있습니다.")
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError as error:

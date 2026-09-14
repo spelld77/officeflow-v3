@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from pytestqt.qtbot import QtBot
+
+from officeflow.infrastructure.settings.store import AppSettings
+from officeflow.presentation.settings_dialog import SettingsDialog
+
+
+def test_settings_dialog_normalizes_desktop_options(qtbot: QtBot) -> None:
+    dialog = SettingsDialog(AppSettings())
+    qtbot.addWidget(dialog)
+    dialog.shortcut_edit.setText("control + shift + f8")
+    dialog.start_with_windows_check.setChecked(True)
+    dialog.minimize_to_tray_check.setChecked(False)
+    dialog.grace_minutes_spin.setValue(90)
+
+    dialog._validate_and_accept()
+    settings = dialog.settings()
+
+    assert settings.global_quick_add_shortcut == "Ctrl+Shift+F8"
+    assert settings.start_with_windows is True
+    assert settings.minimize_to_tray is False
+    assert settings.missed_reminder_grace_minutes == 90
+
+
+def test_settings_dialog_keeps_open_for_invalid_shortcut(qtbot: QtBot) -> None:
+    dialog = SettingsDialog(AppSettings())
+    qtbot.addWidget(dialog)
+    dialog.shortcut_edit.setText("O")
+
+    dialog._validate_and_accept()
+
+    assert dialog.error_label.isVisible() is False or dialog.error_label.text()
+    assert "보조 키" in dialog.error_label.text()
