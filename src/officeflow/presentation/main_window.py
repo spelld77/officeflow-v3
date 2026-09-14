@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from itertools import pairwise
 from typing import ClassVar
 
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.tasks import (
+    ScheduledTask,
     TaskGroup,
     TaskPage,
     TaskQuery,
@@ -36,7 +37,7 @@ from officeflow.application.tasks import (
     TaskSort,
     TaskView,
 )
-from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.domain.task import Task, TaskValidationError
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.presentation.month_calendar import CalendarPage
@@ -84,6 +85,7 @@ class MainWindow(QMainWindow):
         self._current_view = TaskView.TODAY
         self._calendar_active = False
         self._selected_task_id: int | None = None
+        self._selected_occurrence_start: datetime | None = None
         self._compact_navigation = False
         self._compact_summaries = False
         self._collapsed_groups = {
@@ -175,7 +177,7 @@ class MainWindow(QMainWindow):
             self._sidebar_layout.addWidget(button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 4", "brandCaption")
+        self._version_label = self._named_label("v3.0 · Phase 5A", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -495,6 +497,7 @@ class MainWindow(QMainWindow):
             button.style().polish(button)
         self._set_nav_selected(self._calendar_button, False)
         self._selected_task_id = None
+        self._selected_occurrence_start = None
         self._apply_responsive_layout()
         self._refresh_tasks()
 
@@ -506,6 +509,7 @@ class MainWindow(QMainWindow):
             self._set_nav_selected(button, False)
         self._set_nav_selected(self._calendar_button, True)
         self._selected_task_id = None
+        self._selected_occurrence_start = None
         self._update_detail(None)
         self._apply_responsive_layout()
         self._refresh_calendar()
@@ -565,7 +569,7 @@ class MainWindow(QMainWindow):
     def _refresh_calendar(self, _year: int | None = None, _month: int | None = None) -> None:
         try:
             start_date, end_date = self._calendar_page.visible_date_range
-            tasks = self._task_service.calendar_range(
+            tasks = self._task_service.calendar_schedule(
                 start_date,
                 end_date,
                 search=self._search.text(),
@@ -744,7 +748,11 @@ class MainWindow(QMainWindow):
         task = self._task_model.task_at(index)
         if task is not None:
             self._selected_task_id = task.id
-            self._open_editor(task)
+            self._open_editor(
+                self._task_service.get(task.id)
+                if task.recurrence_rule and task.id is not None
+                else task
+            )
 
     def _open_editor(self, task: Task | None, *, initial_date: date | None = None) -> None:
         editor = TaskEditorDialog(
@@ -769,24 +777,31 @@ class MainWindow(QMainWindow):
             self._show_error("업무를 저장하지 못했습니다.", error)
             return
         self._selected_task_id = saved.id
+        self._selected_occurrence_start = None
         self._refresh_tasks()
         self.statusBar().showMessage("업무를 저장했습니다.", 2500)
 
     def _open_calendar_new(self, selected_date: date) -> None:
         self._open_editor(None, initial_date=selected_date)
 
-    def _open_calendar_task(self, task: Task) -> None:
-        self._selected_task_id = task.id
-        self._open_editor(task)
+    def _open_calendar_task(self, scheduled: ScheduledTask) -> None:
+        self._selected_task_id = scheduled.id
+        if scheduled.id is None:
+            return
+        self._open_editor(self._task_service.get(scheduled.id))
 
-    def _on_calendar_task_selected(self, task: Task) -> None:
-        self._selected_task_id = task.id
-        self._update_detail(task)
+    def _on_calendar_task_selected(self, scheduled: ScheduledTask) -> None:
+        self._selected_task_id = scheduled.id
+        self._selected_occurrence_start = scheduled.occurrence_start
+        self._update_detail(scheduled.display_task)
         self._apply_responsive_layout()
 
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         task = self._task_model.task_at(current)
         self._selected_task_id = task.id if task else None
+        self._selected_occurrence_start = (
+            task.starts_at if task is not None and task.recurrence_rule else None
+        )
         self._update_detail(task)
         self._apply_responsive_layout()
 
@@ -824,19 +839,43 @@ class MainWindow(QMainWindow):
             f"{status_labels[task.status]} · 중요도 {priority_labels[task.priority.value]}"
         )
         self._detail_schedule.setText(format_task_schedule(task))
+        if task.recurrence_rule:
+            self._detail_schedule.setText(f"{self._detail_schedule.text()}\n반복 일정")
         self._detail_description.setText(task.description or "설명이 없습니다.")
         self._edit_button.setEnabled(True)
         self._pending_button.setEnabled(task.status is TaskStatus.ACTIVE)
         self._complete_button.setEnabled(task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING})
         self._archive_button.setEnabled(task.status is not TaskStatus.ARCHIVED)
+        if self._selected_occurrence_start is not None:
+            self._pending_button.setText("건너뛰기")
+            self._pending_button.setEnabled(task.status is not TaskStatus.COMPLETED)
+            self._archive_button.setEnabled(False)
+        else:
+            self._pending_button.setText("대기")
         self._open_selected_button.setVisible(not self._detail_panel.isVisible())
 
     def _transition_selected(self, status: TaskStatus) -> None:
         if self._selected_task_id is None:
             return
         try:
-            self._task_service.transition(self._selected_task_id, status)
-        except (TaskValidationError, LookupError) as error:
+            if self._selected_occurrence_start is not None:
+                occurrence_status = (
+                    OccurrenceStatus.COMPLETED
+                    if status is TaskStatus.COMPLETED
+                    else OccurrenceStatus.SKIPPED
+                )
+                self._task_service.transition_occurrence(
+                    self._selected_task_id,
+                    self._selected_occurrence_start,
+                    occurrence_status,
+                )
+                if occurrence_status is OccurrenceStatus.SKIPPED:
+                    self._selected_occurrence_start = None
+                    self._selected_task_id = None
+                    self._update_detail(None)
+            else:
+                self._task_service.transition(self._selected_task_id, status)
+        except (TaskValidationError, LookupError, ValueError) as error:
             self._show_error("상태를 변경하지 못했습니다.", error)
             return
         self._refresh_tasks()
@@ -882,7 +921,7 @@ class MainWindow(QMainWindow):
             self._brand_title.setText("OfficeFlow")
             self._brand_caption.show()
             self._page_caption.show()
-            self._version_label.setText("v3.0 · Phase 4")
+            self._version_label.setText("v3.0 · Phase 5A")
             self._search.setPlaceholderText(
                 "캘린더 일정 검색  (Ctrl+K)"
                 if self._calendar_active

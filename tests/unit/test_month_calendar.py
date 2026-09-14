@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
+from officeflow.application.tasks import ScheduledTask
 from officeflow.domain.task import Task
 from officeflow.presentation.month_calendar import (
     build_calendar_segments,
@@ -12,11 +13,12 @@ from officeflow.presentation.month_calendar import (
 )
 
 
-def _task(title: str, start: datetime, end: datetime | None, task_id: int = 1) -> Task:
-    return replace(
+def _task(title: str, start: datetime, end: datetime | None, task_id: int = 1) -> ScheduledTask:
+    task = replace(
         Task.create(title=title, all_day=True, starts_at=start, ends_at=end),
         id=task_id,
     )
+    return ScheduledTask(task, start, end)
 
 
 def test_month_grid_is_monday_first_and_always_covers_six_weeks() -> None:

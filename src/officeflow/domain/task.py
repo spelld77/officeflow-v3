@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.domain.recurrence import validate_recurrence_rule
 
 
 class TaskValidationError(ValueError):
@@ -65,6 +66,10 @@ class Task:
             and self.ends_at <= self.starts_at
         ):
             raise TaskValidationError("종료 일정은 시작 일정보다 뒤여야 합니다.")
+        if self.recurrence_rule is not None:
+            if self.starts_at is None:
+                raise TaskValidationError("반복 업무에는 시작 일정이 필요합니다.")
+            validate_recurrence_rule(self.recurrence_rule, self.starts_at)
         object.__setattr__(self, "title", normalized_title)
 
     @classmethod
@@ -80,6 +85,7 @@ class Task:
         starts_at: datetime | None = None,
         ends_at: datetime | None = None,
         timezone: str = "Asia/Seoul",
+        recurrence_rule: str | None = None,
         now: datetime | None = None,
     ) -> Task:
         timestamp = now or datetime.now(UTC)
@@ -94,7 +100,7 @@ class Task:
             starts_at=starts_at,
             ends_at=ends_at,
             timezone=timezone,
-            recurrence_rule=None,
+            recurrence_rule=recurrence_rule,
             result_note="",
             completed_at=timestamp if status is TaskStatus.COMPLETED else None,
             created_at=timestamp,
@@ -113,6 +119,7 @@ class Task:
         starts_at: datetime | None,
         ends_at: datetime | None,
         timezone: str,
+        recurrence_rule: str | None,
         now: datetime,
     ) -> Task:
         if status is not self.status and status not in ALLOWED_STATUS_TRANSITIONS[self.status]:
@@ -135,6 +142,7 @@ class Task:
             starts_at=starts_at,
             ends_at=ends_at,
             timezone=timezone,
+            recurrence_rule=recurrence_rule,
             completed_at=completed_at,
             updated_at=now,
         )

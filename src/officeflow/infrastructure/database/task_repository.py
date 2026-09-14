@@ -6,9 +6,11 @@ from typing import Any
 from sqlalchemy import Select, and_, case, func, or_, select
 
 from officeflow.application.tasks import TaskGroup, TaskPage, TaskQuery, TaskSort, TaskView
-from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
+from officeflow.domain.occurrence import TaskOccurrence
+from officeflow.domain.recurrence import recurrence_until_utc
 from officeflow.domain.task import Task
-from officeflow.infrastructure.database.models import TaskRecord
+from officeflow.infrastructure.database.models import TaskOccurrenceRecord, TaskRecord
 from officeflow.infrastructure.database.session import SessionFactory
 
 
@@ -89,8 +91,20 @@ class SqlAlchemyTaskRepository:
             TaskRecord.starts_at.is_not(None),
             TaskRecord.starts_at < ends_at,
             or_(
-                TaskRecord.ends_at > starts_at,
-                and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at >= starts_at),
+                and_(
+                    TaskRecord.recurrence_rule.is_not(None),
+                    or_(
+                        TaskRecord.recurrence_until.is_(None),
+                        TaskRecord.recurrence_until >= starts_at,
+                    ),
+                ),
+                and_(
+                    TaskRecord.recurrence_rule.is_(None),
+                    or_(
+                        TaskRecord.ends_at > starts_at,
+                        and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at >= starts_at),
+                    ),
+                ),
             ),
         ]
         normalized = search.strip()
@@ -101,14 +115,75 @@ class SqlAlchemyTaskRepository:
                 TaskRecord.title.ilike(pattern, escape="\\")
                 | TaskRecord.description.ilike(pattern, escape="\\")
             )
-        statement = select(TaskRecord).where(*predicates).order_by(
-            TaskRecord.is_pinned.desc(),
-            TaskRecord.starts_at.asc(),
-            TaskRecord.ends_at.asc(),
-            TaskRecord.id.asc(),
+        statement = (
+            select(TaskRecord)
+            .where(*predicates)
+            .order_by(
+                TaskRecord.is_pinned.desc(),
+                TaskRecord.starts_at.asc(),
+                TaskRecord.ends_at.asc(),
+                TaskRecord.id.asc(),
+            )
         )
         with self._sessions.transaction() as session:
             return tuple(self._to_domain(record) for record in session.scalars(statement).all())
+
+    def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None:
+        statement = select(TaskOccurrenceRecord).where(
+            TaskOccurrenceRecord.task_id == task_id,
+            TaskOccurrenceRecord.occurrence_start == occurrence_start,
+        )
+        with self._sessions.transaction() as session:
+            record = session.scalar(statement)
+            return self._occurrence_to_domain(record) if record is not None else None
+
+    def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence:
+        statement = select(TaskOccurrenceRecord).where(
+            TaskOccurrenceRecord.task_id == occurrence.task_id,
+            TaskOccurrenceRecord.occurrence_start == occurrence.occurrence_start,
+        )
+        with self._sessions.transaction() as session:
+            record = session.scalar(statement)
+            if record is None:
+                record = TaskOccurrenceRecord(
+                    task_id=occurrence.task_id,
+                    occurrence_start=occurrence.occurrence_start,
+                )
+                session.add(record)
+            record.occurrence_end = occurrence.occurrence_end
+            record.effective_start = occurrence.effective_start
+            record.effective_end = occurrence.effective_end
+            record.status = occurrence.status.value
+            record.completed_at = occurrence.completed_at
+            record.result_note = occurrence.result_note
+            session.flush()
+            occurrence_id = record.id
+        saved = self.get_occurrence(occurrence.task_id, occurrence.occurrence_start)
+        if saved is None:
+            raise LookupError(f"반복 발생 건 {occurrence_id}을(를) 찾을 수 없습니다.")
+        return saved
+
+    def list_occurrences(
+        self,
+        task_ids: tuple[int, ...],
+        starts_at: datetime,
+        ends_at: datetime,
+    ) -> tuple[TaskOccurrence, ...]:
+        if not task_ids:
+            return ()
+        statement = (
+            select(TaskOccurrenceRecord)
+            .where(
+                TaskOccurrenceRecord.task_id.in_(task_ids),
+                TaskOccurrenceRecord.occurrence_start >= starts_at,
+                TaskOccurrenceRecord.occurrence_start < ends_at,
+            )
+            .order_by(TaskOccurrenceRecord.occurrence_start, TaskOccurrenceRecord.id)
+        )
+        with self._sessions.transaction() as session:
+            return tuple(
+                self._occurrence_to_domain(record) for record in session.scalars(statement).all()
+            )
 
     @classmethod
     def _predicates(
@@ -150,6 +225,7 @@ class SqlAlchemyTaskRepository:
         active = (TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)
         if view is TaskView.TODAY:
             return [
+                TaskRecord.recurrence_rule.is_(None),
                 TaskRecord.status != TaskStatus.ARCHIVED.value,
                 TaskRecord.starts_at.is_not(None),
                 TaskRecord.starts_at < day_end,
@@ -181,6 +257,7 @@ class SqlAlchemyTaskRepository:
         active = (TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)
         if group is TaskGroup.OVERDUE:
             return [
+                TaskRecord.recurrence_rule.is_(None),
                 TaskRecord.status.in_(active),
                 TaskRecord.starts_at.is_not(None),
                 or_(
@@ -190,12 +267,14 @@ class SqlAlchemyTaskRepository:
             ]
         if group is TaskGroup.IN_PROGRESS:
             return [
+                TaskRecord.recurrence_rule.is_(None),
                 TaskRecord.status.in_(active),
                 TaskRecord.starts_at <= current,
                 TaskRecord.ends_at > current,
             ]
         if group is TaskGroup.UPCOMING:
             return [
+                TaskRecord.recurrence_rule.is_(None),
                 TaskRecord.status.in_(active),
                 or_(
                     TaskRecord.starts_at > current,
@@ -204,6 +283,7 @@ class SqlAlchemyTaskRepository:
                 TaskRecord.starts_at < day_end,
             ]
         return [
+            TaskRecord.recurrence_rule.is_(None),
             TaskRecord.status == TaskStatus.COMPLETED.value,
             TaskRecord.completed_at >= day_start,
             TaskRecord.completed_at < day_end,
@@ -250,6 +330,7 @@ class SqlAlchemyTaskRepository:
         record.ends_at = task.ends_at
         record.timezone = task.timezone
         record.recurrence_rule = task.recurrence_rule
+        record.recurrence_until = recurrence_until_utc(task.recurrence_rule)
         record.result_note = task.result_note
         record.completed_at = task.completed_at
         record.created_at = task.created_at
@@ -276,4 +357,18 @@ class SqlAlchemyTaskRepository:
             created_at=record.created_at,
             updated_at=record.updated_at,
             deleted_at=record.deleted_at,
+        )
+
+    @staticmethod
+    def _occurrence_to_domain(record: TaskOccurrenceRecord) -> TaskOccurrence:
+        return TaskOccurrence(
+            id=record.id,
+            task_id=record.task_id,
+            occurrence_start=record.occurrence_start,
+            occurrence_end=record.occurrence_end,
+            effective_start=record.effective_start,
+            effective_end=record.effective_end,
+            status=OccurrenceStatus(record.status),
+            completed_at=record.completed_at,
+            result_note=record.result_note,
         )

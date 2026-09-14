@@ -7,8 +7,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
-from officeflow.application.tasks import TaskDraft, TaskGroup, TaskService, TaskView
-from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.application.tasks import (
+    ScheduledTask,
+    TaskDraft,
+    TaskGroup,
+    TaskService,
+    TaskView,
+)
+from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.presentation.main_window import MainWindow
 from officeflow.presentation.task_list import GroupHeader
@@ -279,3 +285,35 @@ def test_calendar_overflow_opens_complete_day_list(qtbot: QtBot, task_service: T
     )
 
     assert window._calendar_page.day_list.count() == 6
+
+
+def test_calendar_completes_only_selected_recurrence(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    zone = ZoneInfo("Asia/Seoul")
+    today = datetime.now(zone).date()
+    start = datetime.combine(today, time.min, tzinfo=zone).astimezone(UTC)
+    task = task_service.create(
+        TaskDraft(
+            title="매일 반복 확인",
+            all_day=True,
+            starts_at=start,
+            ends_at=start + timedelta(days=1),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1",
+        )
+    )
+    assert task.id is not None
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.resize(1280, 800)
+    window.show()
+    window._show_calendar()
+    window._calendar_page.day_list.setCurrentRow(0)
+
+    qtbot.mouseClick(window._complete_button, Qt.MouseButton.LeftButton)
+
+    item = window._calendar_page.day_list.item(0)
+    scheduled = item.data(Qt.ItemDataRole.UserRole)
+    assert isinstance(scheduled, ScheduledTask)
+    assert scheduled.occurrence_status is OccurrenceStatus.COMPLETED
+    assert task_service.get(task.id).status is TaskStatus.ACTIVE

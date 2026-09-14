@@ -106,13 +106,13 @@ QLineEdit {
     border-radius: 9px;
     padding: 10px 12px;
 }
-QTextEdit, QComboBox, QDateEdit, QTimeEdit {
+QTextEdit, QComboBox, QDateEdit, QTimeEdit, QSpinBox {
     background: #FFFFFF;
     border: 1px solid #DCE2EC;
     border-radius: 8px;
     padding: 8px 10px;
 }
-QTextEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
+QTextEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus, QSpinBox:focus {
     border-color: #2F6FED;
 }
 QGroupBox {

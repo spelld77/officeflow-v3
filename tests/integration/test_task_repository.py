@@ -11,7 +11,7 @@ from officeflow.application.tasks import (
     TaskSort,
     TaskView,
 )
-from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.infrastructure.database.migrate import upgrade_database
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
@@ -117,4 +117,41 @@ def test_repository_queries_groups_filters_and_pages(tmp_path: Path) -> None:
     assert groups[TaskGroup.IN_PROGRESS].total == 1
     assert groups[TaskGroup.UPCOMING].total == 2
     assert groups[TaskGroup.COMPLETED].total == 1
+    engine.dispose()
+
+
+def test_recurrence_occurrence_round_trip_does_not_complete_template(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    service = TaskService(SqlAlchemyTaskRepository(SessionFactory(engine)))
+    start = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
+    task = service.create(
+        TaskDraft(
+            title="매일 점검",
+            starts_at=start,
+            ends_at=start + timedelta(hours=1),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;UNTIL=20260920T235959Z",
+        ),
+        now=start,
+    )
+    assert task.id is not None
+
+    completed = service.transition_occurrence(
+        task.id,
+        start + timedelta(days=1),
+        OccurrenceStatus.COMPLETED,
+        now=start + timedelta(days=1, hours=1),
+    )
+    restored = service.calendar_schedule(start.date(), (start + timedelta(days=4)).date())
+
+    assert completed.id is not None
+    assert completed.status is OccurrenceStatus.COMPLETED
+    assert service.get(task.id).status is TaskStatus.ACTIVE
+    assert [item.occurrence_status for item in restored] == [
+        OccurrenceStatus.PENDING,
+        OccurrenceStatus.COMPLETED,
+        OccurrenceStatus.PENDING,
+        OccurrenceStatus.PENDING,
+    ]
     engine.dispose()

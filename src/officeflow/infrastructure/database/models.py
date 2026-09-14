@@ -40,6 +40,7 @@ class TaskRecord(Base):
         Index("ix_tasks_active_schedule", "deleted_at", "status", "ends_at", "starts_at"),
         Index("ix_tasks_completed_at", "deleted_at", "status", "completed_at"),
         Index("ix_tasks_deleted_updated", "deleted_at", "updated_at"),
+        Index("ix_tasks_recurrence_window", "recurrence_until", "starts_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -66,6 +67,7 @@ class TaskOccurrenceRecord(Base):
     __tablename__ = "task_occurrences"
     __table_args__ = (
         UniqueConstraint("task_id", "occurrence_start"),
+        Index("ix_task_occurrences_window", "task_id", "status", "occurrence_start"),
         CheckConstraint(
             "status IN ('pending','completed','skipped','canceled')",
             name="valid_status",

@@ -16,6 +16,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     task_indexes = {index["name"] for index in inspector.get_indexes("tasks")}
+    occurrence_indexes = {index["name"] for index in inspector.get_indexes("task_occurrences")}
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
     engine.dispose()
@@ -35,8 +36,10 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "ix_tasks_active_schedule",
         "ix_tasks_completed_at",
         "ix_tasks_deleted_updated",
+        "ix_tasks_recurrence_window",
     } <= task_indexes
-    assert revision == "0002_task_query_indexes"
+    assert "ix_task_occurrences_window" in occurrence_indexes
+    assert revision == "0003_recurrence_indexes"
 
 
 def test_initial_migration_is_idempotent(tmp_path: Path) -> None:
@@ -67,3 +70,17 @@ def test_phase_two_database_receives_task_query_indexes(tmp_path: Path) -> None:
     migrated_engine.dispose()
 
     assert set(index_names) <= migrated_indexes
+
+
+def test_phase_five_database_receives_recurrence_indexes(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+
+    assert "ix_tasks_recurrence_window" in {
+        index["name"] for index in inspect(engine).get_indexes("tasks")
+    }
+    assert "ix_task_occurrences_window" in {
+        index["name"] for index in inspect(engine).get_indexes("task_occurrences")
+    }
+    engine.dispose()

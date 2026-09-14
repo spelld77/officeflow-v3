@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.tasks import ScheduledTask
 from officeflow.domain.enums import TaskPriority, TaskStatus
-from officeflow.domain.task import Task
 
 WEEKDAY_LABELS = ("월", "화", "수", "목", "금", "토", "일")
 MONTH_LABELS = tuple(f"{month}월" for month in range(1, 13))
@@ -28,7 +28,7 @@ MONTH_LABELS = tuple(f"{month}월" for month in range(1, 13))
 
 @dataclass(frozen=True, slots=True)
 class CalendarSegment:
-    task: Task
+    task: ScheduledTask
     week: int
     start_column: int
     end_column: int
@@ -47,7 +47,7 @@ def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     return divmod(offset, 12)[0], divmod(offset, 12)[1] + 1
 
 
-def task_date_span(task: Task, timezone: str) -> tuple[date, date] | None:
+def task_date_span(task: ScheduledTask, timezone: str) -> tuple[date, date] | None:
     """Return the inclusive local date span occupied by a scheduled task."""
     if task.starts_at is None:
         return None
@@ -59,8 +59,10 @@ def task_date_span(task: Task, timezone: str) -> tuple[date, date] | None:
     return start_day, max(start_day, inclusive_end.date())
 
 
-def tasks_for_date(tasks: tuple[Task, ...], day: date, timezone: str) -> tuple[Task, ...]:
-    matching: list[Task] = []
+def tasks_for_date(
+    tasks: tuple[ScheduledTask, ...], day: date, timezone: str
+) -> tuple[ScheduledTask, ...]:
+    matching: list[ScheduledTask] = []
     for task in tasks:
         span = task_date_span(task, timezone)
         if span is not None and span[0] <= day <= span[1]:
@@ -69,12 +71,12 @@ def tasks_for_date(tasks: tuple[Task, ...], day: date, timezone: str) -> tuple[T
 
 
 def build_calendar_segments(
-    tasks: tuple[Task, ...],
+    tasks: tuple[ScheduledTask, ...],
     grid_start: date,
     timezone: str,
 ) -> tuple[CalendarSegment, ...]:
     grid_end = grid_start + timedelta(days=41)
-    by_week: list[list[tuple[Task, date, date, date, date]]] = [[] for _ in range(6)]
+    by_week: list[list[tuple[ScheduledTask, date, date, date, date]]] = [[] for _ in range(6)]
     for task in tasks:
         span = task_date_span(task, timezone)
         if span is None or span[1] < grid_start or span[0] > grid_end:
@@ -149,9 +151,9 @@ class MonthCalendarWidget(QWidget):
         self._year = today.year
         self._month = today.month
         self._selected_date = today
-        self._tasks: tuple[Task, ...] = ()
+        self._tasks: tuple[ScheduledTask, ...] = ()
         self._compact = False
-        self._task_hits: list[tuple[QRectF, Task]] = []
+        self._task_hits: list[tuple[QRectF, ScheduledTask]] = []
         self._more_hits: list[tuple[QRectF, date]] = []
         self.setObjectName("monthCalendar")
         self.setMinimumSize(QSize(460, 285))
@@ -182,7 +184,7 @@ class MonthCalendarWidget(QWidget):
         self._selected_date = selected
         self.update()
 
-    def set_tasks(self, tasks: tuple[Task, ...]) -> None:
+    def set_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
         self._tasks = tasks
         self.update()
 
@@ -275,6 +277,8 @@ class MonthCalendarWidget(QWidget):
             painter.drawRoundedRect(rect, 4, 4)
             painter.setPen(QColor("#FFFFFF"))
             prefix = "◀ " if segment.continues_before else ""
+            if segment.task.occurrence_start is not None:
+                prefix = f"반복 · {prefix}"
             suffix = " ▶" if segment.continues_after else ""
             title = prefix + segment.task.title + suffix
             text_rect = rect.adjusted(5, 0, -5, 0)
@@ -415,13 +419,13 @@ class MonthCalendarWidget(QWidget):
         row = min(5, max(0, int((point.y() - self.HEADER_HEIGHT) / row_height)))
         return month_grid_start(self._year, self._month) + timedelta(days=row * 7 + column)
 
-    def _task_at(self, point: QPointF) -> Task | None:
+    def _task_at(self, point: QPointF) -> ScheduledTask | None:
         return next(
             (task for rect, task in reversed(self._task_hits) if rect.contains(point)), None
         )
 
     @staticmethod
-    def _task_color(task: Task) -> QColor:
+    def _task_color(task: ScheduledTask) -> QColor:
         if task.status is TaskStatus.COMPLETED:
             return QColor("#7D899E")
         return QColor(
@@ -443,8 +447,8 @@ class CalendarPage(QFrame):
     def __init__(self, *, timezone: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._timezone = timezone
-        self._tasks: tuple[Task, ...] = ()
-        self._selected_task: Task | None = None
+        self._tasks: tuple[ScheduledTask, ...] = ()
+        self._selected_task: ScheduledTask | None = None
         self.setObjectName("calendarCard")
 
         self._layout = QVBoxLayout(self)
@@ -524,7 +528,7 @@ class CalendarPage(QFrame):
     def selected_date(self) -> date:
         return self.calendar.selected_date
 
-    def set_tasks(self, tasks: tuple[Task, ...]) -> None:
+    def set_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
         self._tasks = tasks
         self.calendar.set_tasks(tasks)
         self._refresh_day_list()
@@ -582,7 +586,7 @@ class CalendarPage(QFrame):
         self.day_count.setText(f"{len(items)}개 일정")
         self.edit_button.setEnabled(self.day_list.currentItem() is not None)
 
-    def _select_task(self, task: Task) -> None:
+    def _select_task(self, task: ScheduledTask) -> None:
         span = task_date_span(task, self._timezone)
         if span is not None and not (span[0] <= self.selected_date <= span[1]):
             self.calendar.set_selected_date(span[0])
@@ -594,28 +598,29 @@ class CalendarPage(QFrame):
         self, current: QListWidgetItem | None, _previous: QListWidgetItem | None
     ) -> None:
         task = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-        self._selected_task = task if isinstance(task, Task) else None
+        self._selected_task = task if isinstance(task, ScheduledTask) else None
         self.edit_button.setEnabled(self._selected_task is not None)
         if self._selected_task is not None:
             self.taskSelected.emit(self._selected_task)
 
     def _on_day_item_activated(self, item: QListWidgetItem) -> None:
         task = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(task, Task):
+        if isinstance(task, ScheduledTask):
             self.taskActivated.emit(task)
 
     def _activate_selected(self) -> None:
         if self._selected_task is not None:
             self.taskActivated.emit(self._selected_task)
 
-    def _day_item_text(self, task: Task) -> str:
+    def _day_item_text(self, task: ScheduledTask) -> str:
         zone = ZoneInfo(self._timezone)
         assert task.starts_at is not None
         local_start = task.starts_at.astimezone(zone)
         time_label = "종일" if task.all_day else local_start.strftime("%H:%M")
         pin = "★ " if task.is_pinned else ""
         done = "✓ " if task.status is TaskStatus.COMPLETED else ""
-        return f"{time_label}  ·  {pin}{done}{task.title}"
+        repeat = "반복 · " if task.occurrence_start is not None else ""
+        return f"{time_label}  ·  {repeat}{pin}{done}{task.title}"
 
 
 def _days_in_month(year: int, month: int) -> int:

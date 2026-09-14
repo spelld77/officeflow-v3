@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 from officeflow.application.tasks import (
@@ -12,14 +13,17 @@ from officeflow.application.tasks import (
     TaskSort,
     TaskView,
 )
-from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
+from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.task import Task
 
 
 class InMemoryTaskRepository(TaskRepository):
     def __init__(self) -> None:
         self.tasks: dict[int, Task] = {}
+        self.occurrences: dict[tuple[int, datetime], TaskOccurrence] = {}
         self.next_id = 1
+        self.next_occurrence_id = 1
 
     def add(self, task: Task) -> Task:
         saved = Task(
@@ -84,10 +88,33 @@ class InMemoryTaskRepository(TaskRepository):
             and task.starts_at is not None
             and task.starts_at < ends_at
             and (
-                (task.ends_at is not None and task.ends_at > starts_at)
+                task.recurrence_rule is not None
+                or (task.ends_at is not None and task.ends_at > starts_at)
                 or (task.ends_at is None and task.starts_at >= starts_at)
             )
             and (not normalized or normalized in f"{task.title}\n{task.description}".casefold())
+        )
+
+    def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None:
+        return self.occurrences.get((task_id, occurrence_start))
+
+    def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence:
+        saved = replace(occurrence, id=occurrence.id or self.next_occurrence_id)
+        if occurrence.id is None:
+            self.next_occurrence_id += 1
+        self.occurrences[(occurrence.task_id, occurrence.occurrence_start)] = saved
+        return saved
+
+    def list_occurrences(
+        self,
+        task_ids: tuple[int, ...],
+        starts_at: datetime,
+        ends_at: datetime,
+    ) -> tuple[TaskOccurrence, ...]:
+        return tuple(
+            occurrence
+            for occurrence in self.occurrences.values()
+            if occurrence.task_id in task_ids and starts_at <= occurrence.occurrence_start < ends_at
         )
 
     @staticmethod
@@ -98,6 +125,8 @@ class InMemoryTaskRepository(TaskRepository):
         day_start: datetime,
         day_end: datetime,
     ) -> bool:
+        if (query.view is TaskView.TODAY or query.group is not None) and task.recurrence_rule:
+            return False
         active = {TaskStatus.ACTIVE, TaskStatus.PENDING}
         overlaps_today = bool(
             task.starts_at
@@ -276,6 +305,100 @@ def test_calendar_range_rejects_empty_or_reversed_range() -> None:
         assert "종료일" in str(error)
     else:
         raise AssertionError("empty calendar ranges must be rejected")
+
+
+def test_completing_one_recurrence_keeps_future_occurrences() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository, timezone="Asia/Seoul")
+    task = service.create(
+        TaskDraft(
+            title="매일 점검",
+            all_day=True,
+            starts_at=datetime(2026, 9, 12, 15, 0, tzinfo=UTC),
+            ends_at=datetime(2026, 9, 13, 15, 0, tzinfo=UTC),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1",
+        ),
+        now=NOW,
+    )
+    assert task.id is not None
+    completed_start = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
+
+    occurrence = service.transition_occurrence(
+        task.id,
+        completed_start,
+        OccurrenceStatus.COMPLETED,
+        now=NOW,
+        result_note="점검 완료",
+    )
+    scheduled = service.calendar_schedule(date(2026, 9, 13), date(2026, 9, 17))
+
+    assert occurrence.completed_at == NOW
+    assert occurrence.result_note == "점검 완료"
+    assert len(scheduled) == 4
+    assert scheduled[1].occurrence_status is OccurrenceStatus.COMPLETED
+    assert scheduled[2].occurrence_status is OccurrenceStatus.PENDING
+    assert service.get(task.id).status is TaskStatus.ACTIVE
+
+
+def test_skipped_recurrence_is_hidden_and_next_ignores_completed() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository, timezone="Asia/Seoul")
+    task = service.create(
+        TaskDraft(
+            title="주간 보고",
+            starts_at=datetime(2026, 9, 7, 0, 0, tzinfo=UTC),
+            ends_at=datetime(2026, 9, 7, 1, 0, tzinfo=UTC),
+            recurrence_rule="FREQ=WEEKLY;INTERVAL=1",
+        ),
+        now=NOW,
+    )
+    assert task.id is not None
+    skipped_start = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
+    service.transition_occurrence(task.id, skipped_start, OccurrenceStatus.SKIPPED, now=NOW)
+
+    scheduled = service.calendar_schedule(date(2026, 9, 14), date(2026, 9, 29))
+    next_item = service.next_occurrence(task.id, after=datetime(2026, 9, 13, 0, 0, tzinfo=UTC))
+
+    assert [item.occurrence_start for item in scheduled] == [
+        datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 28, 0, 0, tzinfo=UTC),
+    ]
+    assert next_item is not None
+    assert next_item.occurrence_start == datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
+
+
+def test_today_groups_include_current_recurrence_and_its_completion() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository, timezone="Asia/Seoul")
+    task = service.create(
+        TaskDraft(
+            title="매일 아침 확인",
+            all_day=True,
+            starts_at=datetime(2026, 9, 8, 15, 0, tzinfo=UTC),
+            ends_at=datetime(2026, 9, 9, 15, 0, tzinfo=UTC),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1",
+        ),
+        now=NOW - timedelta(days=4),
+    )
+    assert task.id is not None
+
+    before = service.today_groups(now=NOW)
+    service.transition_occurrence(
+        task.id,
+        datetime(2026, 9, 11, 15, 0, tzinfo=UTC),
+        OccurrenceStatus.COMPLETED,
+        now=NOW,
+    )
+    after = service.today_groups(now=NOW)
+
+    assert [item.title for item in before[TaskGroup.IN_PROGRESS].items] == ["매일 아침 확인"]
+    assert all(
+        item.title != "매일 아침 확인"
+        for group, page in after.items()
+        if group is not TaskGroup.COMPLETED
+        for item in page.items
+    )
+    assert [item.title for item in after[TaskGroup.COMPLETED].items] == ["매일 아침 확인"]
 
 
 def test_views_and_search_filter_tasks() -> None:
