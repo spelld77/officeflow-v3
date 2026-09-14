@@ -24,3 +24,10 @@ def test_invalid_settings_fall_back_to_defaults(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
 
     assert JsonSettingsStore(path).load() == AppSettings()
+
+
+def test_invalid_reminder_grace_setting_falls_back_to_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text('{"missed_reminder_grace_minutes": 0}', encoding="utf-8")
+
+    assert JsonSettingsStore(path).load() == AppSettings()

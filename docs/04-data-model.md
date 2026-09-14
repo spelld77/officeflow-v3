@@ -68,6 +68,22 @@
 | enabled | 활성 여부 |
 | last_fired_key | 마지막 발송 중복 방지 키 |
 
+### reminder_deliveries
+
+실제로 표시한 알림과 사용자 처리를 영구 저장한다. 규칙을 다시 계산하더라도 동일한
+`fire_key`는 두 번 생성되지 않는다.
+
+| 컬럼 | 설명 |
+|---|---|
+| reminder_id / task_id | 원본 알림 규칙과 업무 |
+| occurrence_start | 반복 업무의 원래 발생 시작, 단일 절대 알림은 NULL |
+| scheduled_at | 원래 표시 예정 시각 |
+| fire_key | 업무·발생·규칙·예정 시각으로 만든 고유 중복 방지 키 |
+| status | fired, snoozed, acknowledged, completed, deferred |
+| first_fired_at / last_fired_at | 최초·최근 표시 시각 |
+| snoozed_until | 다시 알림 시각 |
+| acknowledged_at | 확인·완료·대기 처리 시각 |
+
 ### checklist_items
 
 - id, task_id, content, is_done, position, completed_at
@@ -106,6 +122,8 @@
 - `work_logs(log_date, task_id)`
 - `attachments(task_id)`
 - `reminders(enabled, absolute_at)`
+- `reminder_deliveries(status, snoozed_until)`
+- `reminder_deliveries(scheduled_at, status)`
 
 추가 복합 인덱스는 Phase 3A의 5,000건 그룹·필터·검색 측정 결과를 기준으로 확정했다.
 
@@ -120,7 +138,16 @@
 - 반복 계산은 업무 시간대의 현지 시각을 유지하고 결과를 UTC로 저장한다.
 - 발생 건 완료와 건너뛰기는 원본 업무 상태를 변경하지 않는다.
 
-## 5. 상태 전이
+## 5. 알림 규칙
+
+- 시작과 종료 기준 상대 알림을 독립적으로 설정한다.
+- 상대 시각 계산은 업무 시간대의 현지 시계 시각을 유지한다.
+- 종일 일정은 기본 알림을 만들지 않으며 사용자가 켜면 당일 오전 9시를 선택할 수 있다.
+- 앱 시작·절전 복귀 시 기본 120분 범위의 놓친 알림만 복구한다.
+- 완료·건너뛰기·취소된 반복 발생 건의 알림은 표시하지 않는다.
+- 다시 알림은 새 발송 이력을 만들지 않고 기존 이력을 재사용한다.
+
+## 6. 상태 전이
 
 ```text
 active ──> pending ──> active

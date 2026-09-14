@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.recurrence import expand_recurrence, next_recurrence_start
+from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.domain.task import Task
 
 
@@ -85,6 +86,7 @@ class TaskDraft:
     ends_at: datetime | None = None
     timezone: str = "Asia/Seoul"
     recurrence_rule: str | None = None
+    reminder_rules: tuple[ReminderRuleInput, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

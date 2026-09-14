@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import (
     TaskDraft,
     TaskGroup,
@@ -11,8 +12,10 @@ from officeflow.application.tasks import (
     TaskSort,
     TaskView,
 )
-from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
+from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
+from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.database.migrate import upgrade_database
+from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 
@@ -154,4 +157,39 @@ def test_recurrence_occurrence_round_trip_does_not_complete_template(tmp_path: P
         OccurrenceStatus.PENDING,
         OccurrenceStatus.PENDING,
     ]
+    engine.dispose()
+
+
+def test_reminder_delivery_history_prevents_duplicate_after_repository_restart(
+    tmp_path: Path,
+) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    sessions = SessionFactory(engine)
+    task_service = TaskService(SqlAlchemyTaskRepository(sessions))
+    reminder_service = ReminderService(SqlAlchemyReminderRepository(sessions), task_service)
+    start = datetime(2026, 9, 14, 1, 0, tzinfo=UTC)
+    task = task_service.create(TaskDraft(title="재시작 확인", starts_at=start), now=start)
+    assert task.id is not None
+    reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )
+
+    first = reminder_service.poll_due(now=start)
+    restarted = ReminderService(SqlAlchemyReminderRepository(sessions), task_service)
+    duplicate = restarted.poll_due(now=start + timedelta(minutes=1))
+    assert first[0].delivery.id is not None
+    snoozed = restarted.snooze(
+        first[0].delivery.id,
+        10,
+        now=start + timedelta(minutes=1),
+    )
+    refired = restarted.poll_due(now=start + timedelta(minutes=11))
+
+    assert duplicate == ()
+    assert snoozed.snoozed_until == start + timedelta(minutes=11)
+    assert len(refired) == 1
+    assert refired[0].delivery.id == first[0].delivery.id
     engine.dispose()

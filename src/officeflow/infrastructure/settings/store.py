@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,14 @@ class AppSettings:
     collapsed_today_groups: tuple[str, ...] = ("completed",)
     view_preferences: dict[str, dict[str, str | bool]] = field(default_factory=dict)
     missed_reminder_grace_minutes: int = 120
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.missed_reminder_grace_minutes <= 43_200:
+            raise ValueError("놓친 알림 복구 범위는 1분에서 30일 사이여야 합니다.")
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("지원하지 않는 시간대입니다.") from error
 
 
 class JsonSettingsStore:

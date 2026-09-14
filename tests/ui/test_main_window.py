@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
+from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import (
     ScheduledTask,
     TaskDraft,
@@ -14,10 +15,19 @@ from officeflow.application.tasks import (
     TaskService,
     TaskView,
 )
-from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
+from officeflow.domain.enums import (
+    OccurrenceStatus,
+    ReminderDeliveryStatus,
+    ReminderRelation,
+    TaskPriority,
+    TaskStatus,
+)
+from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.presentation.main_window import MainWindow
 from officeflow.presentation.task_list import GroupHeader
+from tests.unit.test_reminder_service import InMemoryReminderRepository
+from tests.unit.test_task_service import InMemoryTaskRepository
 
 
 def test_main_window_has_phase_two_shell(qtbot: QtBot, task_service: TaskService) -> None:
@@ -121,6 +131,33 @@ def test_tab_moves_from_quick_add_input_to_add_button(
     qtbot.keyPress(quick_add, Qt.Key.Key_Tab)
 
     assert window.focusWidget() is quick_add_button
+
+
+def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    reminder_repository = InMemoryReminderRepository(task_repository)
+    reminder_service = ReminderService(reminder_repository, task_service)
+    now = datetime.now(UTC).replace(microsecond=0)
+    task = task_service.create(
+        TaskDraft(title="알림 테스트", starts_at=now - timedelta(minutes=1)),
+        now=now - timedelta(minutes=2),
+    )
+    assert task.id is not None
+    reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )
+    window = MainWindow(AppSettings(), task_service, reminder_service=reminder_service)
+    qtbot.addWidget(window)
+    window.show()
+
+    qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
+    assert window._reminder_dialog is not None
+    qtbot.mouseClick(window._reminder_dialog.snooze_button, Qt.MouseButton.LeftButton)
+
+    delivery = next(iter(reminder_repository.deliveries.values()))
+    assert delivery.status is ReminderDeliveryStatus.SNOOZED
 
 
 def test_today_view_has_collapsible_groups_and_summary_jump(

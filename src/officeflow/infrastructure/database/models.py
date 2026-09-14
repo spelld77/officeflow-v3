@@ -100,6 +100,34 @@ class ReminderRecord(Base):
     last_fired_key: Mapped[str | None] = mapped_column(String(200))
 
 
+class ReminderDeliveryRecord(Base):
+    __tablename__ = "reminder_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('fired','snoozed','acknowledged','completed','deferred')",
+            name="valid_status",
+        ),
+        Index("ix_reminder_deliveries_due", "status", "snoozed_until"),
+        Index("ix_reminder_deliveries_schedule", "scheduled_at", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reminder_id: Mapped[int] = mapped_column(
+        ForeignKey("reminders.id", ondelete="CASCADE"), index=True
+    )
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    occurrence_start: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    scheduled_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    fire_key: Mapped[str] = mapped_column(String(200), unique=True)
+    status: Mapped[str] = mapped_column(String(16), default="fired")
+    first_fired_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    last_fired_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    snoozed_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 class ChecklistItemRecord(Base):
     __tablename__ = "checklist_items"
 

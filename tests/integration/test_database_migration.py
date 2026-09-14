@@ -17,6 +17,9 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     tables = set(inspector.get_table_names())
     task_indexes = {index["name"] for index in inspector.get_indexes("tasks")}
     occurrence_indexes = {index["name"] for index in inspector.get_indexes("task_occurrences")}
+    delivery_indexes = {
+        index["name"] for index in inspector.get_indexes("reminder_deliveries")
+    }
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
     engine.dispose()
@@ -27,6 +30,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "attachments",
         "checklist_items",
         "notes",
+        "reminder_deliveries",
         "reminders",
         "task_occurrences",
         "tasks",
@@ -39,7 +43,11 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "ix_tasks_recurrence_window",
     } <= task_indexes
     assert "ix_task_occurrences_window" in occurrence_indexes
-    assert revision == "0003_recurrence_indexes"
+    assert {
+        "ix_reminder_deliveries_due",
+        "ix_reminder_deliveries_schedule",
+    } <= delivery_indexes
+    assert revision == "0004_reminder_deliveries"
 
 
 def test_initial_migration_is_idempotent(tmp_path: Path) -> None:
@@ -83,4 +91,18 @@ def test_phase_five_database_receives_recurrence_indexes(tmp_path: Path) -> None
     assert "ix_task_occurrences_window" in {
         index["name"] for index in inspect(engine).get_indexes("task_occurrences")
     }
+    engine.dispose()
+
+
+def test_phase_five_database_receives_reminder_delivery_history(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    inspector = inspect(engine)
+
+    assert "reminder_deliveries" in inspector.get_table_names()
+    assert {
+        "ix_reminder_deliveries_due",
+        "ix_reminder_deliveries_schedule",
+    } <= {index["name"] for index in inspector.get_indexes("reminder_deliveries")}
     engine.dispose()

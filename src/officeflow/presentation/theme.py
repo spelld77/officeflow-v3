@@ -82,18 +82,18 @@ QPushButton[calendarPrimary="true"] {
     border-color: #AFC5F5;
     font-weight: 600;
 }
-QListWidget#calendarDayList {
+QListWidget#calendarDayList, QListWidget#reminderList {
     background: #F8FAFD;
     border: 1px solid #E1E6EF;
     border-radius: 8px;
     outline: none;
     padding: 3px;
 }
-QListWidget#calendarDayList::item {
+QListWidget#calendarDayList::item, QListWidget#reminderList::item {
     border-radius: 5px;
     padding: 6px 8px;
 }
-QListWidget#calendarDayList::item:selected {
+QListWidget#calendarDayList::item:selected, QListWidget#reminderList::item:selected {
     color: #172033;
     background: #DFE9FF;
 }

@@ -29,3 +29,11 @@ class ReminderRelation(StrEnum):
     START = "start"
     END = "end"
     ABSOLUTE = "absolute"
+
+
+class ReminderDeliveryStatus(StrEnum):
+    FIRED = "fired"
+    SNOOZED = "snoozed"
+    ACKNOWLEDGED = "acknowledged"
+    COMPLETED = "completed"
+    DEFERRED = "deferred"

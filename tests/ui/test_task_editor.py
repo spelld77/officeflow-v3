@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from PySide6.QtCore import QDate, Qt
 from pytestqt.qtbot import QtBot
 
+from officeflow.domain.enums import ReminderRelation
 from officeflow.presentation.task_editor import TaskEditorDialog
 
 
@@ -73,3 +74,18 @@ def test_tab_skips_hidden_schedule_fields_and_reaches_repeat(qtbot: QtBot) -> No
     qtbot.keyPress(editor.start_date_edit, Qt.Key.Key_Tab)
 
     assert editor.focusWidget() is editor.repeat_combo
+
+
+def test_editor_builds_start_and_end_reminder_rules(qtbot: QtBot) -> None:
+    editor = TaskEditorDialog(timezone="Asia/Seoul", initial_date=date(2026, 9, 14))
+    qtbot.addWidget(editor)
+    editor.title_edit.setText("알림 업무")
+    editor.start_reminder_combo.setCurrentIndex(editor.start_reminder_combo.findData(-10))
+    editor.end_reminder_combo.setCurrentIndex(editor.end_reminder_combo.findData(-30))
+
+    editor._validate_and_accept()
+
+    assert [(rule.relation, rule.offset_minutes) for rule in editor.draft().reminder_rules] == [
+        (ReminderRelation.START, -10),
+        (ReminderRelation.END, -30),
+    ]

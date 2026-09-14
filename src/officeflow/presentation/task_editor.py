@@ -25,12 +25,13 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.tasks import TaskDraft
-from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.domain.enums import ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.recurrence import (
     RecurrenceFrequency,
     RecurrenceSpec,
     parse_simple_recurrence,
 )
+from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
 
 
@@ -40,6 +41,7 @@ class TaskEditorDialog(QDialog):
         *,
         timezone: str,
         task: Task | None = None,
+        reminder_rules: tuple[ReminderRuleInput, ...] = (),
         initial_date: date | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -48,6 +50,9 @@ class TaskEditorDialog(QDialog):
         self._task = task
         self._draft: TaskDraft | None = None
         self._custom_recurrence_rule: str | None = None
+        self._custom_start_reminder: ReminderRuleInput | None = None
+        self._custom_end_reminder: ReminderRuleInput | None = None
+        self._preserved_reminders: tuple[ReminderRuleInput, ...] = ()
 
         self.setWindowTitle("업무 수정" if task else "새 업무")
         self.setModal(True)
@@ -162,6 +167,16 @@ class TaskEditorDialog(QDialog):
         self.repeat_until_date.setCalendarPopup(True)
         self.repeat_until_date.setDisplayFormat("yyyy-MM-dd")
         self.schedule_form.addRow("반복 종료", self.repeat_until_date)
+
+        self.start_reminder_combo = QComboBox()
+        self.start_reminder_combo.setObjectName("taskStartReminderCombo")
+        self._add_reminder_options(self.start_reminder_combo, include_all_day_suggestion=True)
+        self.schedule_form.addRow("시작 알림", self.start_reminder_combo)
+
+        self.end_reminder_combo = QComboBox()
+        self.end_reminder_combo.setObjectName("taskEndReminderCombo")
+        self._add_reminder_options(self.end_reminder_combo)
+        self.schedule_form.addRow("종료 알림", self.end_reminder_combo)
         self._schedule_value_edits = (
             self.start_date_edit,
             self.start_time_edit,
@@ -200,6 +215,7 @@ class TaskEditorDialog(QDialog):
 
         if task is not None:
             self._populate(task)
+            self._populate_reminders(reminder_rules)
         else:
             self.schedule_combo.setCurrentIndex(1)
             self.all_day_check.setChecked(True)
@@ -300,6 +316,7 @@ class TaskEditorDialog(QDialog):
                 interval=self.repeat_interval.value(),
                 until=until,
             ).to_rrule(self._timezone)
+        reminder_rules = self._build_reminder_rules() if schedule_type != "none" else ()
         return TaskDraft(
             title=self.title_edit.text(),
             description=self.description_edit.toPlainText(),
@@ -311,6 +328,7 @@ class TaskEditorDialog(QDialog):
             ends_at=ends_at,
             timezone=self._timezone,
             recurrence_rule=recurrence_rule,
+            reminder_rules=reminder_rules,
         )
 
     def _populate(self, task: Task) -> None:
@@ -366,6 +384,8 @@ class TaskEditorDialog(QDialog):
         self._set_row_visible(self.end_date_edit, has_schedule and is_range)
         self._set_row_visible(self.end_time_edit, is_timed)
         self._set_row_visible(self.repeat_combo, has_schedule)
+        self._set_row_visible(self.start_reminder_combo, has_schedule)
+        self._set_row_visible(self.end_reminder_combo, has_schedule)
         self._update_recurrence_visibility()
 
     def _update_recurrence_visibility(self) -> None:
@@ -411,6 +431,8 @@ class TaskEditorDialog(QDialog):
             self.repeat_interval,
             self.repeat_until_check,
             self.repeat_until_date,
+            self.start_reminder_combo,
+            self.end_reminder_combo,
             self.save_button,
             self.cancel_button,
         )
@@ -422,3 +444,68 @@ class TaskEditorDialog(QDialog):
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _add_reminder_options(
+        combo: QComboBox,
+        *,
+        include_all_day_suggestion: bool = False,
+    ) -> None:
+        combo.addItem("알림 없음", None)
+        combo.addItem("기준 시각", 0)
+        combo.addItem("5분 전", -5)
+        combo.addItem("10분 전", -10)
+        combo.addItem("30분 전", -30)
+        combo.addItem("1시간 전", -60)
+        combo.addItem("1일 전", -1_440)
+        if include_all_day_suggestion:
+            combo.addItem("당일 오전 9시 (종일 일정)", 540)
+
+    def _populate_reminders(self, rules: tuple[ReminderRuleInput, ...]) -> None:
+        preserved: list[ReminderRuleInput] = []
+        populated: set[ReminderRelation] = set()
+        for rule in rules:
+            if rule.relation not in {ReminderRelation.START, ReminderRelation.END}:
+                preserved.append(rule)
+                continue
+            if rule.relation in populated:
+                preserved.append(rule)
+                continue
+            combo = (
+                self.start_reminder_combo
+                if rule.relation is ReminderRelation.START
+                else self.end_reminder_combo
+            )
+            index = combo.findData(rule.offset_minutes)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            else:
+                combo.addItem("사용자 정의 알림 유지", "custom")
+                combo.setCurrentIndex(combo.count() - 1)
+                if rule.relation is ReminderRelation.START:
+                    self._custom_start_reminder = rule
+                else:
+                    self._custom_end_reminder = rule
+            populated.add(rule.relation)
+        self._preserved_reminders = tuple(preserved)
+
+    def _build_reminder_rules(self) -> tuple[ReminderRuleInput, ...]:
+        rules: list[ReminderRuleInput] = list(self._preserved_reminders)
+        for relation, combo, custom in (
+            (
+                ReminderRelation.START,
+                self.start_reminder_combo,
+                self._custom_start_reminder,
+            ),
+            (
+                ReminderRelation.END,
+                self.end_reminder_combo,
+                self._custom_end_reminder,
+            ),
+        ):
+            value = combo.currentData()
+            if value == "custom" and custom is not None:
+                rules.append(custom)
+            elif isinstance(value, int):
+                rules.append(ReminderRuleInput(relation=relation, offset_minutes=value))
+        return tuple(rules)
