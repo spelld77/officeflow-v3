@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderAlert, ReminderService
 from officeflow.application.tasks import (
     ScheduledTask,
@@ -48,6 +49,7 @@ from officeflow.infrastructure.windows.hotkey import WindowsGlobalHotkey
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.month_calendar import CalendarPage
+from officeflow.presentation.record_dialog import TaskRecordsDialog, WorkLogBrowserDialog
 from officeflow.presentation.reminder_dialog import ReminderDialog
 from officeflow.presentation.settings_dialog import SettingsDialog
 from officeflow.presentation.task_editor import TaskEditorDialog
@@ -87,6 +89,7 @@ class MainWindow(QMainWindow):
         settings: AppSettings,
         task_service: TaskService,
         reminder_service: ReminderService | None = None,
+        record_service: RecordService | None = None,
         save_settings: Callable[[AppSettings], None] | None = None,
         on_shutdown: Callable[[], None] | None = None,
         desktop_integration: bool = False,
@@ -96,6 +99,7 @@ class MainWindow(QMainWindow):
         self._settings = settings
         self._task_service = task_service
         self._reminder_service = reminder_service
+        self._record_service = record_service
         self._save_settings = save_settings
         self._on_shutdown = on_shutdown
         self._shutdown_done = False
@@ -203,17 +207,18 @@ class MainWindow(QMainWindow):
         self._calendar_button.clicked.connect(self._show_calendar)
         self._calendar_button.setToolTip("월간 일정 보기")
         self._sidebar_layout.addWidget(self._calendar_button)
-        work_log_button = self._create_nav_button("업무일지")
-        work_log_button.setEnabled(False)
-        work_log_button.setToolTip("후속 단계에서 연결됩니다.")
-        self._sidebar_layout.addWidget(work_log_button)
+        self._work_log_button = self._create_nav_button("업무일지")
+        self._work_log_button.setEnabled(self._record_service is not None)
+        self._work_log_button.setToolTip("날짜별 업무일지 보기")
+        self._work_log_button.clicked.connect(self._open_work_logs)
+        self._sidebar_layout.addWidget(self._work_log_button)
         self._settings_button = self._create_nav_button("설정")
         self._settings_button.setToolTip("실행, 트레이와 알림 설정")
         self._settings_button.clicked.connect(self._open_settings)
         self._sidebar_layout.addWidget(self._settings_button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 5C", "brandCaption")
+        self._version_label = self._named_label("v3.0 · Phase 6A", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -284,6 +289,11 @@ class MainWindow(QMainWindow):
         self._open_selected_button.clicked.connect(self._open_selected_task)
         self._open_selected_button.hide()
         heading.addWidget(self._open_selected_button)
+        self._open_selected_records_button = QPushButton("기록")
+        self._open_selected_records_button.setObjectName("openSelectedRecordsButton")
+        self._open_selected_records_button.clicked.connect(self._open_selected_records)
+        self._open_selected_records_button.hide()
+        heading.addWidget(self._open_selected_records_button)
         self._content_layout.addLayout(heading)
         self._content_layout.addWidget(self._build_filter_bar())
 
@@ -457,6 +467,12 @@ class MainWindow(QMainWindow):
         layout.addSpacing(8)
         layout.addWidget(self._detail_description)
         layout.addStretch()
+
+        self._detail_records_button = QPushButton("체크리스트 · 결과 · 업무일지")
+        self._detail_records_button.setObjectName("detailRecordsButton")
+        self._detail_records_button.clicked.connect(self._open_selected_records)
+        self._detail_records_button.setEnabled(False)
+        layout.addWidget(self._detail_records_button)
 
         actions = QHBoxLayout()
         self._pending_button = QPushButton("대기")
@@ -813,6 +829,35 @@ class MainWindow(QMainWindow):
         except Exception as error:
             self._show_error("업무를 열지 못했습니다.", error)
 
+    def _open_selected_records(self) -> None:
+        if self._selected_task_id is None or self._record_service is None:
+            return
+        try:
+            task = self._task_service.get(self._selected_task_id)
+            dialog = TaskRecordsDialog(
+                task,
+                task_service=self._task_service,
+                record_service=self._record_service,
+                occurrence_start=self._selected_occurrence_start,
+                parent=self,
+            )
+            dialog.setStyleSheet(LIGHT_STYLESHEET)
+            dialog.changed.connect(self._refresh_tasks)
+            dialog.exec()
+        except Exception as error:
+            self._show_error("업무 기록을 열지 못했습니다.", error)
+
+    def _open_work_logs(self) -> None:
+        if self._record_service is None:
+            return
+        dialog = WorkLogBrowserDialog(
+            task_service=self._task_service,
+            record_service=self._record_service,
+            parent=self,
+        )
+        dialog.setStyleSheet(LIGHT_STYLESHEET)
+        dialog.exec()
+
     def _open_task_from_index(self, index: QModelIndex) -> None:
         task = self._task_model.task_at(index)
         if task is not None:
@@ -897,9 +942,11 @@ class MainWindow(QMainWindow):
                 self._complete_button,
                 self._archive_button,
                 self._edit_button,
+                self._detail_records_button,
             ):
                 button.setEnabled(False)
             self._open_selected_button.hide()
+            self._open_selected_records_button.hide()
             return
 
         status_labels = {
@@ -937,6 +984,7 @@ class MainWindow(QMainWindow):
                     )
         self._detail_description.setText(task.description or "설명이 없습니다.")
         self._edit_button.setEnabled(True)
+        self._detail_records_button.setEnabled(self._record_service is not None)
         self._pending_button.setEnabled(task.status is TaskStatus.ACTIVE)
         self._complete_button.setEnabled(task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING})
         self._archive_button.setEnabled(task.status is not TaskStatus.ARCHIVED)
@@ -947,6 +995,9 @@ class MainWindow(QMainWindow):
         else:
             self._pending_button.setText("대기")
         self._open_selected_button.setVisible(not self._detail_panel.isVisible())
+        self._open_selected_records_button.setVisible(
+            self._record_service is not None and not self._detail_panel.isVisible()
+        )
 
     def _transition_selected(self, status: TaskStatus) -> None:
         if self._selected_task_id is None:
@@ -1204,6 +1255,12 @@ class MainWindow(QMainWindow):
         self._open_selected_button.setVisible(
             not self._calendar_active and not show_detail and self._selected_task_id is not None
         )
+        self._open_selected_records_button.setVisible(
+            self._record_service is not None
+            and not self._calendar_active
+            and not show_detail
+            and self._selected_task_id is not None
+        )
         self._calendar_page.set_compact(compact_navigation)
 
         if compact_navigation:
@@ -1230,7 +1287,7 @@ class MainWindow(QMainWindow):
             self._brand_title.setText("OfficeFlow")
             self._brand_caption.show()
             self._page_caption.show()
-            self._version_label.setText("v3.0 · Phase 5C")
+            self._version_label.setText("v3.0 · Phase 6A")
             self._search.setPlaceholderText(
                 "캘린더 일정 검색  (Ctrl+K)"
                 if self._calendar_active

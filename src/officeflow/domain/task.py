@@ -160,3 +160,6 @@ class Task:
             completed_at=now if status is TaskStatus.COMPLETED else None,
             updated_at=now,
         )
+
+    def update_result_note(self, result_note: str, *, now: datetime) -> Task:
+        return replace(self, result_note=result_note.strip(), updated_at=now)

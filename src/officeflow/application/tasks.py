@@ -263,6 +263,52 @@ class TaskService:
         task = self.get(task_id)
         return self._repository.update(task.transition_to(status, now=now or datetime.now(UTC)))
 
+    def result_note(self, task_id: int, occurrence_start: datetime | None = None) -> str:
+        task = self.get(task_id)
+        if occurrence_start is None:
+            return task.result_note
+        occurrence = self._repository.get_occurrence(task_id, occurrence_start)
+        return occurrence.result_note if occurrence is not None else ""
+
+    def update_result_note(
+        self,
+        task_id: int,
+        result_note: str,
+        *,
+        occurrence_start: datetime | None = None,
+        now: datetime | None = None,
+    ) -> str:
+        task = self.get(task_id)
+        if occurrence_start is None:
+            saved = self._repository.update(
+                task.update_result_note(result_note, now=now or datetime.now(UTC))
+            )
+            return saved.result_note
+        if not task.recurrence_rule or task.starts_at is None:
+            raise ValueError("반복 업무의 발생 건만 개별 결과를 저장할 수 있습니다.")
+        expected = next_recurrence_start(
+            task.recurrence_rule,
+            template_start=task.starts_at,
+            timezone=task.timezone,
+            after=occurrence_start,
+            inclusive=True,
+        )
+        if expected != occurrence_start:
+            raise ValueError("반복 규칙에 포함되지 않은 발생 시각입니다.")
+        occurrence = self._repository.get_occurrence(task_id, occurrence_start)
+        if occurrence is None:
+            duration = task.ends_at - task.starts_at if task.ends_at is not None else None
+            occurrence = TaskOccurrence(
+                id=None,
+                task_id=task_id,
+                occurrence_start=occurrence_start,
+                occurrence_end=(occurrence_start + duration if duration is not None else None),
+            )
+        saved_occurrence = self._repository.save_occurrence(
+            occurrence.update_result_note(result_note)
+        )
+        return saved_occurrence.result_note
+
     def get(self, task_id: int) -> Task:
         task = self._repository.get(task_id)
         if task is None:

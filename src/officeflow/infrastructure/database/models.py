@@ -130,6 +130,7 @@ class ReminderDeliveryRecord(Base):
 
 class ChecklistItemRecord(Base):
     __tablename__ = "checklist_items"
+    __table_args__ = (Index("ix_checklist_items_task_position", "task_id", "position"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
@@ -155,7 +156,10 @@ class AttachmentRecord(Base):
 
 class WorkLogRecord(Base):
     __tablename__ = "work_logs"
-    __table_args__ = (Index("ix_work_logs_date_task", "log_date", "task_id"),)
+    __table_args__ = (
+        Index("ix_work_logs_date_task", "log_date", "task_id"),
+        Index("ix_work_logs_date_updated", "log_date", "updated_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int | None] = mapped_column(

@@ -39,3 +39,6 @@ class TaskOccurrence:
             completed_at=now if status is OccurrenceStatus.COMPLETED else None,
             result_note=self.result_note if result_note is None else result_note.strip(),
         )
+
+    def update_result_note(self, result_note: str) -> TaskOccurrence:
+        return replace(self, result_note=result_note.strip())

@@ -10,7 +10,11 @@ from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.recurrence import recurrence_until_utc
 from officeflow.domain.task import Task
-from officeflow.infrastructure.database.models import TaskOccurrenceRecord, TaskRecord
+from officeflow.infrastructure.database.models import (
+    TaskOccurrenceRecord,
+    TaskRecord,
+    WorkLogRecord,
+)
 from officeflow.infrastructure.database.session import SessionFactory
 
 
@@ -114,6 +118,14 @@ class SqlAlchemyTaskRepository:
             predicates.append(
                 TaskRecord.title.ilike(pattern, escape="\\")
                 | TaskRecord.description.ilike(pattern, escape="\\")
+                | TaskRecord.result_note.ilike(pattern, escape="\\")
+                | select(WorkLogRecord.id)
+                .where(
+                    WorkLogRecord.task_id == TaskRecord.id,
+                    WorkLogRecord.content.ilike(pattern, escape="\\")
+                    | WorkLogRecord.result.ilike(pattern, escape="\\"),
+                )
+                .exists()
             )
         statement = (
             select(TaskRecord)
@@ -207,6 +219,14 @@ class SqlAlchemyTaskRepository:
             predicates.append(
                 TaskRecord.title.ilike(pattern, escape="\\")
                 | TaskRecord.description.ilike(pattern, escape="\\")
+                | TaskRecord.result_note.ilike(pattern, escape="\\")
+                | select(WorkLogRecord.id)
+                .where(
+                    WorkLogRecord.task_id == TaskRecord.id,
+                    WorkLogRecord.content.ilike(pattern, escape="\\")
+                    | WorkLogRecord.result.ilike(pattern, escape="\\"),
+                )
+                .exists()
             )
         if query.statuses:
             predicates.append(

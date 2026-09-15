@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
+from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import (
     ScheduledTask,
@@ -27,6 +28,7 @@ from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.presentation.main_window import MainWindow
 from officeflow.presentation.task_list import GroupHeader
+from tests.unit.test_record_service import InMemoryRecordRepository
 from tests.unit.test_reminder_service import InMemoryReminderRepository
 from tests.unit.test_task_service import InMemoryTaskRepository
 
@@ -81,6 +83,25 @@ def test_medium_window_prioritizes_task_list(qtbot: QtBot, task_service: TaskSer
     assert detail is not None and detail.isHidden()
     assert sidebar is not None and sidebar.width() == 180
     assert window._summary_layout.getItemPosition(3)[:2] == (0, 3)
+
+
+def test_medium_window_exposes_records_without_detail_panel(qtbot: QtBot) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    record_service = RecordService(InMemoryRecordRepository(), task_service)
+    task_service.create(TaskDraft(title="기록할 업무"))
+    window = MainWindow(AppSettings(), task_service, record_service=record_service)
+    qtbot.addWidget(window)
+    window.resize(960, 640)
+    window.show()
+    window._set_view(TaskView.ALL)
+    window._task_list.setCurrentIndex(window._task_model.index(0, 0))
+    qtbot.wait(10)
+
+    records_button = window.findChild(QPushButton, "openSelectedRecordsButton")
+    assert records_button is not None and records_button.isVisible()
+    assert window._detail_panel.isHidden()
+    assert window._work_log_button.isEnabled()
 
 
 def test_compact_window_uses_small_navigation_and_wrapped_summaries(

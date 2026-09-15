@@ -89,6 +89,41 @@ QListWidget#calendarDayList, QListWidget#reminderList {
     outline: none;
     padding: 3px;
 }
+QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrowserList {
+    background: #FFFFFF;
+    border: 1px solid #DCE2EC;
+    border-radius: 8px;
+    outline: none;
+    padding: 4px;
+}
+QListWidget#checklistList::item, QListWidget#taskWorkLogList::item,
+QListWidget#workLogBrowserList::item {
+    border-radius: 5px;
+    padding: 8px 10px;
+}
+QListWidget#checklistList::item:selected, QListWidget#taskWorkLogList::item:selected,
+QListWidget#workLogBrowserList::item:selected {
+    color: #172033;
+    background: #DFE9FF;
+}
+QTabWidget::pane {
+    background: #FFFFFF;
+    border: 1px solid #DCE2EC;
+    border-radius: 9px;
+    top: -1px;
+}
+QTabBar::tab {
+    color: #526078;
+    background: #E9EDF4;
+    border: 1px solid #DCE2EC;
+    padding: 9px 16px;
+    margin-right: 3px;
+}
+QTabBar::tab:selected {
+    color: #245CCC;
+    background: #FFFFFF;
+    font-weight: 600;
+}
 QListWidget#calendarDayList::item, QListWidget#reminderList::item {
     border-radius: 5px;
     padding: 6px 8px;
@@ -158,6 +193,15 @@ QPushButton#primaryButton {
     border-radius: 9px;
     font-weight: 600;
     padding: 10px 16px;
+}
+QPushButton[primaryAction="true"] {
+    color: #FFFFFF;
+    background: #2F6FED;
+    border: none;
+    font-weight: 600;
+}
+QPushButton[primaryAction="true"]:hover {
+    background: #245CCC;
 }
 QPushButton#primaryButton:hover {
     background: #245CCC;
