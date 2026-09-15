@@ -5,12 +5,17 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from officeflow.application.attachments import AttachmentService
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import TaskService
 from officeflow.bootstrap.logging import configure_logging
 from officeflow.bootstrap.paths import AppPaths
 from officeflow.bootstrap.single_instance import SingleInstanceCoordinator, instance_name
+from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
+from officeflow.infrastructure.database.attachment_repository import (
+    SqlAlchemyAttachmentRepository,
+)
 from officeflow.infrastructure.database.migrate import upgrade_database
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
@@ -38,6 +43,11 @@ def build_application(
     task_service = TaskService(SqlAlchemyTaskRepository(sessions), timezone=settings.timezone)
     reminder_service = ReminderService(SqlAlchemyReminderRepository(sessions), task_service)
     record_service = RecordService(SqlAlchemyRecordRepository(sessions), task_service)
+    attachment_service = AttachmentService(
+        SqlAlchemyAttachmentRepository(sessions),
+        ManagedAttachmentStorage(paths.attachment_dir),
+        task_service,
+    )
 
     app = application or QApplication(argv or sys.argv)
     app.setApplicationName("OfficeFlow")
@@ -49,6 +59,7 @@ def build_application(
         task_service=task_service,
         reminder_service=reminder_service,
         record_service=record_service,
+        attachment_service=attachment_service,
         save_settings=settings_store.save,
         on_shutdown=engine.dispose,
         desktop_integration=desktop_integration,

@@ -142,6 +142,7 @@ class ChecklistItemRecord(Base):
 
 class AttachmentRecord(Base):
     __tablename__ = "attachments"
+    __table_args__ = (Index("ix_attachments_task_missing", "task_id", "missing_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)

@@ -191,6 +191,10 @@ class InMemoryTaskRepository(TaskRepository):
             and (not query.statuses or task.status in query.statuses)
             and (not query.priorities or task.priority in query.priorities)
             and (not query.pinned_only or task.is_pinned)
+            and (
+                query.has_attachments is None
+                or task.has_attachments is query.has_attachments
+            )
         )
 
     @staticmethod

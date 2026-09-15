@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.attachments import AttachmentService
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderAlert, ReminderService
 from officeflow.application.tasks import (
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow):
         task_service: TaskService,
         reminder_service: ReminderService | None = None,
         record_service: RecordService | None = None,
+        attachment_service: AttachmentService | None = None,
         save_settings: Callable[[AppSettings], None] | None = None,
         on_shutdown: Callable[[], None] | None = None,
         desktop_integration: bool = False,
@@ -100,6 +102,7 @@ class MainWindow(QMainWindow):
         self._task_service = task_service
         self._reminder_service = reminder_service
         self._record_service = record_service
+        self._attachment_service = attachment_service
         self._save_settings = save_settings
         self._on_shutdown = on_shutdown
         self._shutdown_done = False
@@ -218,7 +221,7 @@ class MainWindow(QMainWindow):
         self._sidebar_layout.addWidget(self._settings_button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 6A", "brandCaption")
+        self._version_label = self._named_label("v3.0 · Phase 6B", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -410,6 +413,12 @@ class MainWindow(QMainWindow):
         self._pinned_filter.setCheckable(True)
         layout.addWidget(self._pinned_filter)
 
+        self._attachment_filter = QPushButton("첨부만")
+        self._attachment_filter.setObjectName("attachmentFilter")
+        self._attachment_filter.setCheckable(True)
+        self._attachment_filter.setVisible(self._attachment_service is not None)
+        layout.addWidget(self._attachment_filter)
+
         self._sort_combo = QComboBox()
         self._sort_combo.setObjectName("taskSort")
         self._sort_combo.addItem("일정순", TaskSort.SCHEDULE.value)
@@ -438,6 +447,7 @@ class MainWindow(QMainWindow):
         self._status_filter.currentIndexChanged.connect(self._on_filter_changed)
         self._priority_filter.currentIndexChanged.connect(self._on_filter_changed)
         self._pinned_filter.toggled.connect(self._on_filter_changed)
+        self._attachment_filter.toggled.connect(self._on_filter_changed)
         self._sort_combo.currentIndexChanged.connect(self._on_filter_changed)
         self._compact_toggle.toggled.connect(self._set_compact_list)
         self._clear_filters_button.clicked.connect(self._clear_filters)
@@ -504,6 +514,7 @@ class MainWindow(QMainWindow):
             self._status_filter,
             self._priority_filter,
             self._pinned_filter,
+            self._attachment_filter,
             self._sort_combo,
             self._compact_toggle,
             self._clear_filters_button,
@@ -578,6 +589,7 @@ class MainWindow(QMainWindow):
                     statuses=self._selected_statuses(),
                     priorities=self._selected_priorities(),
                     pinned_only=self._pinned_filter.isChecked(),
+                    has_attachments=(True if self._attachment_filter.isChecked() else None),
                     sort=self._selected_sort(),
                     limit_per_group=TaskListModel.PAGE_SIZE,
                 )
@@ -645,6 +657,7 @@ class MainWindow(QMainWindow):
             statuses=self._selected_statuses(),
             priorities=self._selected_priorities(),
             pinned_only=self._pinned_filter.isChecked(),
+            has_attachments=(True if self._attachment_filter.isChecked() else None),
             group=group,
             sort=self._selected_sort(),
             offset=offset,
@@ -674,6 +687,7 @@ class MainWindow(QMainWindow):
             bool(self._selected_statuses())
             or bool(self._selected_priorities())
             or self._pinned_filter.isChecked()
+            or self._attachment_filter.isChecked()
         )
         self._selected_task_id = None
         self._refresh_tasks()
@@ -683,10 +697,12 @@ class MainWindow(QMainWindow):
             QSignalBlocker(self._status_filter),
             QSignalBlocker(self._priority_filter),
             QSignalBlocker(self._pinned_filter),
+            QSignalBlocker(self._attachment_filter),
         )
         self._status_filter.setCurrentIndex(0)
         self._priority_filter.setCurrentIndex(0)
         self._pinned_filter.setChecked(False)
+        self._attachment_filter.setChecked(False)
         del blockers
         self._clear_filters_button.setEnabled(False)
         self._on_filter_changed()
@@ -704,6 +720,7 @@ class MainWindow(QMainWindow):
             "status": str(self._status_filter.currentData()),
             "priority": str(self._priority_filter.currentData()),
             "pinned_only": self._pinned_filter.isChecked(),
+            "has_attachments": self._attachment_filter.isChecked(),
             "sort": str(self._sort_combo.currentData()),
         }
 
@@ -713,11 +730,13 @@ class MainWindow(QMainWindow):
             QSignalBlocker(self._status_filter),
             QSignalBlocker(self._priority_filter),
             QSignalBlocker(self._pinned_filter),
+            QSignalBlocker(self._attachment_filter),
             QSignalBlocker(self._sort_combo),
         )
         self._set_combo_value(self._status_filter, str(preferences.get("status", "")))
         self._set_combo_value(self._priority_filter, str(preferences.get("priority", "")))
         self._pinned_filter.setChecked(bool(preferences.get("pinned_only", False)))
+        self._attachment_filter.setChecked(bool(preferences.get("has_attachments", False)))
         self._set_combo_value(
             self._sort_combo,
             str(preferences.get("sort", TaskSort.SCHEDULE.value)),
@@ -727,6 +746,7 @@ class MainWindow(QMainWindow):
             bool(self._selected_statuses())
             or bool(self._selected_priorities())
             or self._pinned_filter.isChecked()
+            or self._attachment_filter.isChecked()
         )
 
     def _on_list_clicked(self, index: QModelIndex) -> None:
@@ -838,6 +858,7 @@ class MainWindow(QMainWindow):
                 task,
                 task_service=self._task_service,
                 record_service=self._record_service,
+                attachment_service=self._attachment_service,
                 occurrence_start=self._selected_occurrence_start,
                 parent=self,
             )
@@ -967,6 +988,8 @@ class MainWindow(QMainWindow):
             f"{status_labels[task.status]} · 중요도 {priority_labels[task.priority.value]}"
         )
         self._detail_schedule.setText(format_task_schedule(task))
+        if task.has_attachments:
+            self._detail_schedule.setText(f"{self._detail_schedule.text()}\n첨부파일 있음")
         if task.recurrence_rule:
             self._detail_schedule.setText(f"{self._detail_schedule.text()}\n반복 일정")
         if self._reminder_service is not None and task.id is not None:
@@ -1287,7 +1310,7 @@ class MainWindow(QMainWindow):
             self._brand_title.setText("OfficeFlow")
             self._brand_caption.show()
             self._page_caption.show()
-            self._version_label.setText("v3.0 · Phase 6A")
+            self._version_label.setText("v3.0 · Phase 6B")
             self._search.setPlaceholderText(
                 "캘린더 일정 검색  (Ctrl+K)"
                 if self._calendar_active

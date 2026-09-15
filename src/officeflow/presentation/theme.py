@@ -89,7 +89,8 @@ QListWidget#calendarDayList, QListWidget#reminderList {
     outline: none;
     padding: 3px;
 }
-QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrowserList {
+QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrowserList,
+QListWidget#attachmentList {
     background: #FFFFFF;
     border: 1px solid #DCE2EC;
     border-radius: 8px;
@@ -97,12 +98,12 @@ QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrows
     padding: 4px;
 }
 QListWidget#checklistList::item, QListWidget#taskWorkLogList::item,
-QListWidget#workLogBrowserList::item {
+QListWidget#workLogBrowserList::item, QListWidget#attachmentList::item {
     border-radius: 5px;
     padding: 8px 10px;
 }
 QListWidget#checklistList::item:selected, QListWidget#taskWorkLogList::item:selected,
-QListWidget#workLogBrowserList::item:selected {
+QListWidget#workLogBrowserList::item:selected, QListWidget#attachmentList::item:selected {
     color: #172033;
     background: #DFE9FF;
 }

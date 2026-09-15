@@ -360,7 +360,11 @@ class TaskItemDelegate(QStyledItemDelegate):
             painter.drawText(
                 meta_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                format_task_schedule(task),
+                (
+                    f"{format_task_schedule(task)} · 첨부"
+                    if task.has_attachments
+                    else format_task_schedule(task)
+                ),
             )
 
         status_top = rect.top() + (7 if self._compact else 12)

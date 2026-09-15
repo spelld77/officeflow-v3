@@ -11,6 +11,7 @@ from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.recurrence import recurrence_until_utc
 from officeflow.domain.task import Task
 from officeflow.infrastructure.database.models import (
+    AttachmentRecord,
     TaskOccurrenceRecord,
     TaskRecord,
     WorkLogRecord,
@@ -41,11 +42,13 @@ class SqlAlchemyTaskRepository:
         return self.get_required(task.id)
 
     def get(self, task_id: int) -> Task | None:
+        attachment_exists = self._attachment_exists()
+        statement = select(TaskRecord, attachment_exists).where(TaskRecord.id == task_id)
         with self._sessions.transaction() as session:
-            record = session.get(TaskRecord, task_id)
-            if record is None or record.deleted_at is not None:
+            row = session.execute(statement).one_or_none()
+            if row is None or row[0].deleted_at is not None:
                 return None
-            return self._to_domain(record)
+            return self._to_domain(row[0], has_attachments=bool(row[1]))
 
     def get_required(self, task_id: int) -> Task:
         task = self.get(task_id)
@@ -68,8 +71,11 @@ class SqlAlchemyTaskRepository:
             day_end=day_end,
         )
         count_statement = select(func.count(TaskRecord.id)).where(*predicates)
-        statement: Select[tuple[TaskRecord]] = (
-            select(TaskRecord).where(*predicates).order_by(*self._order_by(query.sort))
+        attachment_exists = self._attachment_exists()
+        statement: Select[tuple[TaskRecord, bool]] = (
+            select(TaskRecord, attachment_exists)
+            .where(*predicates)
+            .order_by(*self._order_by(query.sort))
         )
         if query.offset:
             statement = statement.offset(query.offset)
@@ -77,7 +83,10 @@ class SqlAlchemyTaskRepository:
             statement = statement.limit(query.limit)
         with self._sessions.transaction() as session:
             total = int(session.scalar(count_statement) or 0)
-            items = tuple(self._to_domain(record) for record in session.scalars(statement).all())
+            items = tuple(
+                self._to_domain(record, has_attachments=bool(has_attachments))
+                for record, has_attachments in session.execute(statement).all()
+            )
         return TaskPage(items=items, total=total, offset=query.offset, limit=query.limit)
 
     def list_overlapping(
@@ -127,8 +136,9 @@ class SqlAlchemyTaskRepository:
                 )
                 .exists()
             )
+        attachment_exists = self._attachment_exists()
         statement = (
-            select(TaskRecord)
+            select(TaskRecord, attachment_exists)
             .where(*predicates)
             .order_by(
                 TaskRecord.is_pinned.desc(),
@@ -138,7 +148,10 @@ class SqlAlchemyTaskRepository:
             )
         )
         with self._sessions.transaction() as session:
-            return tuple(self._to_domain(record) for record in session.scalars(statement).all())
+            return tuple(
+                self._to_domain(record, has_attachments=bool(has_attachments))
+                for record, has_attachments in session.execute(statement).all()
+            )
 
     def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None:
         statement = select(TaskOccurrenceRecord).where(
@@ -238,7 +251,20 @@ class SqlAlchemyTaskRepository:
             )
         if query.pinned_only:
             predicates.append(TaskRecord.is_pinned.is_(True))
+        if query.has_attachments is not None:
+            attachment_exists = cls._attachment_exists()
+            predicates.append(
+                attachment_exists if query.has_attachments else ~attachment_exists
+            )
         return predicates
+
+    @staticmethod
+    def _attachment_exists() -> Any:
+        return (
+            select(AttachmentRecord.id)
+            .where(AttachmentRecord.task_id == TaskRecord.id)
+            .exists()
+        )
 
     @staticmethod
     def _view_predicates(view: TaskView, day_start: datetime, day_end: datetime) -> list[Any]:
@@ -358,7 +384,7 @@ class SqlAlchemyTaskRepository:
         record.deleted_at = task.deleted_at
 
     @staticmethod
-    def _to_domain(record: TaskRecord) -> Task:
+    def _to_domain(record: TaskRecord, *, has_attachments: bool = False) -> Task:
         return Task(
             id=record.id,
             legacy_id=record.legacy_id,
@@ -377,6 +403,7 @@ class SqlAlchemyTaskRepository:
             created_at=record.created_at,
             updated_at=record.updated_at,
             deleted_at=record.deleted_at,
+            has_attachments=has_attachments,
         )
 
     @staticmethod

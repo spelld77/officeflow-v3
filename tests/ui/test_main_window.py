@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -8,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
+from officeflow.application.attachments import AttachmentService
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import (
@@ -25,9 +28,11 @@ from officeflow.domain.enums import (
     TaskStatus,
 )
 from officeflow.domain.reminder import ReminderRuleInput
+from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.presentation.main_window import MainWindow
 from officeflow.presentation.task_list import GroupHeader
+from tests.unit.test_attachment_service import InMemoryAttachmentRepository
 from tests.unit.test_record_service import InMemoryRecordRepository
 from tests.unit.test_reminder_service import InMemoryReminderRepository
 from tests.unit.test_task_service import InMemoryTaskRepository
@@ -102,6 +107,33 @@ def test_medium_window_exposes_records_without_detail_panel(qtbot: QtBot) -> Non
     assert records_button is not None and records_button.isVisible()
     assert window._detail_panel.isHidden()
     assert window._work_log_button.isEnabled()
+
+
+def test_attachment_filter_combines_with_task_view(qtbot: QtBot, tmp_path: Path) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    attached = task_service.create(TaskDraft(title="첨부 있음"))
+    task_service.create(TaskDraft(title="첨부 없음"))
+    assert attached.id is not None
+    task_repository.tasks[attached.id] = replace(attached, has_attachments=True)
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    window._set_view(TaskView.ALL)
+
+    window._attachment_filter.setChecked(True)
+
+    assert window._task_model.total_task_count == 1
+    assert window._task_model.task_at(window._task_model.index(0, 0)).title == "첨부 있음"
 
 
 def test_compact_window_uses_small_navigation_and_wrapped_summaries(

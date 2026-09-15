@@ -48,6 +48,7 @@ class TaskQuery:
     statuses: frozenset[TaskStatus] = frozenset()
     priorities: frozenset[TaskPriority] = frozenset()
     pinned_only: bool = False
+    has_attachments: bool | None = None
     group: TaskGroup | None = None
     sort: TaskSort = TaskSort.SCHEDULE
     offset: int = 0
@@ -543,6 +544,10 @@ class TaskService:
             (not query.statuses or task.status in query.statuses)
             and (not query.priorities or task.priority in query.priorities)
             and (not query.pinned_only or task.is_pinned)
+            and (
+                query.has_attachments is None
+                or task.has_attachments is query.has_attachments
+            )
         )
 
     @staticmethod
@@ -612,6 +617,7 @@ class TaskService:
         statuses: frozenset[TaskStatus] = frozenset(),
         priorities: frozenset[TaskPriority] = frozenset(),
         pinned_only: bool = False,
+        has_attachments: bool | None = None,
         sort: TaskSort = TaskSort.SCHEDULE,
         limit_per_group: int = 100,
         now: datetime | None = None,
@@ -624,6 +630,7 @@ class TaskService:
                     statuses=statuses,
                     priorities=priorities,
                     pinned_only=pinned_only,
+                    has_attachments=has_attachments,
                     group=group,
                     sort=sort,
                     limit=limit_per_group,

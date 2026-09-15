@@ -26,7 +26,7 @@ Thumbs.db
 *.db
 *.db-shm
 *.db-wal
-attachments/
+/attachments/
 backups/
 logs/
 settings.json

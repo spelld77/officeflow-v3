@@ -22,6 +22,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     }
     checklist_indexes = {index["name"] for index in inspector.get_indexes("checklist_items")}
     work_log_indexes = {index["name"] for index in inspector.get_indexes("work_logs")}
+    attachment_indexes = {index["name"] for index in inspector.get_indexes("attachments")}
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
     engine.dispose()
@@ -51,7 +52,8 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     } <= delivery_indexes
     assert "ix_checklist_items_task_position" in checklist_indexes
     assert "ix_work_logs_date_updated" in work_log_indexes
-    assert revision == "0005_record_indexes"
+    assert "ix_attachments_task_missing" in attachment_indexes
+    assert revision == "0006_attachment_index"
 
 
 def test_initial_migration_is_idempotent(tmp_path: Path) -> None:
