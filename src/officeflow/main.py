@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import sys
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from officeflow.application.attachments import AttachmentService
+from officeflow.application.exporting import ExportService
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import TaskService
@@ -13,6 +15,7 @@ from officeflow.bootstrap.logging import configure_logging
 from officeflow.bootstrap.paths import AppPaths
 from officeflow.bootstrap.single_instance import SingleInstanceCoordinator, instance_name
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
+from officeflow.infrastructure.backup import BackupError, BackupManager
 from officeflow.infrastructure.database.attachment_repository import (
     SqlAlchemyAttachmentRepository,
 )
@@ -21,8 +24,12 @@ from officeflow.infrastructure.database.record_repository import SqlAlchemyRecor
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
+from officeflow.infrastructure.exports.calendar import ICalendarTaskExporter
+from officeflow.infrastructure.exports.excel import ExcelTaskExporter
 from officeflow.infrastructure.settings.store import JsonSettingsStore
 from officeflow.presentation.main_window import MainWindow
+
+logger = logging.getLogger(__name__)
 
 
 def build_application(
@@ -34,6 +41,11 @@ def build_application(
     paths = AppPaths.discover()
     paths.ensure_directories()
     configure_logging(paths.log_dir)
+    backup_manager = BackupManager(paths)
+    try:
+        backup_manager.apply_pending_restore()
+    except BackupError:
+        logger.exception("예약된 백업 복원을 적용하지 못했습니다.")
 
     settings_store = JsonSettingsStore(paths.settings_file)
     settings = settings_store.load()
@@ -48,6 +60,11 @@ def build_application(
         ManagedAttachmentStorage(paths.attachment_dir),
         task_service,
     )
+    export_service = ExportService(
+        task_service,
+        ExcelTaskExporter(),
+        ICalendarTaskExporter(),
+    )
 
     app = application or QApplication(argv or sys.argv)
     app.setApplicationName("OfficeFlow")
@@ -60,6 +77,8 @@ def build_application(
         reminder_service=reminder_service,
         record_service=record_service,
         attachment_service=attachment_service,
+        export_service=export_service,
+        backup_manager=backup_manager,
         save_settings=settings_store.save,
         on_shutdown=engine.dispose,
         desktop_integration=desktop_integration,

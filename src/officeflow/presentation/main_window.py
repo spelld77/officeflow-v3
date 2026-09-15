@@ -7,7 +7,7 @@ from datetime import date, datetime
 from itertools import pairwise
 from typing import ClassVar
 
-from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.attachments import AttachmentService
+from officeflow.application.exporting import ExportService
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderAlert, ReminderService
 from officeflow.application.tasks import (
@@ -45,10 +46,12 @@ from officeflow.application.tasks import (
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
+from officeflow.infrastructure.backup import BackupInfo, BackupManager
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.infrastructure.windows.hotkey import WindowsGlobalHotkey
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.app_icon import create_app_icon
+from officeflow.presentation.data_dialog import DataManagementDialog, OperationWorker
 from officeflow.presentation.month_calendar import CalendarPage
 from officeflow.presentation.record_dialog import TaskRecordsDialog, WorkLogBrowserDialog
 from officeflow.presentation.reminder_dialog import ReminderDialog
@@ -92,6 +95,8 @@ class MainWindow(QMainWindow):
         reminder_service: ReminderService | None = None,
         record_service: RecordService | None = None,
         attachment_service: AttachmentService | None = None,
+        export_service: ExportService | None = None,
+        backup_manager: BackupManager | None = None,
         save_settings: Callable[[AppSettings], None] | None = None,
         on_shutdown: Callable[[], None] | None = None,
         desktop_integration: bool = False,
@@ -103,6 +108,8 @@ class MainWindow(QMainWindow):
         self._reminder_service = reminder_service
         self._record_service = record_service
         self._attachment_service = attachment_service
+        self._export_service = export_service
+        self._backup_manager = backup_manager
         self._save_settings = save_settings
         self._on_shutdown = on_shutdown
         self._shutdown_done = False
@@ -132,6 +139,11 @@ class MainWindow(QMainWindow):
         self._summary_counts: dict[str, QLabel] = {}
         self._summary_jump_buttons: dict[TaskGroup, QPushButton] = {}
         self._reminder_dialog: ReminderDialog | None = None
+        self._automatic_backup_thread: QThread | None = None
+        self._automatic_backup_worker: OperationWorker | None = None
+        self._automatic_backup_timer = QTimer(self)
+        self._automatic_backup_timer.setInterval(15 * 60 * 1_000)
+        self._automatic_backup_timer.timeout.connect(self._maybe_automatic_backup)
 
         self.setWindowTitle("OfficeFlow v3")
         self.setWindowIcon(create_app_icon())
@@ -176,6 +188,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._check_reminders)
         if self._desktop_integration:
             self._setup_desktop_integration()
+        if self._backup_manager is not None and settings.automatic_backup_enabled:
+            self._automatic_backup_timer.start()
+            QTimer.singleShot(1_500, self._maybe_automatic_backup)
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
@@ -215,13 +230,20 @@ class MainWindow(QMainWindow):
         self._work_log_button.setToolTip("날짜별 업무일지 보기")
         self._work_log_button.clicked.connect(self._open_work_logs)
         self._sidebar_layout.addWidget(self._work_log_button)
+        self._data_button = self._create_nav_button("데이터")
+        self._data_button.setEnabled(
+            self._export_service is not None and self._backup_manager is not None
+        )
+        self._data_button.setToolTip("Excel·ICS 내보내기와 백업·복원")
+        self._data_button.clicked.connect(self._open_data_management)
+        self._sidebar_layout.addWidget(self._data_button)
         self._settings_button = self._create_nav_button("설정")
         self._settings_button.setToolTip("실행, 트레이와 알림 설정")
         self._settings_button.clicked.connect(self._open_settings)
         self._sidebar_layout.addWidget(self._settings_button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 6B", "brandCaption")
+        self._version_label = self._named_label("v3.0 · Phase 6C", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -648,7 +670,7 @@ class MainWindow(QMainWindow):
         self,
         *,
         offset: int,
-        limit: int = TaskListModel.PAGE_SIZE,
+        limit: int | None = TaskListModel.PAGE_SIZE,
         group: TaskGroup | None = None,
     ) -> TaskQuery:
         return TaskQuery(
@@ -840,6 +862,73 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "설정은 저장했지만 전역 단축키를 등록하지 못했습니다.", 5000
             )
+        if self._settings.automatic_backup_enabled:
+            self._automatic_backup_timer.start()
+            QTimer.singleShot(0, self._maybe_automatic_backup)
+        else:
+            self._automatic_backup_timer.stop()
+
+    def _open_data_management(self) -> None:
+        if self._export_service is None or self._backup_manager is None:
+            return
+        dialog = DataManagementDialog(
+            export_service=self._export_service,
+            backup_manager=self._backup_manager,
+            query=self._build_query(offset=0, limit=None),
+            parent=self,
+        )
+        dialog.setStyleSheet(LIGHT_STYLESHEET)
+        dialog.exec()
+
+    def _maybe_automatic_backup(self) -> None:
+        if (
+            self._backup_manager is None
+            or not self._settings.automatic_backup_enabled
+            or self._automatic_backup_thread is not None
+        ):
+            return
+        try:
+            required = self._backup_manager.should_create_automatic_backup(
+                self._settings.automatic_backup_interval_hours
+            )
+        except OSError:
+            logger.exception("자동 백업 시점을 확인하지 못했습니다.")
+            return
+        if not required:
+            return
+        manager = self._backup_manager
+        keep = self._settings.automatic_backup_keep
+        thread = QThread(self)
+        worker = OperationWorker(
+            lambda canceled: manager.create_backup(
+                reason="automatic", keep=keep, cancel_requested=canceled
+            )
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._automatic_backup_succeeded)
+        worker.failed.connect(self._automatic_backup_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._automatic_backup_finished)
+        self._automatic_backup_thread = thread
+        self._automatic_backup_worker = worker
+        thread.start()
+
+    def _automatic_backup_succeeded(self, result: object) -> None:
+        if isinstance(result, BackupInfo):
+            self.statusBar().showMessage(
+                f"자동 백업을 완료했습니다: {result.path.name}", 4000
+            )
+
+    @staticmethod
+    def _automatic_backup_failed(error: object) -> None:
+        logger.error("자동 백업에 실패했습니다: %s", error)
+
+    def _automatic_backup_finished(self) -> None:
+        self._automatic_backup_worker = None
+        self._automatic_backup_thread = None
 
     def _open_selected_task(self) -> None:
         if self._selected_task_id is None:
@@ -1232,6 +1321,12 @@ class MainWindow(QMainWindow):
 
     def shutdown(self) -> None:
         self._persist_settings()
+        self._automatic_backup_timer.stop()
+        if self._automatic_backup_worker is not None:
+            self._automatic_backup_worker.cancel()
+        if self._automatic_backup_thread is not None:
+            self._automatic_backup_thread.quit()
+            self._automatic_backup_thread.wait()
         if self._global_hotkey is not None:
             self._global_hotkey.stop()
             self._global_hotkey = None

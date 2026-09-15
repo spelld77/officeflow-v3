@@ -3,6 +3,7 @@
 alembic==1.20.0
 colorama==0.4.6
 coverage==7.16.0
+et_xmlfile==2.0.0
 greenlet==3.5.5
 iniconfig==2.3.0
 librt==0.15.0
@@ -10,6 +11,7 @@ Mako==1.4.1
 MarkupSafe==3.0.3
 mypy==1.20.2
 mypy_extensions==1.1.0
+openpyxl==3.1.5
 packaging==26.3
 pathspec==1.1.1
 platformdirs==4.11.8

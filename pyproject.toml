@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "alembic>=1.13,<2",
+    "openpyxl>=3.1,<4",
     "platformdirs>=4.3,<5",
     "PySide6>=6.7,<7",
     "python-dateutil>=2.9,<3",

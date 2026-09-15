@@ -27,8 +27,8 @@ class SettingsDialog(QDialog):
 
         self.setWindowTitle("OfficeFlow 설정")
         self.setModal(True)
-        self.resize(500, 390)
-        self.setMinimumSize(440, 350)
+        self.resize(520, 500)
+        self.setMinimumSize(460, 450)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 20, 22, 18)
@@ -70,6 +70,29 @@ class SettingsDialog(QDialog):
             settings.missed_reminder_grace_minutes
         )
         form.addRow("놓친 알림 복구", self.grace_minutes_spin)
+
+        self.automatic_backup_check = QCheckBox("정해진 주기마다 자동 백업")
+        self.automatic_backup_check.setObjectName("automaticBackupEnabled")
+        self.automatic_backup_check.setChecked(settings.automatic_backup_enabled)
+        form.addRow("자동 백업", self.automatic_backup_check)
+
+        self.backup_interval_spin = QSpinBox()
+        self.backup_interval_spin.setObjectName("automaticBackupInterval")
+        self.backup_interval_spin.setRange(1, 24 * 30)
+        self.backup_interval_spin.setSuffix("시간")
+        self.backup_interval_spin.setValue(settings.automatic_backup_interval_hours)
+        form.addRow("백업 주기", self.backup_interval_spin)
+
+        self.backup_keep_spin = QSpinBox()
+        self.backup_keep_spin.setObjectName("automaticBackupKeep")
+        self.backup_keep_spin.setRange(1, 100)
+        self.backup_keep_spin.setSuffix("개")
+        self.backup_keep_spin.setValue(settings.automatic_backup_keep)
+        form.addRow("자동 백업 보관", self.backup_keep_spin)
+        self.automatic_backup_check.toggled.connect(self.backup_interval_spin.setEnabled)
+        self.automatic_backup_check.toggled.connect(self.backup_keep_spin.setEnabled)
+        self.backup_interval_spin.setEnabled(settings.automatic_backup_enabled)
+        self.backup_keep_spin.setEnabled(settings.automatic_backup_enabled)
         root.addLayout(form)
 
         hint = QLabel(
@@ -112,6 +135,9 @@ class SettingsDialog(QDialog):
                 start_with_windows=self.start_with_windows_check.isChecked(),
                 global_quick_add_shortcut=hotkey.display,
                 missed_reminder_grace_minutes=self.grace_minutes_spin.value(),
+                automatic_backup_enabled=self.automatic_backup_check.isChecked(),
+                automatic_backup_interval_hours=self.backup_interval_spin.value(),
+                automatic_backup_keep=self.backup_keep_spin.value(),
             )
         except ValueError as error:
             self.error_label.setText(str(error))

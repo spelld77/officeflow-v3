@@ -45,6 +45,10 @@ class AppPaths:
     def settings_file(self) -> Path:
         return self.root / "settings.json"
 
+    @property
+    def pending_restore_file(self) -> Path:
+        return self.root / "pending-restore.ofbackup"
+
     def ensure_directories(self) -> None:
         for path in (self.root, self.data_dir, self.attachment_dir, self.backup_dir, self.log_dir):
             path.mkdir(parents=True, exist_ok=True)

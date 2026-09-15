@@ -24,12 +24,19 @@ class AppSettings:
     minimize_to_tray: bool = True
     start_with_windows: bool = False
     global_quick_add_shortcut: str = "Ctrl+Alt+O"
+    automatic_backup_enabled: bool = True
+    automatic_backup_interval_hours: int = 24
+    automatic_backup_keep: int = 10
 
     def __post_init__(self) -> None:
         if not 1 <= self.missed_reminder_grace_minutes <= 43_200:
             raise ValueError("놓친 알림 복구 범위는 1분에서 30일 사이여야 합니다.")
         if not self.global_quick_add_shortcut.strip():
             raise ValueError("전역 빠른 등록 단축키가 비어 있습니다.")
+        if not 1 <= self.automatic_backup_interval_hours <= 24 * 30:
+            raise ValueError("자동 백업 주기는 1시간에서 30일 사이여야 합니다.")
+        if not 1 <= self.automatic_backup_keep <= 100:
+            raise ValueError("자동 백업 보관 개수는 1개에서 100개 사이여야 합니다.")
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError as error:

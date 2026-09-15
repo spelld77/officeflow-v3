@@ -13,6 +13,9 @@ def test_settings_dialog_normalizes_desktop_options(qtbot: QtBot) -> None:
     dialog.start_with_windows_check.setChecked(True)
     dialog.minimize_to_tray_check.setChecked(False)
     dialog.grace_minutes_spin.setValue(90)
+    dialog.automatic_backup_check.setChecked(True)
+    dialog.backup_interval_spin.setValue(12)
+    dialog.backup_keep_spin.setValue(7)
 
     dialog._validate_and_accept()
     settings = dialog.settings()
@@ -21,6 +24,9 @@ def test_settings_dialog_normalizes_desktop_options(qtbot: QtBot) -> None:
     assert settings.start_with_windows is True
     assert settings.minimize_to_tray is False
     assert settings.missed_reminder_grace_minutes == 90
+    assert settings.automatic_backup_enabled is True
+    assert settings.automatic_backup_interval_hours == 12
+    assert settings.automatic_backup_keep == 7
 
 
 def test_settings_dialog_keeps_open_for_invalid_shortcut(qtbot: QtBot) -> None:

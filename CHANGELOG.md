@@ -50,3 +50,8 @@
 - QLockFile·QLocalServer 기반 단일 실행 및 기존 창 활성화
 - Ctrl+Alt+O 전역 빠른 등록 단축키
 - Windows 시작 시 백그라운드 실행과 앱 내 실행 설정
+- 현재 검색·필터 결과를 서식 있는 Excel 통합 문서로 내보내기
+- 여러 날 종일 일정과 RRULE 반복 규칙을 보존하는 ICS 내보내기
+- SQLite online backup API 기반 `.ofbackup` 백업과 DB·첨부·설정 체크섬 검증
+- 다음 실행 전 복원, 복원 직전 안전 백업과 실패 시 원상 복구
+- 주기와 보관 개수를 설정할 수 있는 자동 백업 정책

@@ -6,8 +6,8 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 ## 현재 상태
 
-- 단계: Phase 6B 완료, Phase 6C 준비
-- 구현 상태: 업무·일정·알림·기록과 안전한 관리형 첨부파일을 갖춘 Windows 데스크톱 앱
+- 단계: Phase 6C 완료, Phase 7 준비
+- 구현 상태: 업무·일정·알림·기록·첨부와 Excel·ICS 내보내기, 검증형 백업·복원을 갖춘 Windows 데스크톱 앱
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
 - 데이터 저장소: SQLite
@@ -43,6 +43,15 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [Phase 5C 완료 보고서](docs/phase-reports/phase-5c.md)
 - [Phase 6A 완료 보고서](docs/phase-reports/phase-6a.md)
 - [Phase 6B 완료 보고서](docs/phase-reports/phase-6b.md)
+- [Phase 6C 완료 보고서](docs/phase-reports/phase-6c.md)
+
+## 내보내기와 백업
+
+- 사이드바의 `데이터`에서 현재 검색·필터 결과를 Excel로 내보낼 수 있다.
+- 모든 원본 일정은 여러 날 종료일과 반복 규칙을 유지한 ICS로 내보낸다.
+- 수동 백업은 데이터베이스, 첨부파일과 설정을 하나의 `.ofbackup` 파일로 보관한다.
+- 복원 파일은 먼저 무결성을 검사하고 다음 실행 전에 적용한다. 적용 직전의 현재 데이터도 자동으로 별도 백업한다.
+- 자동 백업 주기와 보관 개수는 `설정`에서 변경할 수 있다.
 
 ## 범위 기준
 
