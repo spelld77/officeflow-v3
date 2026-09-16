@@ -49,6 +49,17 @@ class AppPaths:
     def pending_restore_file(self) -> Path:
         return self.root / "pending-restore.ofbackup"
 
+    @property
+    def migration_report_dir(self) -> Path:
+        return self.root / "migration-reports"
+
     def ensure_directories(self) -> None:
-        for path in (self.root, self.data_dir, self.attachment_dir, self.backup_dir, self.log_dir):
+        for path in (
+            self.root,
+            self.data_dir,
+            self.attachment_dir,
+            self.backup_dir,
+            self.log_dir,
+            self.migration_report_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)

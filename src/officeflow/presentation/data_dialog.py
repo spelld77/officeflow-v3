@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.exporting import ExportService
+from officeflow.application.migration import LegacyMigration
 from officeflow.application.tasks import TaskQuery
 from officeflow.infrastructure.backup import BackupInfo, BackupManager, BackupManifest
 
@@ -50,26 +51,30 @@ class OperationWorker(QObject):
 
 
 class DataManagementDialog(QDialog):
+    quitRequested = Signal()
+
     def __init__(
         self,
         *,
         export_service: ExportService,
         backup_manager: BackupManager,
         query: TaskQuery,
+        migration_service: LegacyMigration | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._export_service = export_service
         self._backup_manager = backup_manager
         self._query = query
+        self._migration_service = migration_service
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
         self._progress: QProgressDialog | None = None
 
         self.setWindowTitle("내보내기 및 백업")
         self.setModal(True)
-        self.resize(560, 430)
-        self.setMinimumSize(480, 390)
+        self.resize(560, 540)
+        self.setMinimumSize(480, 470)
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 20, 22, 18)
         root.setSpacing(12)
@@ -82,16 +87,28 @@ class DataManagementDialog(QDialog):
         caption.setObjectName("mutedText")
         caption.setWordWrap(True)
         root.addWidget(caption)
-        root.addWidget(self._section(
-            "내보내기",
-            "Excel은 현재 화면의 검색과 필터를 적용합니다. ICS는 모든 원본 일정과 반복 규칙을 포함합니다.",
-            (("현재 목록 Excel", self._export_excel), ("전체 일정 ICS", self._export_ics)),
-        ))
-        root.addWidget(self._section(
-            "백업 및 복원",
-            "DB·첨부파일·설정을 함께 검증합니다. 복원은 다음 실행 때 적용되며 현재 데이터는 먼저 자동 보관됩니다.",
-            (("지금 백업", self._create_backup), ("백업에서 복원", self._stage_restore)),
-        ))
+        root.addWidget(
+            self._section(
+                "내보내기",
+                "Excel은 현재 화면의 검색과 필터를 적용합니다. ICS는 모든 원본 일정과 반복 규칙을 포함합니다.",
+                (("현재 목록 Excel", self._export_excel), ("전체 일정 ICS", self._export_ics)),
+            )
+        )
+        if self._migration_service is not None:
+            root.addWidget(
+                self._section(
+                    "이전 버전 가져오기",
+                    "OfficeFlow 2.6 DB를 먼저 검사한 뒤 현재 3.0 데이터에 안전하게 합칩니다.",
+                    (("2.6 데이터 가져오기", self._open_legacy_migration),),
+                )
+            )
+        root.addWidget(
+            self._section(
+                "백업 및 복원",
+                "DB·첨부파일·설정을 함께 검증합니다. 복원은 다음 실행 때 적용되며 현재 데이터는 먼저 자동 보관됩니다.",
+                (("지금 백업", self._create_backup), ("백업에서 복원", self._stage_restore)),
+            )
+        )
         self.status_label = QLabel("준비됨")
         self.status_label.setObjectName("mutedText")
         self.status_label.setWordWrap(True)
@@ -100,6 +117,15 @@ class DataManagementDialog(QDialog):
         close_button = QPushButton("닫기")
         close_button.clicked.connect(self.accept)
         root.addWidget(close_button)
+
+    def _open_legacy_migration(self) -> None:
+        if self._migration_service is None:
+            return
+        from officeflow.presentation.migration_dialog import LegacyMigrationDialog
+
+        dialog = LegacyMigrationDialog(self._migration_service, self)
+        dialog.quitRequested.connect(self.quitRequested.emit)
+        dialog.exec()
 
     def _section(
         self,
@@ -171,11 +197,14 @@ class DataManagementDialog(QDialog):
         )
         if not name:
             return
-        if QMessageBox.question(
-            self,
-            "복원 예약",
-            "선택한 백업을 검증한 뒤 다음 실행 때 적용합니다. 계속할까요?",
-        ) != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "복원 예약",
+                "선택한 백업을 검증한 뒤 다음 실행 때 적용합니다. 계속할까요?",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         self._start(
             "백업을 검증하고 복원을 예약하는 중입니다...",
@@ -214,9 +243,7 @@ class DataManagementDialog(QDialog):
         self._progress = progress
         thread.start()
 
-    def _operation_succeeded(
-        self, result: object, message: Callable[[Any], str]
-    ) -> None:
+    def _operation_succeeded(self, result: object, message: Callable[[Any], str]) -> None:
         self.status_label.setText(message(result))
 
     def _operation_failed(self, error: object) -> None:
@@ -234,10 +261,7 @@ class DataManagementDialog(QDialog):
     def _backup_message(result: object) -> str:
         if not isinstance(result, BackupInfo):
             return "백업이 완료되었습니다."
-        return (
-            f"백업 완료: {result.path} "
-            f"(첨부파일 {result.attachment_count}개)"
-        )
+        return f"백업 완료: {result.path} (첨부파일 {result.attachment_count}개)"
 
     def _restore_message(self, result: object) -> str:
         if not isinstance(result, BackupManifest):

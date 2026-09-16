@@ -67,7 +67,7 @@ class BackupManager:
         self._paths.ensure_directories()
         created_at = datetime.now(UTC)
         stamp = created_at.astimezone().strftime("%Y%m%d-%H%M%S")
-        safe_reason = reason if reason in {"manual", "automatic", "pre-restore"} else "manual"
+        safe_reason = reason if reason in {"manual", "automatic", "pre-restore", "pre-import"} else "manual"
         target = self._paths.backup_dir / (
             f"officeflow-{safe_reason}-{stamp}-{uuid.uuid4().hex[:8]}.ofbackup"
         )

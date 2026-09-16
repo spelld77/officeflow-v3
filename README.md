@@ -6,8 +6,8 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 ## 현재 상태
 
-- 단계: Phase 6C 완료, Phase 7 준비
-- 구현 상태: 업무·일정·알림·기록·첨부와 Excel·ICS 내보내기, 검증형 백업·복원을 갖춘 Windows 데스크톱 앱
+- 단계: Phase 7 완료, Phase 8 준비
+- 구현 상태: 업무·일정·알림·기록·첨부·내보내기·백업과 v2.6 공식 가져오기를 갖춘 Windows 데스크톱 앱
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
 - 데이터 저장소: SQLite
@@ -33,6 +33,7 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [개발 로드맵](docs/07-roadmap.md)
 - [승인할 제품 결정](docs/08-product-decisions.md)
 - [ADR-0001: 기술 스택](docs/adr/0001-desktop-stack.md)
+- [ADR-0002: v2.6 데이터 변환 규칙](docs/adr/0002-legacy-v26-mapping.md)
 - [Phase 1 완료 보고서](docs/phase-reports/phase-1.md)
 - [Phase 2 완료 보고서](docs/phase-reports/phase-2.md)
 - [Phase 3A 완료 보고서](docs/phase-reports/phase-3a.md)
@@ -44,6 +45,7 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [Phase 6A 완료 보고서](docs/phase-reports/phase-6a.md)
 - [Phase 6B 완료 보고서](docs/phase-reports/phase-6b.md)
 - [Phase 6C 완료 보고서](docs/phase-reports/phase-6c.md)
+- [Phase 7 완료 보고서](docs/phase-reports/phase-7.md)
 
 ## 내보내기와 백업
 
@@ -52,6 +54,18 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - 수동 백업은 데이터베이스, 첨부파일과 설정을 하나의 `.ofbackup` 파일로 보관한다.
 - 복원 파일은 먼저 무결성을 검사하고 다음 실행 전에 적용한다. 적용 직전의 현재 데이터도 자동으로 별도 백업한다.
 - 자동 백업 주기와 보관 개수는 `설정`에서 변경할 수 있다.
+
+## v2.6 데이터 가져오기
+
+1. OfficeFlow v2.6을 완전히 종료한다.
+2. v3 사이드바의 `데이터`에서 `2.6 데이터 가져오기`를 선택한다.
+3. 기존 `office_tasks.db`를 고른다. DB 옆의 `saved_files` 폴더는 자동으로 찾으며 다른
+   위치라면 직접 지정한다.
+4. `가져오기 전 검사`에서 항목 개수와 경고를 확인한 뒤 `안전하게 가져오기`를 누른다.
+5. 완료 후 v3를 완전히 종료하고 다시 실행한다.
+
+원본 v2.6 DB와 파일은 수정하지 않으며, v3의 기존 데이터도 유지된다. 원본 DB 안전 사본과
+변환 보고서는 v3 데이터 폴더의 `backups`, `migration-reports`에 저장된다.
 
 ## 범위 기준
 
