@@ -6,8 +6,9 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 ## 현재 상태
 
-- 단계: Phase 7 완료, Phase 8 준비
-- 구현 상태: 업무·일정·알림·기록·첨부·내보내기·백업과 v2.6 공식 가져오기를 갖춘 Windows 데스크톱 앱
+- 단계: Phase 8 완료
+- 버전: OfficeFlow 3.0.0
+- 구현 상태: 설치·업그레이드·제거 검증을 마친 Windows 데스크톱 앱
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
 - 데이터 저장소: SQLite
@@ -46,6 +47,18 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [Phase 6B 완료 보고서](docs/phase-reports/phase-6b.md)
 - [Phase 6C 완료 보고서](docs/phase-reports/phase-6c.md)
 - [Phase 7 완료 보고서](docs/phase-reports/phase-7.md)
+- [사용자 안내](docs/09-user-guide.md)
+- [3.0.0 릴리스 체크리스트](docs/10-release-checklist.md)
+- [Phase 8 완료 보고서](docs/phase-reports/phase-8.md)
+
+## 설치
+
+`dist/installer/OfficeFlow-3.0.0-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
+기본적으로 현재 사용자에게 설치된다. 기존 버전 위에 설치하면 업무 DB와 첨부파일을
+유지한 채 프로그램 파일만 갱신한다.
+
+설치본에는 앱 안에서 열 수 있는 한국어 도움말이 포함된다. 프로그램을 제거해도
+`%LOCALAPPDATA%\OfficeFlow`의 사용자 데이터는 자동 삭제하지 않는다.
 
 ## 내보내기와 백업
 
@@ -83,3 +96,11 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 ```powershell
 .\scripts\quality.ps1
 ```
+
+Windows 실행 파일과 설치 프로그램을 만들고 설치 수명주기를 검증하려면 다음을 실행한다.
+
+```powershell
+.\scripts\build-release.ps1
+```
+
+빌드 결과는 `dist`에 생성되며 `SHA256SUMS.txt`와 `release-manifest.json`을 함께 제공한다.

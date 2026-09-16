@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from officeflow import __version__
 from officeflow.application.migration import (
     LegacyMigrationError,
     MigrationCounts,
@@ -1273,4 +1274,4 @@ def _app_version() -> str:
     try:
         return version("officeflow")
     except PackageNotFoundError:
-        return "3.0.0.dev0"
+        return __version__

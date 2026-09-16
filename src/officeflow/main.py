@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from officeflow import __version__
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.records import RecordService
@@ -28,6 +30,7 @@ from officeflow.infrastructure.exports.calendar import ICalendarTaskExporter
 from officeflow.infrastructure.exports.excel import ExcelTaskExporter
 from officeflow.infrastructure.migration.legacy_v26 import LegacyV26Migration
 from officeflow.infrastructure.settings.store import JsonSettingsStore
+from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,7 @@ def build_application(
     app = application or QApplication(argv or sys.argv)
     app.setApplicationName("OfficeFlow")
     app.setApplicationDisplayName("OfficeFlow v3")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("OfficeFlow")
 
     window = MainWindow(
@@ -95,9 +99,15 @@ def build_application(
 
 def main() -> int:
     arguments = sys.argv
+    if "--remove-startup" in arguments:
+        WindowsStartupManager().set_enabled(False)
+        return 0
+    if "--smoke-test" in arguments:
+        return _run_smoke_test(arguments)
     app = QApplication(arguments)
     app.setApplicationName("OfficeFlow")
     app.setApplicationDisplayName("OfficeFlow v3")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("OfficeFlow")
 
     paths = AppPaths.discover()
@@ -126,6 +136,17 @@ def main() -> int:
     if command == "quick-add":
         QTimer.singleShot(0, lambda: window.handle_external_command("quick-add"))
     return app.exec()
+
+
+def _run_smoke_test(arguments: list[str]) -> int:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication(arguments)
+    app, window = build_application(arguments, application=app)
+    app.processEvents()
+    window.shutdown()
+    window.close()
+    app.quit()
+    return 0
 
 
 if __name__ == "__main__":

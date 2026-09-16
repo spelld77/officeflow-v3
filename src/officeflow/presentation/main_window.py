@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow import __version__
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.migration import LegacyMigration
@@ -53,6 +54,7 @@ from officeflow.infrastructure.windows.hotkey import WindowsGlobalHotkey
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.data_dialog import DataManagementDialog, OperationWorker
+from officeflow.presentation.help import open_user_help
 from officeflow.presentation.month_calendar import CalendarPage
 from officeflow.presentation.record_dialog import TaskRecordsDialog, WorkLogBrowserDialog
 from officeflow.presentation.reminder_dialog import ReminderDialog
@@ -240,13 +242,17 @@ class MainWindow(QMainWindow):
         self._data_button.setToolTip("내보내기·백업·복원 및 2.6 데이터 가져오기")
         self._data_button.clicked.connect(self._open_data_management)
         self._sidebar_layout.addWidget(self._data_button)
+        self._help_button = self._create_nav_button("도움말")
+        self._help_button.setToolTip("사용 방법과 문제 해결 안내")
+        self._help_button.clicked.connect(self._open_help)
+        self._sidebar_layout.addWidget(self._help_button)
         self._settings_button = self._create_nav_button("설정")
         self._settings_button.setToolTip("실행, 트레이와 알림 설정")
         self._settings_button.clicked.connect(self._open_settings)
         self._sidebar_layout.addWidget(self._settings_button)
 
         self._sidebar_layout.addStretch()
-        self._version_label = self._named_label("v3.0 · Phase 6C", "brandCaption")
+        self._version_label = self._named_label(f"OfficeFlow {__version__}", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
 
@@ -885,6 +891,14 @@ class MainWindow(QMainWindow):
         dialog.setStyleSheet(LIGHT_STYLESHEET)
         dialog.exec()
 
+    def _open_help(self) -> None:
+        if not open_user_help():
+            QMessageBox.warning(
+                self,
+                "도움말을 열 수 없습니다.",
+                "사용자 안내 파일을 찾지 못했습니다. OfficeFlow를 다시 설치하세요.",
+            )
+
     def _maybe_automatic_backup(self) -> None:
         if (
             self._backup_manager is None
@@ -1396,7 +1410,7 @@ class MainWindow(QMainWindow):
             self._brand_title.setText("OF")
             self._brand_caption.hide()
             self._page_caption.hide()
-            self._version_label.setText("v3")
+            self._version_label.setText(f"v{__version__}")
             self._search.setPlaceholderText("일정 검색" if self._calendar_active else "업무 검색")
             self._add_button.setText("+ 일정" if self._calendar_active else "+ 업무")
         else:
@@ -1410,7 +1424,7 @@ class MainWindow(QMainWindow):
             self._brand_title.setText("OfficeFlow")
             self._brand_caption.show()
             self._page_caption.show()
-            self._version_label.setText("v3.0 · Phase 6B")
+            self._version_label.setText(f"OfficeFlow {__version__}")
             self._search.setPlaceholderText(
                 "캘린더 일정 검색  (Ctrl+K)"
                 if self._calendar_active

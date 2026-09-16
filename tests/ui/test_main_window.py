@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
+import officeflow.presentation.main_window as main_window_module
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderService
@@ -36,6 +37,24 @@ from tests.unit.test_attachment_service import InMemoryAttachmentRepository
 from tests.unit.test_record_service import InMemoryRecordRepository
 from tests.unit.test_reminder_service import InMemoryReminderRepository
 from tests.unit.test_task_service import InMemoryTaskRepository
+
+
+def test_help_button_opens_packaged_user_guide(
+    qtbot: QtBot, task_service: TaskService, monkeypatch
+) -> None:
+    opened: list[bool] = []
+    monkeypatch.setattr(
+        main_window_module,
+        "open_user_help",
+        lambda: opened.append(True) or True,
+    )
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+
+    window._help_button.click()
+
+    assert opened == [True]
+    assert window._version_label.text() == "OfficeFlow 3.0.0"
 
 
 class FakeTrayIcon:
