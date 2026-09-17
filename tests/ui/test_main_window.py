@@ -7,7 +7,7 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QPushButton, QWidget
+from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 import officeflow.presentation.main_window as main_window_module
@@ -107,6 +107,11 @@ def test_medium_window_prioritizes_task_list(qtbot: QtBot, task_service: TaskSer
     assert detail is not None and detail.isHidden()
     assert sidebar is not None and sidebar.width() == 180
     assert window._summary_layout.getItemPosition(3)[:2] == (0, 3)
+    pinned_position = window._filter_layout.getItemPosition(
+        window._filter_layout.indexOf(window._pinned_filter)
+    )
+    assert pinned_position[:2] == (1, 0)
+    assert window._result_count.geometry().right() <= window._filter_bar.contentsRect().right()
 
 
 def test_medium_window_exposes_records_without_detail_panel(qtbot: QtBot) -> None:
@@ -126,6 +131,44 @@ def test_medium_window_exposes_records_without_detail_panel(qtbot: QtBot) -> Non
     assert records_button is not None and records_button.isVisible()
     assert window._detail_panel.isHidden()
     assert window._work_log_button.isEnabled()
+
+
+def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    record_service = RecordService(InMemoryRecordRepository(), task_service)
+    task = task_service.create(TaskDraft(title="우클릭 완료"))
+    assert task.id is not None
+    window = MainWindow(AppSettings(), task_service, record_service=record_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
+
+    menu = window._build_task_context_menu(task)
+    assert "완료 및 결과 입력…" in [action.text() for action in menu.actions()]
+    assert "바로 완료" in [action.text() for action in menu.actions()]
+
+    class FakeCompleteDialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def setStyleSheet(self, _style: str) -> None:
+            pass
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        def result_note(self) -> str:
+            return "검수까지 완료"
+
+    monkeypatch.setattr(main_window_module, "CompleteTaskDialog", FakeCompleteDialog)
+    window._complete_selected_with_result()
+
+    saved = task_service.get(task.id)
+    assert saved.status is TaskStatus.COMPLETED
+    assert saved.result_note == "검수까지 완료"
 
 
 def test_attachment_filter_combines_with_task_view(qtbot: QtBot, tmp_path: Path) -> None:

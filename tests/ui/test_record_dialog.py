@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import QDate, Qt
@@ -10,6 +10,7 @@ from pytestqt.qtbot import QtBot
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.records import RecordService
 from officeflow.application.tasks import TaskDraft, TaskService
+from officeflow.domain.enums import TaskStatus
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from officeflow.infrastructure.database.attachment_repository import (
     SqlAlchemyAttachmentRepository,
@@ -19,6 +20,7 @@ from officeflow.infrastructure.database.record_repository import SqlAlchemyRecor
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 from officeflow.presentation.record_dialog import TaskRecordsDialog, WorkLogBrowserDialog
+from tests.unit.test_attachment_service import InMemoryAttachmentRepository
 from tests.unit.test_record_service import InMemoryRecordRepository
 from tests.unit.test_task_service import InMemoryTaskRepository
 
@@ -102,6 +104,49 @@ def test_work_log_browser_filters_by_date(qtbot: QtBot) -> None:
     assert entries is not None
     assert entries.count() == 1
     assert "지표 확인" in entries.item(0).text()
+
+
+def test_work_log_browser_includes_tasks_completed_on_selected_date(qtbot: QtBot) -> None:
+    task_service, record_service = make_dialog_services()
+    completed_at = datetime(2026, 9, 15, 4, 0, tzinfo=UTC)
+    task = task_service.create(TaskDraft(title="완료 보고"), now=completed_at)
+    assert task.id is not None
+    task_service.transition(task.id, TaskStatus.COMPLETED, now=completed_at)
+    task_service.update_result_note(task.id, "보고서 제출", now=completed_at)
+    dialog = WorkLogBrowserDialog(
+        task_service=task_service,
+        record_service=record_service,
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.date_edit.setDate(QDate(2026, 9, 15))
+
+    assert dialog.list_widget.count() == 1
+    assert "[완료] 완료 보고" in dialog.list_widget.item(0).text()
+    assert "결과 있음" in dialog.list_widget.item(0).text()
+    dialog.list_widget.setCurrentRow(0)
+    assert "보고서 제출" in dialog.detail.text()
+    assert dialog.open_records_button.isEnabled()
+
+
+def test_task_records_dialog_can_open_on_attachment_tab(qtbot: QtBot, tmp_path: Path) -> None:
+    task_service, record_service = make_dialog_services()
+    task = task_service.create(TaskDraft(title="첨부 바로가기"))
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    dialog = TaskRecordsDialog(
+        task,
+        task_service=task_service,
+        record_service=record_service,
+        attachment_service=attachment_service,
+        initial_tab="attachments",
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.tabs.tabText(dialog.tabs.currentIndex()) == "첨부파일"
 
 
 def test_task_records_dialog_imports_attachment_without_blocking_ui(

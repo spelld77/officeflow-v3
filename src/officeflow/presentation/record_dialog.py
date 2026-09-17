@@ -76,6 +76,49 @@ class AttachmentImportWorker(QObject):
             self.finished.emit()
 
 
+class CompleteTaskDialog(QDialog):
+    def __init__(
+        self,
+        task: Task,
+        *,
+        result_note: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("업무 완료")
+        self.setModal(True)
+        self.resize(500, 320)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        title = QLabel(task.title)
+        title.setObjectName("pageTitle")
+        title.setWordWrap(True)
+        root.addWidget(title)
+        help_label = QLabel("결과를 바로 남기고 완료할 수 있습니다. 결과 입력은 선택 사항입니다.")
+        help_label.setObjectName("mutedText")
+        help_label.setWordWrap(True)
+        root.addWidget(help_label)
+        self.result_edit = QTextEdit()
+        self.result_edit.setObjectName("completionResultEdit")
+        self.result_edit.setPlaceholderText("완료 결과, 결정 사항 또는 다음 할 일 (선택)")
+        self.result_edit.setPlainText(result_note)
+        self.result_edit.setTabChangesFocus(True)
+        root.addWidget(self.result_edit, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("완료 저장")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def result_note(self) -> str:
+        return self.result_edit.toPlainText().strip()
+
+
 class TaskRecordsDialog(QDialog):
     changed = Signal()
 
@@ -87,6 +130,7 @@ class TaskRecordsDialog(QDialog):
         record_service: RecordService,
         attachment_service: AttachmentService | None = None,
         occurrence_start: datetime | None = None,
+        initial_tab: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -131,6 +175,10 @@ class TaskRecordsDialog(QDialog):
         self.tabs.addTab(self._build_work_log_tab(), "업무일지")
         if attachment_service is not None:
             self.tabs.addTab(self._build_attachment_tab(), "첨부파일")
+        tab_indexes = {"checklist": 0, "result": 1, "work_log": 2, "attachments": 3}
+        requested_index = tab_indexes.get(initial_tab or "")
+        if requested_index is not None and requested_index < self.tabs.count():
+            self.tabs.setCurrentIndex(requested_index)
         root.addWidget(self.tabs, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -145,6 +193,12 @@ class TaskRecordsDialog(QDialog):
         self._refresh_work_logs()
         if attachment_service is not None:
             self._refresh_attachments()
+
+    def start_attachment_picker(self) -> None:
+        """Open the file picker from an external shortcut such as a task context menu."""
+        if self._attachment_service is not None:
+            self.tabs.setCurrentIndex(self.tabs.count() - 1)
+            self._choose_attachment()
 
     def _build_checklist_tab(self) -> QWidget:
         tab = QWidget()
@@ -697,12 +751,16 @@ class WorkLogBrowserDialog(QDialog):
         *,
         task_service: TaskService,
         record_service: RecordService,
+        attachment_service: AttachmentService | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._task_service = task_service
         self._record_service = record_service
+        self._attachment_service = attachment_service
         self._logs_by_id: dict[int, WorkLog] = {}
+        self._completed_by_key: dict[tuple[int, str], Task] = {}
+        self._selected_task_context: tuple[int, datetime | None] | None = None
         self.setWindowTitle("날짜별 업무일지")
         self.resize(680, 560)
         self.setMinimumSize(500, 440)
@@ -730,12 +788,18 @@ class WorkLogBrowserDialog(QDialog):
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("workLogBrowserList")
         self.list_widget.currentItemChanged.connect(self._show_selected)
+        self.list_widget.itemDoubleClicked.connect(lambda _item: self._open_selected_records())
         root.addWidget(self.list_widget, 1)
         self.detail = QLabel("날짜를 선택하면 기록을 확인할 수 있습니다.")
         self.detail.setObjectName("workLogBrowserDetail")
         self.detail.setWordWrap(True)
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(self.detail)
+        self.open_records_button = QPushButton("결과 · 기록 열기")
+        self.open_records_button.setObjectName("workLogOpenRecordsButton")
+        self.open_records_button.setEnabled(False)
+        self.open_records_button.clicked.connect(self._open_selected_records)
+        root.addWidget(self.open_records_button, alignment=Qt.AlignmentFlag.AlignRight)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("닫기")
         buttons.rejected.connect(self.reject)
@@ -747,11 +811,28 @@ class WorkLogBrowserDialog(QDialog):
         self.date_edit.setDate(_qdate(current + timedelta(days=days)))
 
     def _refresh(self, _selected: QDate | None = None) -> None:
+        selected_date = cast(date, self.date_edit.date().toPython())
         logs = self._record_service.work_logs(
-            log_date=cast(date, self.date_edit.date().toPython())
+            log_date=selected_date
         )
+        completed = self._task_service.completed_on(selected_date)
         self._logs_by_id = {log.id: log for log in logs if log.id is not None}
+        self._completed_by_key.clear()
+        self._selected_task_context = None
+        self.open_records_button.setEnabled(False)
         self.list_widget.clear()
+        for task in completed:
+            if task.id is None:
+                continue
+            occurrence_start = task.starts_at if task.recurrence_rule else None
+            occurrence_key = occurrence_start.isoformat() if occurrence_start is not None else ""
+            key = (task.id, occurrence_key)
+            self._completed_by_key[key] = task
+            result_note = self._task_service.result_note(task.id, occurrence_start)
+            result_state = "결과 있음" if result_note else "결과 미입력"
+            item = QListWidgetItem(f"[완료] {task.title}  ·  {result_state}")
+            item.setData(Qt.ItemDataRole.UserRole, ("task", *key))
+            self.list_widget.addItem(item)
         for log in logs:
             task_title = "연결되지 않은 기록"
             if log.task_id is not None:
@@ -760,13 +841,13 @@ class WorkLogBrowserDialog(QDialog):
                 except LookupError:
                     task_title = "삭제된 업무"
             preview = " ".join(log.content.splitlines())
-            item = QListWidgetItem(f"{task_title}  ·  {preview}")
-            item.setData(Qt.ItemDataRole.UserRole, log.id)
+            item = QListWidgetItem(f"[일지] {task_title}  ·  {preview}")
+            item.setData(Qt.ItemDataRole.UserRole, ("log", log.id))
             self.list_widget.addItem(item)
         self.detail.setText(
-            "이 날짜에 작성한 업무일지가 없습니다."
-            if not logs
-            else "기록을 선택하면 전체 내용을 확인할 수 있습니다."
+            "이 날짜에 완료한 업무나 작성한 업무일지가 없습니다."
+            if not completed and not logs
+            else "완료 업무 또는 업무일지를 선택하면 내용을 확인할 수 있습니다."
         )
 
     def _show_selected(
@@ -776,8 +857,50 @@ class WorkLogBrowserDialog(QDialog):
     ) -> None:
         if current is None:
             return
-        work_log = self._logs_by_id.get(current.data(Qt.ItemDataRole.UserRole))
+        data = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, tuple) or not data:
+            return
+        if data[0] == "task" and len(data) == 3:
+            task_id = int(data[1])
+            occurrence_start = datetime.fromisoformat(data[2]) if data[2] else None
+            task = self._completed_by_key.get((task_id, str(data[2])))
+            if task is None:
+                return
+            result_note = self._task_service.result_note(task_id, occurrence_start)
+            result = result_note or "아직 입력하지 않았습니다."
+            self.detail.setText(f"완료 업무\n{task.title}\n\n결과\n{result}")
+            self._selected_task_context = (task_id, occurrence_start)
+            self.open_records_button.setEnabled(True)
+            return
+        if data[0] != "log" or len(data) != 2:
+            return
+        work_log = self._logs_by_id.get(data[1])
         if work_log is None:
             return
         result = f"\n\n결과\n{work_log.result}" if work_log.result else ""
         self.detail.setText(f"진행 내용\n{work_log.content}{result}")
+        self._selected_task_context = (
+            (work_log.task_id, None) if work_log.task_id is not None else None
+        )
+        self.open_records_button.setEnabled(self._selected_task_context is not None)
+
+    def _open_selected_records(self) -> None:
+        if self._selected_task_context is None:
+            return
+        task_id, occurrence_start = self._selected_task_context
+        try:
+            task = self._task_service.get(task_id)
+        except LookupError:
+            return
+        dialog = TaskRecordsDialog(
+            task,
+            task_service=self._task_service,
+            record_service=self._record_service,
+            attachment_service=self._attachment_service,
+            occurrence_start=occurrence_start,
+            initial_tab="result",
+            parent=self,
+        )
+        dialog.changed.connect(self._refresh)
+        dialog.exec()
+        self._refresh()

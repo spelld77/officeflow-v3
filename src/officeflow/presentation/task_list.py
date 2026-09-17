@@ -88,7 +88,8 @@ class TaskListModel(QAbstractListModel):
             if role == Qt.ItemDataRole.DisplayRole:
                 return entry.title
             if role == Qt.ItemDataRole.ToolTipRole:
-                return entry.description or entry.title
+                attachment = "\n첨부파일 있음" if entry.has_attachments else ""
+                return f"{entry.description or entry.title}{attachment}"
             if role == self.TASK_ROLE:
                 return entry
         elif isinstance(entry, GroupHeader) and role == Qt.ItemDataRole.DisplayRole:
@@ -338,7 +339,10 @@ class TaskItemDelegate(QStyledItemDelegate):
 
         text_left = int(rect.left() + 27)
         title_bottom = -8 if self._compact else -31
-        title_rect = option.rect.adjusted(text_left - option.rect.left(), 8, -92, title_bottom)
+        title_right_margin = -146 if task.has_attachments else -92
+        title_rect = option.rect.adjusted(
+            text_left - option.rect.left(), 8, title_right_margin, title_bottom
+        )
         title_font = QFont(option.font)
         title_font.setBold(True)
         painter.setFont(title_font)
@@ -360,14 +364,17 @@ class TaskItemDelegate(QStyledItemDelegate):
             painter.drawText(
                 meta_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                (
-                    f"{format_task_schedule(task)} · 첨부"
-                    if task.has_attachments
-                    else format_task_schedule(task)
-                ),
+                format_task_schedule(task),
             )
 
         status_top = rect.top() + (7 if self._compact else 12)
+        if task.has_attachments:
+            attachment_rect = QRectF(rect.right() - 126, status_top, 48, 24)
+            painter.setBrush(QColor("#EAF1FF"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(attachment_rect, 12, 12)
+            painter.setPen(QColor("#2F6FED"))
+            painter.drawText(attachment_rect, Qt.AlignmentFlag.AlignCenter, "첨부")
         status_rect = QRectF(rect.right() - 72, status_top, 60, 24)
         painter.setBrush(QColor("#EEF2F7"))
         painter.setPen(Qt.PenStyle.NoPen)

@@ -57,7 +57,11 @@ from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.data_dialog import DataManagementDialog, OperationWorker
 from officeflow.presentation.help import open_user_help
 from officeflow.presentation.month_calendar import CalendarPage
-from officeflow.presentation.record_dialog import TaskRecordsDialog, WorkLogBrowserDialog
+from officeflow.presentation.record_dialog import (
+    CompleteTaskDialog,
+    TaskRecordsDialog,
+    WorkLogBrowserDialog,
+)
 from officeflow.presentation.reminder_dialog import ReminderDialog
 from officeflow.presentation.settings_dialog import SettingsDialog
 from officeflow.presentation.task_editor import TaskEditorDialog
@@ -131,6 +135,7 @@ class MainWindow(QMainWindow):
         self._selected_occurrence_start: datetime | None = None
         self._compact_navigation = False
         self._compact_summaries = False
+        self._filters_wrapped: bool | None = None
         self._collapsed_groups = {
             group for group in TaskGroup if group.value in settings.collapsed_today_groups
         }
@@ -329,6 +334,11 @@ class MainWindow(QMainWindow):
         self._open_selected_records_button.clicked.connect(self._open_selected_records)
         self._open_selected_records_button.hide()
         heading.addWidget(self._open_selected_records_button)
+        self._open_selected_attachment_button = QPushButton("첨부 추가")
+        self._open_selected_attachment_button.setObjectName("openSelectedAttachmentButton")
+        self._open_selected_attachment_button.clicked.connect(self._add_attachment_to_selected)
+        self._open_selected_attachment_button.hide()
+        heading.addWidget(self._open_selected_attachment_button)
         self._content_layout.addLayout(heading)
         self._content_layout.addWidget(self._build_filter_bar())
 
@@ -385,9 +395,11 @@ class MainWindow(QMainWindow):
         self._task_list.setSpacing(1)
         self._task_list.setUniformItemSizes(False)
         self._task_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._task_list.selectionModel().currentChanged.connect(self._on_selection_changed)
         self._task_list.clicked.connect(self._on_list_clicked)
         self._task_list.doubleClicked.connect(self._open_task_from_index)
+        self._task_list.customContextMenuRequested.connect(self._show_task_context_menu)
         self._task_model.modelReset.connect(self._update_result_count)
         self._task_model.rowsInserted.connect(self._update_result_count)
         self._content_layout.addWidget(self._task_list, 1)
@@ -410,7 +422,9 @@ class MainWindow(QMainWindow):
     def _build_filter_bar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("filterBar")
-        layout = QHBoxLayout(bar)
+        self._filter_bar = bar
+        layout = QGridLayout(bar)
+        self._filter_layout = layout
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
@@ -425,7 +439,6 @@ class MainWindow(QMainWindow):
         ):
             self._status_filter.addItem(label, status.value)
         self._status_filter.setMaximumWidth(105)
-        layout.addWidget(self._status_filter)
 
         self._priority_filter = QComboBox()
         self._priority_filter.setObjectName("priorityFilter")
@@ -438,18 +451,15 @@ class MainWindow(QMainWindow):
         ):
             self._priority_filter.addItem(label, priority.value)
         self._priority_filter.setMaximumWidth(115)
-        layout.addWidget(self._priority_filter)
 
         self._pinned_filter = QPushButton("고정만")
         self._pinned_filter.setObjectName("pinnedFilter")
         self._pinned_filter.setCheckable(True)
-        layout.addWidget(self._pinned_filter)
 
         self._attachment_filter = QPushButton("첨부만")
         self._attachment_filter.setObjectName("attachmentFilter")
         self._attachment_filter.setCheckable(True)
         self._attachment_filter.setVisible(self._attachment_service is not None)
-        layout.addWidget(self._attachment_filter)
 
         self._sort_combo = QComboBox()
         self._sort_combo.setObjectName("taskSort")
@@ -458,23 +468,29 @@ class MainWindow(QMainWindow):
         self._sort_combo.addItem("최근 수정순", TaskSort.UPDATED.value)
         self._sort_combo.addItem("제목순", TaskSort.TITLE.value)
         self._sort_combo.setMaximumWidth(115)
-        layout.addWidget(self._sort_combo)
 
         self._compact_toggle = QPushButton("간결 보기")
         self._compact_toggle.setObjectName("compactListToggle")
         self._compact_toggle.setCheckable(True)
         self._compact_toggle.setChecked(self._settings.compact_list)
-        layout.addWidget(self._compact_toggle)
 
         self._clear_filters_button = QPushButton("필터 해제")
         self._clear_filters_button.setObjectName("clearTaskFilters")
         self._clear_filters_button.setEnabled(False)
-        layout.addWidget(self._clear_filters_button)
-        layout.addStretch()
 
         self._result_count = self._named_label("", "mutedText")
         self._result_count.setObjectName("taskResultCount")
-        layout.addWidget(self._result_count)
+        self._filter_widgets = (
+            self._status_filter,
+            self._priority_filter,
+            self._pinned_filter,
+            self._attachment_filter,
+            self._sort_combo,
+            self._compact_toggle,
+            self._clear_filters_button,
+            self._result_count,
+        )
+        self._arrange_filter_bar(wrapped=False)
 
         self._status_filter.currentIndexChanged.connect(self._on_filter_changed)
         self._priority_filter.currentIndexChanged.connect(self._on_filter_changed)
@@ -515,6 +531,11 @@ class MainWindow(QMainWindow):
         self._detail_records_button.clicked.connect(self._open_selected_records)
         self._detail_records_button.setEnabled(False)
         layout.addWidget(self._detail_records_button)
+        self._detail_attachment_button = QPushButton("첨부파일 추가")
+        self._detail_attachment_button.setObjectName("detailAttachmentButton")
+        self._detail_attachment_button.clicked.connect(self._add_attachment_to_selected)
+        self._detail_attachment_button.setEnabled(False)
+        layout.addWidget(self._detail_attachment_button)
 
         actions = QHBoxLayout()
         self._pending_button = QPushButton("대기")
@@ -806,6 +827,45 @@ class MainWindow(QMainWindow):
         if isinstance(entry, LoadMoreRow):
             self._task_model.load_more(entry.group)
 
+    def _show_task_context_menu(self, position: QPoint) -> None:
+        index = self._task_list.indexAt(position)
+        task = self._task_model.task_at(index)
+        if task is None:
+            return
+        self._task_list.setCurrentIndex(index)
+        menu = self._build_task_context_menu(task)
+        menu.exec(self._task_list.viewport().mapToGlobal(position))
+
+    def _build_task_context_menu(self, task: Task) -> QMenu:
+        menu = QMenu(self)
+        if task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}:
+            complete_with_result = menu.addAction("완료 및 결과 입력…")
+            complete_with_result.triggered.connect(self._complete_selected_with_result)
+            complete_now = menu.addAction("바로 완료")
+            complete_now.triggered.connect(
+                lambda: self._transition_selected(TaskStatus.COMPLETED)
+            )
+        elif task.status is TaskStatus.COMPLETED:
+            edit_result = menu.addAction("결과 입력 · 수정…")
+            edit_result.triggered.connect(self._open_selected_result)
+            if self._selected_occurrence_start is None:
+                reactivate = menu.addAction("다시 진행")
+                reactivate.triggered.connect(
+                    lambda: self._transition_selected(TaskStatus.ACTIVE)
+                )
+
+        if menu.actions():
+            menu.addSeparator()
+        if self._attachment_service is not None and self._record_service is not None:
+            add_attachment = menu.addAction("첨부파일 추가…")
+            add_attachment.triggered.connect(self._add_attachment_to_selected)
+        if self._record_service is not None:
+            records = menu.addAction("결과 · 기록 열기")
+            records.triggered.connect(self._open_selected_records)
+        edit = menu.addAction("업무 수정")
+        edit.triggered.connect(self._open_selected_task)
+        return menu
+
     def _jump_to_group(self, group: TaskGroup) -> None:
         if self._current_view is not TaskView.TODAY:
             return
@@ -973,7 +1033,12 @@ class MainWindow(QMainWindow):
         except Exception as error:
             self._show_error("업무를 열지 못했습니다.", error)
 
-    def _open_selected_records(self) -> None:
+    def _open_selected_records(
+        self,
+        *,
+        initial_tab: str | None = None,
+        start_attachment_picker: bool = False,
+    ) -> None:
         if self._selected_task_id is None or self._record_service is None:
             return
         try:
@@ -984,13 +1049,47 @@ class MainWindow(QMainWindow):
                 record_service=self._record_service,
                 attachment_service=self._attachment_service,
                 occurrence_start=self._selected_occurrence_start,
+                initial_tab=initial_tab,
                 parent=self,
             )
             dialog.setStyleSheet(LIGHT_STYLESHEET)
             dialog.changed.connect(self._refresh_tasks)
+            if start_attachment_picker:
+                QTimer.singleShot(0, dialog.start_attachment_picker)
             dialog.exec()
         except Exception as error:
             self._show_error("업무 기록을 열지 못했습니다.", error)
+
+    def _open_selected_result(self) -> None:
+        self._open_selected_records(initial_tab="result")
+
+    def _add_attachment_to_selected(self) -> None:
+        self._open_selected_records(
+            initial_tab="attachments",
+            start_attachment_picker=True,
+        )
+
+    def _complete_selected_with_result(self) -> None:
+        if self._selected_task_id is None:
+            return
+        try:
+            task = self._task_service.get(self._selected_task_id)
+            current_result = self._task_service.result_note(
+                self._selected_task_id,
+                self._selected_occurrence_start,
+            )
+        except (LookupError, ValueError) as error:
+            self._show_error("업무를 열지 못했습니다.", error)
+            return
+        dialog = CompleteTaskDialog(
+            task,
+            result_note=current_result,
+            parent=self,
+        )
+        dialog.setStyleSheet(LIGHT_STYLESHEET)
+        if dialog.exec() != CompleteTaskDialog.DialogCode.Accepted:
+            return
+        self._transition_selected(TaskStatus.COMPLETED, result_note=dialog.result_note())
 
     def _open_work_logs(self) -> None:
         if self._record_service is None:
@@ -998,6 +1097,7 @@ class MainWindow(QMainWindow):
         dialog = WorkLogBrowserDialog(
             task_service=self._task_service,
             record_service=self._record_service,
+            attachment_service=self._attachment_service,
             parent=self,
         )
         dialog.setStyleSheet(LIGHT_STYLESHEET)
@@ -1088,10 +1188,12 @@ class MainWindow(QMainWindow):
                 self._archive_button,
                 self._edit_button,
                 self._detail_records_button,
+                self._detail_attachment_button,
             ):
                 button.setEnabled(False)
             self._open_selected_button.hide()
             self._open_selected_records_button.hide()
+            self._open_selected_attachment_button.hide()
             return
 
         status_labels = {
@@ -1132,6 +1234,9 @@ class MainWindow(QMainWindow):
         self._detail_description.setText(task.description or "설명이 없습니다.")
         self._edit_button.setEnabled(True)
         self._detail_records_button.setEnabled(self._record_service is not None)
+        self._detail_attachment_button.setEnabled(
+            self._record_service is not None and self._attachment_service is not None
+        )
         self._pending_button.setEnabled(task.status is TaskStatus.ACTIVE)
         self._complete_button.setEnabled(task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING})
         self._archive_button.setEnabled(task.status is not TaskStatus.ARCHIVED)
@@ -1145,8 +1250,18 @@ class MainWindow(QMainWindow):
         self._open_selected_records_button.setVisible(
             self._record_service is not None and not self._detail_panel.isVisible()
         )
+        self._open_selected_attachment_button.setVisible(
+            self._record_service is not None
+            and self._attachment_service is not None
+            and not self._detail_panel.isVisible()
+        )
 
-    def _transition_selected(self, status: TaskStatus) -> None:
+    def _transition_selected(
+        self,
+        status: TaskStatus,
+        *,
+        result_note: str | None = None,
+    ) -> None:
         if self._selected_task_id is None:
             return
         try:
@@ -1160,6 +1275,7 @@ class MainWindow(QMainWindow):
                     self._selected_task_id,
                     self._selected_occurrence_start,
                     occurrence_status,
+                    result_note=result_note,
                 )
                 if occurrence_status is OccurrenceStatus.SKIPPED:
                     self._selected_occurrence_start = None
@@ -1167,6 +1283,11 @@ class MainWindow(QMainWindow):
                     self._update_detail(None)
             else:
                 self._task_service.transition(self._selected_task_id, status)
+                if result_note is not None:
+                    self._task_service.update_result_note(
+                        self._selected_task_id,
+                        result_note,
+                    )
         except (TaskValidationError, LookupError, ValueError) as error:
             self._show_error("상태를 변경하지 못했습니다.", error)
             return
@@ -1415,6 +1536,7 @@ class MainWindow(QMainWindow):
         width = self.width()
         compact_navigation = width < self.COMPACT_BREAKPOINT
         show_detail = width >= self.DETAIL_BREAKPOINT
+        wrap_filters = width < self.DETAIL_BREAKPOINT
 
         self._detail_panel.setVisible(show_detail)
         self._body_layout.setSpacing(16 if show_detail else 0)
@@ -1423,6 +1545,13 @@ class MainWindow(QMainWindow):
         )
         self._open_selected_records_button.setVisible(
             self._record_service is not None
+            and not self._calendar_active
+            and not show_detail
+            and self._selected_task_id is not None
+        )
+        self._open_selected_attachment_button.setVisible(
+            self._record_service is not None
+            and self._attachment_service is not None
             and not self._calendar_active
             and not show_detail
             and self._selected_task_id is not None
@@ -1479,7 +1608,8 @@ class MainWindow(QMainWindow):
 
         if compact_navigation != self._compact_summaries:
             self._arrange_summary_cards(compact=compact_navigation)
-        self._result_count.setVisible(not compact_navigation)
+        if wrap_filters != self._filters_wrapped:
+            self._arrange_filter_bar(wrapped=wrap_filters)
 
     @staticmethod
     def _set_nav_selected(button: QPushButton, selected: bool) -> None:
@@ -1494,6 +1624,34 @@ class MainWindow(QMainWindow):
         for index, frame in enumerate(self._summary_frames):
             self._summary_layout.addWidget(frame, index // columns, index % columns)
         self._compact_summaries = compact
+
+    def _arrange_filter_bar(self, *, wrapped: bool) -> None:
+        for widget in self._filter_widgets:
+            self._filter_layout.removeWidget(widget)
+        for column in range(9):
+            self._filter_layout.setColumnStretch(column, 0)
+        if wrapped:
+            self._filter_layout.addWidget(self._status_filter, 0, 0)
+            self._filter_layout.addWidget(self._priority_filter, 0, 1)
+            self._filter_layout.addWidget(self._sort_combo, 0, 2)
+            self._filter_layout.setColumnStretch(3, 1)
+            self._filter_layout.addWidget(self._result_count, 0, 4)
+            self._filter_layout.addWidget(self._pinned_filter, 1, 0)
+            self._filter_layout.addWidget(self._attachment_filter, 1, 1)
+            self._filter_layout.addWidget(self._compact_toggle, 1, 2)
+            self._filter_layout.addWidget(self._clear_filters_button, 1, 4)
+        else:
+            self._filter_layout.addWidget(self._status_filter, 0, 0)
+            self._filter_layout.addWidget(self._priority_filter, 0, 1)
+            self._filter_layout.addWidget(self._pinned_filter, 0, 2)
+            self._filter_layout.addWidget(self._attachment_filter, 0, 3)
+            self._filter_layout.addWidget(self._sort_combo, 0, 4)
+            self._filter_layout.addWidget(self._compact_toggle, 0, 5)
+            self._filter_layout.addWidget(self._clear_filters_button, 0, 6)
+            self._filter_layout.setColumnStretch(7, 1)
+            self._filter_layout.addWidget(self._result_count, 0, 8)
+        self._result_count.show()
+        self._filters_wrapped = wrapped
 
     def _restore_window_position(self, settings: AppSettings) -> None:
         if settings.window_x is None or settings.window_y is None:

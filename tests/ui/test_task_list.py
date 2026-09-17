@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from PySide6.QtCore import QModelIndex
+from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtWidgets import QStyleOptionViewItem
 
 from officeflow.application.tasks import TaskGroup, TaskPage
@@ -96,3 +96,31 @@ def test_compact_delegate_reduces_task_row_height() -> None:
     assert delegate.sizeHint(option, index).height() == 70
     delegate.set_compact(True)
     assert delegate.sizeHint(option, index).height() == 48
+
+
+def test_attached_task_tooltip_exposes_attachment_indicator() -> None:
+    model = TaskListModel()
+    task = make_task(1)
+    task = Task(
+        id=task.id,
+        title=task.title,
+        description=task.description,
+        status=task.status,
+        priority=task.priority,
+        is_pinned=task.is_pinned,
+        all_day=task.all_day,
+        starts_at=task.starts_at,
+        ends_at=task.ends_at,
+        timezone=task.timezone,
+        recurrence_rule=task.recurrence_rule,
+        result_note=task.result_note,
+        completed_at=task.completed_at,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        has_attachments=True,
+    )
+    model.set_tasks([task])
+
+    tooltip = model.data(model.index(0, 0), Qt.ItemDataRole.ToolTipRole)
+
+    assert "첨부파일 있음" in str(tooltip)

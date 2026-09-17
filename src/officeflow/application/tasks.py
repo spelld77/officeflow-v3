@@ -336,6 +336,16 @@ class TaskService:
         page = self.query(TaskQuery(view=view, search=search, limit=None), now=now)
         return list(page.items)
 
+    def completed_on(self, day: date) -> builtins.list[Task]:
+        """Return regular and recurring tasks completed on a local calendar day."""
+        zone = ZoneInfo(self._timezone)
+        local_noon = datetime.combine(day, time(hour=12), tzinfo=zone).astimezone(UTC)
+        page = self.query(
+            TaskQuery(view=TaskView.TODAY, group=TaskGroup.COMPLETED, limit=None),
+            now=local_noon,
+        )
+        return list(page.items)
+
     def calendar_range(
         self,
         start_date: date,
