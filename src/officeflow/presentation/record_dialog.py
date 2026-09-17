@@ -4,8 +4,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Event
 from typing import cast
+from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QDate, QObject, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QDate, QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -35,7 +36,7 @@ from officeflow.application.attachments import (
     AttachmentService,
 )
 from officeflow.application.records import RecordService
-from officeflow.application.tasks import TaskService
+from officeflow.application.tasks import TaskQuery, TaskService, TaskView
 from officeflow.domain.attachment import Attachment
 from officeflow.domain.records import ChecklistItem, RecordValidationError, WorkLog
 from officeflow.domain.task import Task
@@ -764,19 +765,29 @@ class WorkLogBrowserDialog(QDialog):
         title = QLabel("업무일지")
         title.setObjectName("pageTitle")
         root.addWidget(title)
+        self.search_edit = QLineEdit()
+        self.search_edit.setObjectName("workLogSearch")
+        self.search_edit.setPlaceholderText("과거 업무 검색: 제목, 설명, 결과, 업무일지 내용")
+        self.search_edit.setClearButtonEnabled(True)
+        root.addWidget(self.search_edit)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(self._refresh)
+        self.search_edit.textChanged.connect(self._search_timer.start)
         controls = QHBoxLayout()
-        previous = QPushButton("이전 날")
-        previous.clicked.connect(lambda: self._move_date(-1))
+        self.previous_button = QPushButton("이전 날")
+        self.previous_button.clicked.connect(lambda: self._move_date(-1))
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setObjectName("workLogBrowserDate")
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
         self.date_edit.dateChanged.connect(self._refresh)
-        next_button = QPushButton("다음 날")
-        next_button.clicked.connect(lambda: self._move_date(1))
-        controls.addWidget(previous)
+        self.next_button = QPushButton("다음 날")
+        self.next_button.clicked.connect(lambda: self._move_date(1))
+        controls.addWidget(self.previous_button)
         controls.addWidget(self.date_edit, 1)
-        controls.addWidget(next_button)
+        controls.addWidget(self.next_button)
         root.addLayout(controls)
 
         self.list_widget = QListWidget()
@@ -806,10 +817,21 @@ class WorkLogBrowserDialog(QDialog):
 
     def _refresh(self, _selected: QDate | None = None) -> None:
         selected_date = cast(date, self.date_edit.date().toPython())
-        logs = self._record_service.work_logs(
-            log_date=selected_date
-        )
-        completed = self._task_service.completed_on(selected_date)
+        search = self.search_edit.text().strip()
+        searching = bool(search)
+        self.previous_button.setEnabled(not searching)
+        self.date_edit.setEnabled(not searching)
+        self.next_button.setEnabled(not searching)
+        if searching:
+            logs = self._record_service.work_logs(search=search)
+            completed = list(
+                self._task_service.query(
+                    TaskQuery(view=TaskView.COMPLETED, search=search, limit=500)
+                ).items
+            )
+        else:
+            logs = self._record_service.work_logs(log_date=selected_date)
+            completed = self._task_service.completed_on(selected_date)
         self._logs_by_id = {log.id: log for log in logs if log.id is not None}
         self._completed_by_key.clear()
         self._selected_task_context = None
@@ -824,7 +846,13 @@ class WorkLogBrowserDialog(QDialog):
             self._completed_by_key[key] = task
             result_note = self._task_service.result_note(task.id, occurrence_start)
             result_state = "결과 있음" if result_note else "결과 미입력"
-            item = QListWidgetItem(f"[완료] {task.title}  ·  {result_state}")
+            completed_date = (
+                task.completed_at.astimezone(ZoneInfo(task.timezone)).date().isoformat()
+                if task.completed_at is not None
+                else "날짜 미상"
+            )
+            prefix = f"[완료 {completed_date}]" if searching else "[완료]"
+            item = QListWidgetItem(f"{prefix} {task.title}  ·  {result_state}")
             item.setData(Qt.ItemDataRole.UserRole, ("task", *key))
             self.list_widget.addItem(item)
         for log in logs:
@@ -835,11 +863,16 @@ class WorkLogBrowserDialog(QDialog):
                 except LookupError:
                     task_title = "삭제된 업무"
             preview = " ".join(log.content.splitlines())
-            item = QListWidgetItem(f"[일지] {task_title}  ·  {preview}")
+            prefix = f"[일지 {log.log_date.isoformat()}]" if searching else "[일지]"
+            item = QListWidgetItem(f"{prefix} {task_title}  ·  {preview}")
             item.setData(Qt.ItemDataRole.UserRole, ("log", log.id))
             self.list_widget.addItem(item)
         self.detail.setText(
-            "이 날짜에 완료한 업무나 작성한 업무일지가 없습니다."
+            (
+                "검색 결과가 없습니다. 제목, 설명, 결과 또는 업무일지 내용으로 검색해 보세요."
+                if searching
+                else "이 날짜에 완료한 업무나 작성한 업무일지가 없습니다."
+            )
             if not completed and not logs
             else "완료 업무 또는 업무일지를 선택하면 내용을 확인할 수 있습니다."
         )

@@ -278,6 +278,9 @@ class MainWindow(QMainWindow):
         self._calendar_page.monthChanged.connect(self._refresh_calendar)
         self._calendar_page.taskSelected.connect(self._on_calendar_task_selected)
         self._calendar_page.taskActivated.connect(self._open_calendar_task)
+        self._calendar_page.taskContextRequested.connect(
+            self._show_calendar_task_context_menu
+        )
         self._calendar_page.createRequested.connect(self._open_calendar_new)
         self._content_stack.addWidget(self._task_content)
         self._content_stack.addWidget(self._calendar_page)
@@ -1167,6 +1170,15 @@ class MainWindow(QMainWindow):
         self._update_detail(scheduled.display_task)
         self._apply_responsive_layout()
 
+    def _show_calendar_task_context_menu(
+        self,
+        scheduled: ScheduledTask,
+        global_position: QPoint,
+    ) -> None:
+        self._on_calendar_task_selected(scheduled)
+        menu = self._build_task_context_menu(scheduled.display_task)
+        menu.exec(global_position)
+
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         task = self._task_model.task_at(current)
         self._selected_task_id = task.id if task else None
@@ -1310,23 +1322,24 @@ class MainWindow(QMainWindow):
         self._show_system_reminder(alerts)
         if self._reminder_dialog is not None:
             self._reminder_dialog.add_alerts(alerts)
-            if self.isVisible() and not self.isMinimized():
-                self._reminder_dialog.show()
-                self._reminder_dialog.raise_()
-                self._reminder_dialog.activateWindow()
+            self._reminder_dialog.present()
             return
         self._reminder_dialog = ReminderDialog(
             alerts,
             timezone=self._settings.timezone,
-            parent=self,
+            parent=None,
         )
+        self._reminder_dialog.setWindowIcon(self.windowIcon())
         self._reminder_dialog.setStyleSheet(LIGHT_STYLESHEET)
         self._reminder_dialog.actionRequested.connect(self._handle_reminder_action)
+        self._reminder_dialog.snoozeRequested.connect(
+            lambda delivery_id, minutes: self._handle_reminder_action(
+                delivery_id,
+                f"snooze:{minutes}",
+            )
+        )
         self._reminder_dialog.finished.connect(lambda _result: self._clear_reminder_dialog())
-        if self.isVisible() and not self.isMinimized():
-            self._reminder_dialog.show()
-            self._reminder_dialog.raise_()
-            self._reminder_dialog.activateWindow()
+        self._reminder_dialog.present()
 
     def _show_system_reminder(self, alerts: tuple[ReminderAlert, ...]) -> None:
         if self._tray_icon is None or not self._tray_icon.isVisible():
@@ -1349,14 +1362,18 @@ class MainWindow(QMainWindow):
         if self._reminder_service is None:
             return
         snoozed_until: datetime | None = None
+        action_name = action
         try:
             if action == "complete":
                 self._reminder_service.complete(delivery_id)
             elif action == "defer":
                 self._reminder_service.defer(delivery_id)
-            elif action == "snooze":
-                delivery = self._reminder_service.snooze(delivery_id, 10)
+            elif action.startswith("snooze"):
+                parts = action.split(":", maxsplit=1)
+                minutes = int(parts[1]) if len(parts) == 2 else 10
+                delivery = self._reminder_service.snooze(delivery_id, minutes)
                 snoozed_until = delivery.snoozed_until
+                action_name = "snooze"
             else:
                 self._reminder_service.acknowledge(delivery_id)
         except Exception as error:
@@ -1364,14 +1381,14 @@ class MainWindow(QMainWindow):
             return
         if self._reminder_dialog is not None:
             self._reminder_dialog.remove_delivery(delivery_id)
-        if action in {"complete", "defer"}:
+        if action_name in {"complete", "defer"}:
             self._refresh_tasks()
         messages = {
             "complete": "업무를 완료했습니다.",
             "defer": "업무를 대기로 전환했습니다.",
             "acknowledge": "알림을 확인했습니다.",
         }
-        if action == "snooze" and snoozed_until is not None:
+        if action_name == "snooze" and snoozed_until is not None:
             local_due = snoozed_until.astimezone(ZoneInfo(self._settings.timezone))
             message = f"다시 알림이 {local_due:%m월 %d일 %H:%M}로 설정되었습니다."
             self.statusBar().showMessage(message, 10_000)
@@ -1383,7 +1400,9 @@ class MainWindow(QMainWindow):
                     8_000,
                 )
         else:
-            self.statusBar().showMessage(messages.get(action, "알림을 처리했습니다."), 3000)
+            self.statusBar().showMessage(
+                messages.get(action_name, "알림을 처리했습니다."), 3000
+            )
 
     def _clear_reminder_dialog(self) -> None:
         self._reminder_dialog = None
@@ -1491,6 +1510,9 @@ class MainWindow(QMainWindow):
     def shutdown(self) -> None:
         self._persist_settings()
         self._automatic_backup_timer.stop()
+        if self._reminder_dialog is not None:
+            self._reminder_dialog.dismiss_for_shutdown()
+            self._reminder_dialog = None
         if self._automatic_backup_worker is not None:
             self._automatic_backup_worker.cancel()
         if self._automatic_backup_thread is not None:

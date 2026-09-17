@@ -53,7 +53,9 @@ class InMemoryRecordRepository(RecordRepository):
         *,
         log_date: date | None = None,
         task_id: int | None = None,
+        search: str = "",
     ) -> tuple[WorkLog, ...]:
+        normalized = search.strip().casefold()
         return tuple(
             sorted(
                 (
@@ -61,6 +63,10 @@ class InMemoryRecordRepository(RecordRepository):
                     for item in self.work_log_items.values()
                     if (log_date is None or item.log_date == log_date)
                     and (task_id is None or item.task_id == task_id)
+                    and (
+                        not normalized
+                        or normalized in f"{item.content}\n{item.result}".casefold()
+                    )
                 ),
                 key=lambda item: (item.log_date, item.updated_at),
                 reverse=True,

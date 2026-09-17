@@ -353,16 +353,18 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
 
     qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
     assert window._reminder_dialog is not None
+    window._reminder_dialog.snooze_minutes.setValue(35)
     qtbot.mouseClick(window._reminder_dialog.snooze_button, Qt.MouseButton.LeftButton)
 
     delivery = next(iter(reminder_repository.deliveries.values()))
     assert delivery.status is ReminderDeliveryStatus.SNOOZED
     assert delivery.snoozed_until is not None
+    assert delivery.snoozed_until == delivery.updated_at + timedelta(minutes=35)
     local_due = delivery.snoozed_until.astimezone(ZoneInfo("Asia/Seoul"))
     assert f"{local_due:%m월 %d일 %H:%M}" in window.statusBar().currentMessage()
 
 
-def test_hidden_app_keeps_alert_queued_until_tray_notification_is_opened(
+def test_hidden_app_shows_persistent_topmost_alert(
     qtbot: QtBot,
 ) -> None:
     task_repository = InMemoryTaskRepository()
@@ -387,7 +389,8 @@ def test_hidden_app_keeps_alert_queued_until_tray_notification_is_opened(
     window._check_reminders()
 
     assert window._reminder_dialog is not None
-    assert window._reminder_dialog.isHidden()
+    assert window._reminder_dialog.isVisible()
+    assert window._reminder_dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
     assert tray.messages
 
 

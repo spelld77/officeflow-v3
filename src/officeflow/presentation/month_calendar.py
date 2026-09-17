@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFocusEvent, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -138,6 +138,7 @@ class MonthCalendarWidget(QWidget):
     dateActivated = Signal(object)
     taskSelected = Signal(object)
     taskActivated = Signal(object)
+    taskContextRequested = Signal(object, object)
     moreRequested = Signal(object)
 
     HEADER_HEIGHT = 26.0
@@ -277,6 +278,8 @@ class MonthCalendarWidget(QWidget):
             painter.drawRoundedRect(rect, 4, 4)
             painter.setPen(QColor("#FFFFFF"))
             prefix = "◀ " if segment.continues_before else ""
+            if segment.task.has_attachments:
+                prefix = f"첨부 · {prefix}"
             if segment.task.occurrence_start is not None:
                 prefix = f"반복 · {prefix}"
             suffix = " ▶" if segment.continues_after else ""
@@ -329,6 +332,14 @@ class MonthCalendarWidget(QWidget):
             painter.drawRect(QRectF(self.rect()).adjusted(1, 1, -2, -2))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() is Qt.MouseButton.RightButton:
+            task = self._task_at(event.position())
+            if task is not None:
+                self.setFocus()
+                self.taskSelected.emit(task)
+                self.taskContextRequested.emit(task, event.globalPosition().toPoint())
+                event.accept()
+                return
         if event.button() is not Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
         self.setFocus()
@@ -401,7 +412,11 @@ class MonthCalendarWidget(QWidget):
         if event.type() is QEvent.Type.ToolTip:
             task = self._task_at(QPointF(self.mapFromGlobal(self.cursor().pos())))
             self.setToolTip(
-                task.title if task is not None else "날짜를 더블 클릭하면 일정을 등록합니다."
+                f"{task.title}\n첨부파일 있음"
+                if task is not None and task.has_attachments
+                else task.title
+                if task is not None
+                else "날짜를 더블 클릭하면 일정을 등록합니다."
             )
         return super().event(event)
 
@@ -443,6 +458,7 @@ class CalendarPage(QFrame):
     monthChanged = Signal(int, int)
     taskSelected = Signal(object)
     taskActivated = Signal(object)
+    taskContextRequested = Signal(object, object)
     createRequested = Signal(object)
 
     def __init__(self, *, timezone: str, parent: QWidget | None = None) -> None:
@@ -502,6 +518,7 @@ class CalendarPage(QFrame):
         self.day_list.setMaximumHeight(112)
         self.day_list.setMinimumHeight(70)
         self.day_list.setToolTip("일정을 더블 클릭하면 수정할 수 있습니다.")
+        self.day_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._layout.addWidget(self.day_list)
 
         self.previous_button.clicked.connect(lambda: self._move_month(-1))
@@ -516,8 +533,10 @@ class CalendarPage(QFrame):
         self.calendar.dateActivated.connect(self.createRequested)
         self.calendar.taskSelected.connect(self._select_task)
         self.calendar.taskActivated.connect(self.taskActivated)
+        self.calendar.taskContextRequested.connect(self.taskContextRequested)
         self.day_list.currentItemChanged.connect(self._on_day_item_changed)
         self.day_list.itemDoubleClicked.connect(self._on_day_item_activated)
+        self.day_list.customContextMenuRequested.connect(self._show_day_item_context_menu)
         self._update_month_label()
         self._refresh_day_list()
 
@@ -609,6 +628,18 @@ class CalendarPage(QFrame):
         if isinstance(task, ScheduledTask):
             self.taskActivated.emit(task)
 
+    def _show_day_item_context_menu(self, position: QPoint) -> None:
+        item = self.day_list.itemAt(position)
+        if item is None:
+            return
+        self.day_list.setCurrentItem(item)
+        task = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(task, ScheduledTask):
+            self.taskContextRequested.emit(
+                task,
+                self.day_list.viewport().mapToGlobal(position),
+            )
+
     def _activate_selected(self) -> None:
         if self._selected_task is not None:
             self.taskActivated.emit(self._selected_task)
@@ -621,7 +652,8 @@ class CalendarPage(QFrame):
         pin = "★ " if task.is_pinned else ""
         done = "✓ " if task.status is TaskStatus.COMPLETED else ""
         repeat = "반복 · " if task.occurrence_start is not None else ""
-        return f"{time_label}  ·  {repeat}{pin}{done}{task.title}"
+        attachment = " · 첨부" if task.has_attachments else ""
+        return f"{time_label}  ·  {repeat}{pin}{done}{task.title}{attachment}"
 
 
 def _days_in_month(year: int, month: int) -> int:

@@ -3,13 +3,16 @@ from __future__ import annotations
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -20,6 +23,7 @@ from officeflow.domain.enums import ReminderRelation
 
 class ReminderDialog(QDialog):
     actionRequested = Signal(int, str)
+    snoozeRequested = Signal(int, int)
 
     def __init__(
         self,
@@ -34,6 +38,7 @@ class ReminderDialog(QDialog):
 
         self.setWindowTitle("OfficeFlow 알림")
         self.setModal(False)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.resize(520, 420)
         self.setMinimumSize(420, 340)
 
@@ -63,12 +68,21 @@ class ReminderDialog(QDialog):
         actions = QHBoxLayout()
         self.complete_button = self._action_button("완료", "complete")
         self.defer_button = self._action_button("대기", "defer")
-        self.snooze_button = self._action_button("10분 후", "snooze")
+        self.snooze_minutes = QSpinBox()
+        self.snooze_minutes.setObjectName("snoozeMinutes")
+        self.snooze_minutes.setRange(1, 1_440)
+        self.snooze_minutes.setValue(10)
+        self.snooze_minutes.setSuffix("분")
+        self.snooze_minutes.setToolTip("1분에서 24시간 사이로 지정")
+        self.snooze_button = QPushButton("다시 알림")
+        self.snooze_button.setObjectName("snoozeButton")
+        self.snooze_button.clicked.connect(self._emit_snooze)
         self.acknowledge_button = self._action_button("확인", "acknowledge")
         self.complete_button.setObjectName("primaryButton")
         for button in (
             self.complete_button,
             self.defer_button,
+            self.snooze_minutes,
             self.snooze_button,
             self.acknowledge_button,
         ):
@@ -78,6 +92,34 @@ class ReminderDialog(QDialog):
         self.add_alerts(alerts)
         if self.alert_list.count():
             self.alert_list.setCurrentRow(0)
+
+    def present(self) -> None:
+        self.show()
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            frame = self.frameGeometry()
+            frame.moveCenter(screen.availableGeometry().center())
+            self.move(frame.topLeft())
+        self.raise_()
+        self.activateWindow()
+
+    def dismiss_for_shutdown(self) -> None:
+        self._alerts.clear()
+        super().reject()
+
+    def reject(self) -> None:
+        if self._alerts:
+            QApplication.beep()
+            self.present()
+            return
+        super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._alerts:
+            event.ignore()
+            self.present()
+            return
+        super().closeEvent(event)
 
     def add_alerts(self, alerts: tuple[ReminderAlert, ...]) -> None:
         recovered = 0
@@ -101,10 +143,10 @@ class ReminderDialog(QDialog):
             self.alert_list.addItem(item)
         if recovered:
             self.caption.setText(
-                f"최근 복구 범위 안에서 놓친 알림 {recovered}개를 함께 표시했습니다."
+                f"최근 복구 범위 안에서 놓친 알림 {recovered}개입니다. 처리할 때까지 이 창은 유지됩니다."
             )
         elif not self.caption.text():
-            self.caption.setText("예정된 업무 시각이 되었습니다.")
+            self.caption.setText("예정된 업무 시각입니다. 처리할 때까지 이 창은 유지됩니다.")
         if self.alert_list.currentRow() < 0 and self.alert_list.count():
             self.alert_list.setCurrentRow(0)
 
@@ -130,6 +172,15 @@ class ReminderDialog(QDialog):
         if item is None:
             return
         self.actionRequested.emit(int(item.data(Qt.ItemDataRole.UserRole)), action)
+
+    def _emit_snooze(self) -> None:
+        item = self.alert_list.currentItem()
+        if item is None:
+            return
+        self.snoozeRequested.emit(
+            int(item.data(Qt.ItemDataRole.UserRole)),
+            self.snooze_minutes.value(),
+        )
 
     def _update_detail(
         self,

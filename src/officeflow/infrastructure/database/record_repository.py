@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from officeflow.domain.enums import TaskPriority
 from officeflow.domain.records import ChecklistItem, WorkLog
@@ -100,12 +100,29 @@ class SqlAlchemyRecordRepository:
         *,
         log_date: date | None = None,
         task_id: int | None = None,
+        search: str = "",
     ) -> tuple[WorkLog, ...]:
         statement = select(WorkLogRecord)
         if log_date is not None:
             statement = statement.where(WorkLogRecord.log_date == log_date)
         if task_id is not None:
             statement = statement.where(WorkLogRecord.task_id == task_id)
+        normalized = search.strip()
+        if normalized:
+            escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            statement = statement.outerjoin(
+                TaskRecord,
+                WorkLogRecord.task_id == TaskRecord.id,
+            ).where(
+                or_(
+                    WorkLogRecord.content.ilike(pattern, escape="\\"),
+                    WorkLogRecord.result.ilike(pattern, escape="\\"),
+                    TaskRecord.title.ilike(pattern, escape="\\"),
+                    TaskRecord.description.ilike(pattern, escape="\\"),
+                    TaskRecord.result_note.ilike(pattern, escape="\\"),
+                )
+            )
         statement = statement.order_by(
             WorkLogRecord.log_date.desc(),
             WorkLogRecord.updated_at.desc(),

@@ -18,7 +18,7 @@ def test_record_repository_round_trip_and_task_search(tmp_path: Path) -> None:
     sessions = SessionFactory(engine)
     task_service = TaskService(SqlAlchemyTaskRepository(sessions))
     record_service = RecordService(SqlAlchemyRecordRepository(sessions), task_service)
-    task = task_service.create(TaskDraft(title="주간 보고"))
+    task = task_service.create(TaskDraft(title="주간 보고", description="영업팀 자료"))
     assert task.id is not None
 
     first = record_service.add_checklist_item(task.id, "자료 취합")
@@ -38,6 +38,8 @@ def test_record_repository_round_trip_and_task_search(tmp_path: Path) -> None:
         first.id,
     ]
     assert record_service.work_logs(log_date=date(2026, 9, 15)) == (work_log,)
+    assert record_service.work_logs(search="매출지표") == (work_log,)
+    assert record_service.work_logs(search="영업팀 자료") == (work_log,)
     search = task_service.query(TaskQuery(view=TaskView.ALL, search="매출지표"))
     assert [item.id for item in search.items] == [task.id]
 

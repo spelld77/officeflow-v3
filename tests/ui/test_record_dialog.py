@@ -129,6 +129,47 @@ def test_work_log_browser_includes_tasks_completed_on_selected_date(qtbot: QtBot
     assert dialog.open_records_button.isEnabled()
 
 
+def test_work_log_browser_searches_past_tasks_and_log_content(qtbot: QtBot) -> None:
+    task_service, record_service = make_dialog_services()
+    completed_at = datetime(2026, 8, 15, 4, 0, tzinfo=UTC)
+    completed = task_service.create(
+        TaskDraft(title="한 달 전 계약 검토", description="갱신 조건 확인"),
+        now=completed_at,
+    )
+    assert completed.id is not None
+    task_service.transition(completed.id, TaskStatus.COMPLETED, now=completed_at)
+    active = task_service.create(TaskDraft(title="장애 분석"))
+    assert active.id is not None
+    record_service.add_work_log(
+        task_id=active.id,
+        log_date=date(2026, 8, 20),
+        content="오류코드 E501 원인 확인",
+    )
+    dialog = WorkLogBrowserDialog(
+        task_service=task_service,
+        record_service=record_service,
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.search_edit.setText("갱신 조건")
+    dialog._refresh()
+
+    assert dialog.list_widget.count() == 1
+    assert "[완료 2026-08-15]" in dialog.list_widget.item(0).text()
+    assert not dialog.date_edit.isEnabled()
+
+    dialog.search_edit.setText("E501")
+    dialog._refresh()
+
+    assert dialog.list_widget.count() == 1
+    assert "[일지 2026-08-20]" in dialog.list_widget.item(0).text()
+    assert "오류코드 E501" in dialog.list_widget.item(0).text()
+
+    dialog.search_edit.clear()
+    dialog._refresh()
+    assert dialog.date_edit.isEnabled()
+
+
 def test_task_records_dialog_can_open_on_attachment_tab(qtbot: QtBot, tmp_path: Path) -> None:
     task_service, record_service = make_dialog_services()
     task = task_service.create(TaskDraft(title="첨부 바로가기"))

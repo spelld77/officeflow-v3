@@ -120,6 +120,10 @@ class ScheduledTask:
         return self.task.is_pinned
 
     @property
+    def has_attachments(self) -> bool:
+        return self.task.has_attachments
+
+    @property
     def all_day(self) -> bool:
         return self.task.all_day
 

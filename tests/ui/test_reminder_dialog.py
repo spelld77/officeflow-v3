@@ -17,7 +17,7 @@ from officeflow.domain.task import Task
 from officeflow.presentation.reminder_dialog import ReminderDialog
 
 
-def test_reminder_dialog_groups_recovered_alerts_and_emits_action(qtbot: QtBot) -> None:
+def test_reminder_dialog_stays_on_top_and_emits_custom_snooze(qtbot: QtBot) -> None:
     now = datetime(2026, 9, 14, 3, 0, tzinfo=UTC)
     task = Task.create(
         title="주간 보고",
@@ -76,7 +76,13 @@ def test_reminder_dialog_groups_recovered_alerts_and_emits_action(qtbot: QtBot) 
 
     assert dialog.alert_list.count() == 1
     assert "놓친 알림" in dialog.caption.text()
-    with qtbot.waitSignal(dialog.actionRequested) as blocker:
+    assert dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+    assert dialog.snooze_minutes.value() == 10
+    dialog.snooze_minutes.setValue(45)
+    with qtbot.waitSignal(dialog.snoozeRequested) as blocker:
         qtbot.mouseClick(dialog.snooze_button, Qt.MouseButton.LeftButton)
 
-    assert blocker.args == [11, "snooze"]
+    assert blocker.args == [11, 45]
+
+    dialog.close()
+    assert dialog.isVisible()

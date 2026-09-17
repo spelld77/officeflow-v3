@@ -26,6 +26,7 @@ class RecordRepository(Protocol):
         *,
         log_date: date | None = None,
         task_id: int | None = None,
+        search: str = "",
     ) -> tuple[WorkLog, ...]: ...
 
     def add_work_log(self, work_log: WorkLog) -> WorkLog: ...
@@ -80,10 +81,15 @@ class RecordService:
         *,
         log_date: date | None = None,
         task_id: int | None = None,
+        search: str = "",
     ) -> tuple[WorkLog, ...]:
         if task_id is not None:
             self._task_service.get(task_id)
-        return self._repository.list_work_logs(log_date=log_date, task_id=task_id)
+        return self._repository.list_work_logs(
+            log_date=log_date,
+            task_id=task_id,
+            search=search,
+        )
 
     def add_work_log(
         self,

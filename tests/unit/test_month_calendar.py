@@ -10,6 +10,7 @@ from officeflow.application.tasks import ScheduledTask
 from officeflow.domain.enums import TaskPriority
 from officeflow.domain.task import Task
 from officeflow.presentation.month_calendar import (
+    CalendarPage,
     MonthCalendarWidget,
     build_calendar_segments,
     month_grid_start,
@@ -108,3 +109,60 @@ def test_clicking_task_keeps_focused_calendar_grid_visible(qtbot: QtBot) -> None
     rendered = calendar.grab().toImage()
 
     assert rendered.pixelColor(10, calendar.height() - 10).name() != "#3b8d78"
+
+
+def test_right_clicking_calendar_task_requests_context_menu(qtbot: QtBot) -> None:
+    scheduled = _task(
+        "첨부 일정",
+        datetime(2026, 9, 16, 15, 0, tzinfo=UTC),
+        datetime(2026, 9, 17, 15, 0, tzinfo=UTC),
+    )
+    scheduled = ScheduledTask(
+        replace(scheduled.task, has_attachments=True),
+        scheduled.starts_at,
+        scheduled.ends_at,
+    )
+    calendar = MonthCalendarWidget(timezone="Asia/Seoul")
+    qtbot.addWidget(calendar)
+    calendar.resize(700, 420)
+    calendar.set_month(2026, 9)
+    calendar.set_tasks((scheduled,))
+    calendar.show()
+    calendar.grab()
+    task_rect = calendar._task_hits[0][0]
+
+    with qtbot.waitSignal(calendar.taskContextRequested) as blocker:
+        qtbot.mouseClick(
+            calendar,
+            Qt.MouseButton.RightButton,
+            pos=task_rect.center().toPoint(),
+        )
+
+    assert blocker.args[0] == scheduled
+    assert scheduled.has_attachments
+
+
+def test_calendar_day_list_marks_attachment_and_supports_context_menu(qtbot: QtBot) -> None:
+    scheduled = _task(
+        "계약 검토",
+        datetime(2026, 9, 16, 15, 0, tzinfo=UTC),
+        datetime(2026, 9, 17, 15, 0, tzinfo=UTC),
+    )
+    scheduled = ScheduledTask(
+        replace(scheduled.task, has_attachments=True),
+        scheduled.starts_at,
+        scheduled.ends_at,
+    )
+    page = CalendarPage(timezone="Asia/Seoul")
+    qtbot.addWidget(page)
+    page.calendar.set_month(2026, 9)
+    page.calendar.set_selected_date(date(2026, 9, 17))
+    page.set_tasks((scheduled,))
+    page.show()
+
+    assert "첨부" in page.day_list.item(0).text()
+    item_rect = page.day_list.visualItemRect(page.day_list.item(0))
+    with qtbot.waitSignal(page.taskContextRequested) as blocker:
+        page._show_day_item_context_menu(item_rect.center())
+
+    assert blocker.args[0] == scheduled
