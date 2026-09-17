@@ -284,6 +284,9 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
 
     delivery = next(iter(reminder_repository.deliveries.values()))
     assert delivery.status is ReminderDeliveryStatus.SNOOZED
+    assert delivery.snoozed_until is not None
+    local_due = delivery.snoozed_until.astimezone(ZoneInfo("Asia/Seoul"))
+    assert f"{local_due:%m월 %d일 %H:%M}" in window.statusBar().currentMessage()
 
 
 def test_hidden_app_keeps_alert_queued_until_tray_notification_is_opened(
@@ -363,8 +366,66 @@ def test_filters_combine_and_can_be_cleared(qtbot: QtBot, task_service: TaskServ
 
     assert window._task_model.total_task_count == 1
     assert clear.isEnabled()
+    assert pinned.text() == "✓ 고정만"
+    assert "필터 2개" in window._result_count.text()
     qtbot.mouseClick(clear, Qt.MouseButton.LeftButton)
     assert window._task_model.total_task_count == 2
+    assert pinned.text() == "고정만"
+
+
+def test_today_filter_feedback_explains_hidden_all_day_task(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    repository = InMemoryTaskRepository()
+    task_service = TaskService(repository, timezone="Asia/Seoul")
+    zone = ZoneInfo("Asia/Seoul")
+    today = datetime.now(zone).date()
+    start = datetime.combine(today, time.min, tzinfo=zone).astimezone(UTC)
+    task_service.create(
+        TaskDraft(
+            title="오늘 종일 일정",
+            all_day=True,
+            starts_at=start,
+            ends_at=(datetime.combine(today, time.min, tzinfo=zone) + timedelta(days=1)).astimezone(
+                UTC
+            ),
+        )
+    )
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    settings = AppSettings(
+        view_preferences={
+            TaskView.TODAY.value: {
+                "pinned_only": True,
+                "has_attachments": True,
+            }
+        }
+    )
+    window = MainWindow(
+        settings,
+        task_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(window)
+    window.show()
+
+    assert window._task_model.total_task_count == 0
+    assert window._pinned_filter.text() == "✓ 고정만"
+    assert window._attachment_filter.text() == "✓ 첨부만"
+    assert "필터 조건" in window._empty_description.text()
+
+    qtbot.mouseClick(window._clear_filters_button, Qt.MouseButton.LeftButton)
+
+    assert window._task_model.total_task_count == 1
+    assert window._summary_counts[TaskGroup.IN_PROGRESS.value].text() == "1"
+
+    window._set_view(TaskView.UPCOMING)
+
+    assert window._task_model.total_task_count == 0
+    assert all(frame.isHidden() for frame in window._summary_frames)
 
 
 def test_flat_view_loads_fifty_rows_then_fetches_more(

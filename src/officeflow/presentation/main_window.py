@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import date, datetime
 from itertools import pairwise
 from typing import ClassVar
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QResizeEvent, QShortcut
@@ -397,12 +398,12 @@ class MainWindow(QMainWindow):
         empty_layout.addWidget(
             QLabel("표시할 업무가 없습니다."), alignment=Qt.AlignmentFlag.AlignCenter
         )
-        empty_description = self._named_label(
+        self._empty_description = self._named_label(
             "빠르게 등록하거나 다른 보기를 선택해 보세요.", "mutedText"
         )
-        empty_description.setWordWrap(True)
-        empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_layout.addWidget(empty_description, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._empty_description.setWordWrap(True)
+        self._empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self._empty_description, alignment=Qt.AlignmentFlag.AlignCenter)
         self._content_layout.addWidget(self._empty_panel, 1)
         return card
 
@@ -465,7 +466,7 @@ class MainWindow(QMainWindow):
         self._compact_toggle.setChecked(self._settings.compact_list)
         layout.addWidget(self._compact_toggle)
 
-        self._clear_filters_button = QPushButton("초기화")
+        self._clear_filters_button = QPushButton("필터 해제")
         self._clear_filters_button.setObjectName("clearTaskFilters")
         self._clear_filters_button.setEnabled(False)
         layout.addWidget(self._clear_filters_button)
@@ -585,6 +586,8 @@ class MainWindow(QMainWindow):
         title, caption = self.VIEW_LABELS[view]
         self._page_title.setText(title)
         self._page_caption.setText(caption)
+        for frame in self._summary_frames:
+            frame.setVisible(view is TaskView.TODAY)
         for button_view, button in self._view_buttons.items():
             button.setProperty("selected", button_view is view)
             button.style().unpolish(button)
@@ -636,17 +639,15 @@ class MainWindow(QMainWindow):
                 page = self._task_service.query(self._build_query(offset=0))
                 self._task_model.set_page(page, self._load_flat_page)
                 total = page.total
-                summary = self._task_service.summary()
-                self._summary_counts[TaskGroup.OVERDUE.value].setText(str(summary.overdue))
-                self._summary_counts[TaskGroup.IN_PROGRESS.value].setText(str(summary.in_progress))
-                self._summary_counts[TaskGroup.UPCOMING.value].setText(str(summary.upcoming))
-                self._summary_counts[TaskGroup.COMPLETED.value].setText(
-                    str(summary.completed_today)
-                )
             for button in self._summary_jump_buttons.values():
                 button.setEnabled(self._current_view is TaskView.TODAY)
             self._task_list.setVisible(total > 0)
             self._empty_panel.setVisible(total == 0)
+            self._empty_description.setText(
+                "필터 조건에 맞는 업무가 없습니다. 위의 '필터 해제'를 누르면 전체 업무를 볼 수 있습니다."
+                if total == 0 and self._active_filter_count()
+                else "빠르게 등록하거나 다른 보기를 선택해 보세요."
+            )
             self._update_result_count()
 
             if selected_id is not None:
@@ -714,12 +715,7 @@ class MainWindow(QMainWindow):
 
     def _on_filter_changed(self, _value: object = None) -> None:
         self._remember_view_preferences()
-        self._clear_filters_button.setEnabled(
-            bool(self._selected_statuses())
-            or bool(self._selected_priorities())
-            or self._pinned_filter.isChecked()
-            or self._attachment_filter.isChecked()
-        )
+        self._update_filter_feedback()
         self._selected_task_id = None
         self._refresh_tasks()
 
@@ -735,7 +731,7 @@ class MainWindow(QMainWindow):
         self._pinned_filter.setChecked(False)
         self._attachment_filter.setChecked(False)
         del blockers
-        self._clear_filters_button.setEnabled(False)
+        self._update_filter_feedback()
         self._on_filter_changed()
 
     def _set_compact_list(self, compact: bool) -> None:
@@ -773,12 +769,30 @@ class MainWindow(QMainWindow):
             str(preferences.get("sort", TaskSort.SCHEDULE.value)),
         )
         del blockers
-        self._clear_filters_button.setEnabled(
-            bool(self._selected_statuses())
-            or bool(self._selected_priorities())
-            or self._pinned_filter.isChecked()
-            or self._attachment_filter.isChecked()
+        self._update_filter_feedback()
+
+    def _active_filter_count(self) -> int:
+        return sum(
+            (
+                bool(self._selected_statuses()),
+                bool(self._selected_priorities()),
+                self._pinned_filter.isChecked(),
+                self._attachment_filter.isChecked(),
+            )
         )
+
+    def _update_filter_feedback(self) -> None:
+        pinned = self._pinned_filter.isChecked()
+        attached = self._attachment_filter.isChecked()
+        self._pinned_filter.setText("✓ 고정만" if pinned else "고정만")
+        self._attachment_filter.setText("✓ 첨부만" if attached else "첨부만")
+        self._pinned_filter.setToolTip(
+            "고정된 업무만 표시 중" if pinned else "고정된 업무만 표시"
+        )
+        self._attachment_filter.setToolTip(
+            "첨부파일이 있는 업무만 표시 중" if attached else "첨부파일이 있는 업무만 표시"
+        )
+        self._clear_filters_button.setEnabled(self._active_filter_count() > 0)
 
     def _on_list_clicked(self, index: QModelIndex) -> None:
         entry = self._task_model.entry_at(index)
@@ -807,8 +821,10 @@ class MainWindow(QMainWindow):
             return
         loaded = self._task_model.loaded_task_count
         total = self._task_model.total_task_count
+        count_text = f"{loaded}/{total}개 표시" if loaded < total else f"총 {total}개"
+        active_filters = self._active_filter_count()
         self._result_count.setText(
-            f"{loaded}/{total}개 표시" if loaded < total else f"총 {total}개"
+            f"필터 {active_filters}개 · {count_text}" if active_filters else count_text
         )
 
     @staticmethod
@@ -1211,13 +1227,15 @@ class MainWindow(QMainWindow):
     def _handle_reminder_action(self, delivery_id: int, action: str) -> None:
         if self._reminder_service is None:
             return
+        snoozed_until: datetime | None = None
         try:
             if action == "complete":
                 self._reminder_service.complete(delivery_id)
             elif action == "defer":
                 self._reminder_service.defer(delivery_id)
             elif action == "snooze":
-                self._reminder_service.snooze(delivery_id, 10)
+                delivery = self._reminder_service.snooze(delivery_id, 10)
+                snoozed_until = delivery.snoozed_until
             else:
                 self._reminder_service.acknowledge(delivery_id)
         except Exception as error:
@@ -1230,10 +1248,21 @@ class MainWindow(QMainWindow):
         messages = {
             "complete": "업무를 완료했습니다.",
             "defer": "업무를 대기로 전환했습니다.",
-            "snooze": "10분 후 다시 알려드립니다.",
             "acknowledge": "알림을 확인했습니다.",
         }
-        self.statusBar().showMessage(messages.get(action, "알림을 처리했습니다."), 3000)
+        if action == "snooze" and snoozed_until is not None:
+            local_due = snoozed_until.astimezone(ZoneInfo(self._settings.timezone))
+            message = f"다시 알림이 {local_due:%m월 %d일 %H:%M}로 설정되었습니다."
+            self.statusBar().showMessage(message, 10_000)
+            if self._tray_icon is not None and self._tray_icon.isVisible():
+                self._tray_icon.showMessage(
+                    "OfficeFlow 다시 알림",
+                    message,
+                    QSystemTrayIcon.MessageIcon.Information,
+                    8_000,
+                )
+        else:
+            self.statusBar().showMessage(messages.get(action, "알림을 처리했습니다."), 3000)
 
     def _clear_reminder_dialog(self) -> None:
         self._reminder_dialog = None

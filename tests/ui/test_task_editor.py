@@ -8,6 +8,7 @@ from pytestqt.qtbot import QtBot
 
 from officeflow.domain.enums import ReminderRelation
 from officeflow.presentation.task_editor import TaskEditorDialog
+from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
 def test_editor_builds_inclusive_multiday_all_day_schedule(qtbot: QtBot) -> None:
@@ -89,3 +90,14 @@ def test_editor_builds_start_and_end_reminder_rules(qtbot: QtBot) -> None:
         (ReminderRelation.START, -10),
         (ReminderRelation.END, -30),
     ]
+
+
+def test_timed_schedule_inputs_keep_their_full_height(qtbot: QtBot) -> None:
+    editor = TaskEditorDialog(timezone="Asia/Seoul")
+    editor.setStyleSheet(LIGHT_STYLESHEET)
+    qtbot.addWidget(editor)
+    editor.all_day_check.setChecked(False)
+    editor.show()
+
+    assert editor.start_time_edit.height() >= editor.start_time_edit.sizeHint().height()
+    assert editor.end_time_edit.height() >= editor.end_time_edit.sizeHint().height()

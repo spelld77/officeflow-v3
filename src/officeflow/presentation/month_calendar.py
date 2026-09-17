@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from officeflow.application.tasks import ScheduledTask
 from officeflow.domain.enums import TaskPriority, TaskStatus
 
-WEEKDAY_LABELS = ("월", "화", "수", "목", "금", "토", "일")
+WEEKDAY_LABELS = ("일", "월", "화", "수", "목", "금", "토")
 MONTH_LABELS = tuple(f"{month}월" for month in range(1, 13))
 
 
@@ -39,7 +39,7 @@ class CalendarSegment:
 
 def month_grid_start(year: int, month: int) -> date:
     first = date(year, month, 1)
-    return first - timedelta(days=first.weekday())
+    return first - timedelta(days=(first.weekday() + 1) % 7)
 
 
 def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -209,7 +209,7 @@ class MonthCalendarWidget(QWidget):
         column_width = self.width() / 7.0
         row_height = max(1.0, (self.height() - self.HEADER_HEIGHT) / 6.0)
         for column, label in enumerate(WEEKDAY_LABELS):
-            color = "#2F6FED" if column == 5 else "#D14343" if column == 6 else "#68738A"
+            color = "#D14343" if column == 0 else "#2F6FED" if column == 6 else "#68738A"
             painter.setPen(QColor(color))
             painter.drawText(
                 QRectF(column * column_width, 0, column_width, self.HEADER_HEIGHT),
@@ -246,9 +246,9 @@ class MonthCalendarWidget(QWidget):
                 painter.setPen(QColor("#FFFFFF"))
             elif day.month != self._month:
                 painter.setPen(QColor("#AAB3C2"))
-            elif column == 6:
+            elif column == 0:
                 painter.setPen(QColor("#D14343"))
-            elif column == 5:
+            elif column == 6:
                 painter.setPen(QColor("#2F6FED"))
             else:
                 painter.setPen(QColor("#364158"))
@@ -324,6 +324,7 @@ class MonthCalendarWidget(QWidget):
             self._more_hits.append((rect, day))
 
         if self.hasFocus():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor("#2F6FED"), 1, Qt.PenStyle.DashLine))
             painter.drawRect(QRectF(self.rect()).adjusted(1, 1, -2, -2))
 
