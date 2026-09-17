@@ -194,12 +194,6 @@ class TaskRecordsDialog(QDialog):
         if attachment_service is not None:
             self._refresh_attachments()
 
-    def start_attachment_picker(self) -> None:
-        """Open the file picker from an external shortcut such as a task context menu."""
-        if self._attachment_service is not None:
-            self.tabs.setCurrentIndex(self.tabs.count() - 1)
-            self._choose_attachment()
-
     def _build_checklist_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)

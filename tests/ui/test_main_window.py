@@ -110,8 +110,9 @@ def test_medium_window_prioritizes_task_list(qtbot: QtBot, task_service: TaskSer
     pinned_position = window._filter_layout.getItemPosition(
         window._filter_layout.indexOf(window._pinned_filter)
     )
-    assert pinned_position[:2] == (1, 0)
+    assert pinned_position[:2] == (0, 3)
     assert window._result_count.geometry().right() <= window._filter_bar.contentsRect().right()
+    assert window._page_caption.isHidden()
 
 
 def test_medium_window_exposes_records_without_detail_panel(qtbot: QtBot) -> None:
@@ -196,6 +197,35 @@ def test_attachment_filter_combines_with_task_view(qtbot: QtBot, tmp_path: Path)
 
     assert window._task_model.total_task_count == 1
     assert window._task_model.task_at(window._task_model.index(0, 0)).title == "첨부 있음"
+
+
+def test_attachment_context_action_opens_management_instead_of_file_picker(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    task = task_service.create(TaskDraft(title="첨부 확인"))
+    assert task.id is not None
+    record_service = RecordService(InMemoryRecordRepository(), task_service)
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        record_service=record_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
+
+    action_labels = [action.text() for action in window._build_task_context_menu(task).actions()]
+
+    assert "첨부파일 보기 · 관리…" in action_labels
+    assert "첨부파일 추가…" not in action_labels
 
 
 def test_compact_window_uses_small_navigation_and_wrapped_summaries(
@@ -409,11 +439,11 @@ def test_filters_combine_and_can_be_cleared(qtbot: QtBot, task_service: TaskServ
 
     assert window._task_model.total_task_count == 1
     assert clear.isEnabled()
-    assert pinned.text() == "✓ 고정만"
+    assert pinned.text() == "✓고정"
     assert "필터 2개" in window._result_count.text()
     qtbot.mouseClick(clear, Qt.MouseButton.LeftButton)
     assert window._task_model.total_task_count == 2
-    assert pinned.text() == "고정만"
+    assert pinned.text() == "고정"
 
 
 def test_today_filter_feedback_explains_hidden_all_day_task(
@@ -456,8 +486,8 @@ def test_today_filter_feedback_explains_hidden_all_day_task(
     window.show()
 
     assert window._task_model.total_task_count == 0
-    assert window._pinned_filter.text() == "✓ 고정만"
-    assert window._attachment_filter.text() == "✓ 첨부만"
+    assert window._pinned_filter.text() == "✓고정"
+    assert window._attachment_filter.text() == "✓첨부"
     assert "필터 조건" in window._empty_description.text()
 
     qtbot.mouseClick(window._clear_filters_button, Qt.MouseButton.LeftButton)

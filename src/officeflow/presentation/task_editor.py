@@ -56,8 +56,8 @@ class TaskEditorDialog(QDialog):
 
         self.setWindowTitle("업무 수정" if task else "새 업무")
         self.setModal(True)
-        self.resize(520, 680)
-        self.setMinimumSize(460, 600)
+        self.resize(520, 600)
+        self.setMinimumSize(460, 520)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 20, 22, 18)
@@ -131,6 +131,19 @@ class TaskEditorDialog(QDialog):
         self.start_time_edit.setDisplayFormat("HH:mm")
         self.schedule_form.addRow("시작 시각", self.start_time_edit)
 
+        self.start_reminder_combo = QComboBox()
+        self.start_reminder_combo.setObjectName("taskStartReminderCombo")
+        self._add_reminder_options(self.start_reminder_combo, include_all_day_suggestion=True)
+        self.schedule_form.addRow("시작 알림", self.start_reminder_combo)
+
+        self.advanced_schedule_check = QCheckBox("종료·반복 등 추가 설정 보기")
+        self.advanced_schedule_check.setObjectName("advancedScheduleCheck")
+        self.schedule_form.addRow("", self.advanced_schedule_check)
+
+        self.end_enabled_check = QCheckBox("종료 시각 지정")
+        self.end_enabled_check.setObjectName("taskEndEnabledCheck")
+        self.schedule_form.addRow("", self.end_enabled_check)
+
         self.end_date_edit = QDateEdit(QDate(default_end.year, default_end.month, default_end.day))
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
@@ -139,6 +152,11 @@ class TaskEditorDialog(QDialog):
         self.end_time_edit = QTimeEdit(QTime(default_end.hour, default_end.minute))
         self.end_time_edit.setDisplayFormat("HH:mm")
         self.schedule_form.addRow("종료 시각", self.end_time_edit)
+
+        self.end_reminder_combo = QComboBox()
+        self.end_reminder_combo.setObjectName("taskEndReminderCombo")
+        self._add_reminder_options(self.end_reminder_combo)
+        self.schedule_form.addRow("종료 알림", self.end_reminder_combo)
 
         self.repeat_combo = QComboBox()
         self.repeat_combo.setObjectName("taskRepeatCombo")
@@ -168,15 +186,6 @@ class TaskEditorDialog(QDialog):
         self.repeat_until_date.setDisplayFormat("yyyy-MM-dd")
         self.schedule_form.addRow("반복 종료", self.repeat_until_date)
 
-        self.start_reminder_combo = QComboBox()
-        self.start_reminder_combo.setObjectName("taskStartReminderCombo")
-        self._add_reminder_options(self.start_reminder_combo, include_all_day_suggestion=True)
-        self.schedule_form.addRow("시작 알림", self.start_reminder_combo)
-
-        self.end_reminder_combo = QComboBox()
-        self.end_reminder_combo.setObjectName("taskEndReminderCombo")
-        self._add_reminder_options(self.end_reminder_combo)
-        self.schedule_form.addRow("종료 알림", self.end_reminder_combo)
         self._schedule_value_edits = (
             self.start_date_edit,
             self.start_time_edit,
@@ -209,6 +218,8 @@ class TaskEditorDialog(QDialog):
 
         self.schedule_combo.currentIndexChanged.connect(self._update_schedule_visibility)
         self.all_day_check.toggled.connect(self._update_schedule_visibility)
+        self.advanced_schedule_check.toggled.connect(self._update_schedule_visibility)
+        self.end_enabled_check.toggled.connect(self._update_schedule_visibility)
         self.start_date_edit.dateChanged.connect(self._keep_end_date_valid)
         self.repeat_combo.currentIndexChanged.connect(self._update_recurrence_visibility)
         self.repeat_until_check.toggled.connect(self._update_recurrence_visibility)
@@ -218,7 +229,7 @@ class TaskEditorDialog(QDialog):
             self._populate_reminders(reminder_rules)
         else:
             self.schedule_combo.setCurrentIndex(1)
-            self.all_day_check.setChecked(True)
+            self.all_day_check.setChecked(False)
             if initial_date is not None:
                 selected = QDate(initial_date.year, initial_date.month, initial_date.day)
                 self.start_date_edit.setDate(selected)
@@ -275,14 +286,14 @@ class TaskEditorDialog(QDialog):
         if schedule_type != "none":
             zone = ZoneInfo(self._timezone)
             start_date = cast(date, self.start_date_edit.date().toPython())
-            end_date = (
-                cast(date, self.end_date_edit.date().toPython())
-                if schedule_type == "range"
-                else start_date
-            )
-            if end_date < start_date:
-                raise TaskValidationError("종료일은 시작일보다 빠를 수 없습니다.")
             if all_day:
+                end_date = (
+                    cast(date, self.end_date_edit.date().toPython())
+                    if schedule_type == "range"
+                    else start_date
+                )
+                if end_date < start_date:
+                    raise TaskValidationError("종료일은 시작일보다 빠를 수 없습니다.")
                 starts_at = datetime.combine(start_date, time.min, tzinfo=zone).astimezone(UTC)
                 ends_at = datetime.combine(
                     end_date + timedelta(days=1), time.min, tzinfo=zone
@@ -293,11 +304,20 @@ class TaskEditorDialog(QDialog):
                     cast(time, self.start_time_edit.time().toPython()),
                     tzinfo=zone,
                 ).astimezone(UTC)
-                ends_at = datetime.combine(
-                    end_date,
-                    cast(time, self.end_time_edit.time().toPython()),
-                    tzinfo=zone,
-                ).astimezone(UTC)
+                has_end = schedule_type == "range" or self.end_enabled_check.isChecked()
+                if has_end:
+                    end_date = (
+                        cast(date, self.end_date_edit.date().toPython())
+                        if schedule_type == "range"
+                        else start_date
+                    )
+                    if end_date < start_date:
+                        raise TaskValidationError("종료일은 시작일보다 빠를 수 없습니다.")
+                    ends_at = datetime.combine(
+                        end_date,
+                        cast(time, self.end_time_edit.time().toPython()),
+                        tzinfo=zone,
+                    ).astimezone(UTC)
         recurrence_rule: str | None = None
         repeat_value = str(self.repeat_combo.currentData())
         if schedule_type != "none" and repeat_value == "custom":
@@ -316,7 +336,11 @@ class TaskEditorDialog(QDialog):
                 interval=self.repeat_interval.value(),
                 until=until,
             ).to_rrule(self._timezone)
-        reminder_rules = self._build_reminder_rules() if schedule_type != "none" else ()
+        reminder_rules = (
+            self._build_reminder_rules(include_end=ends_at is not None)
+            if schedule_type != "none"
+            else ()
+        )
         return TaskDraft(
             title=self.title_edit.text(),
             description=self.description_edit.toPlainText(),
@@ -354,7 +378,13 @@ class TaskEditorDialog(QDialog):
         )
         self.start_time_edit.setTime(QTime(start.hour, start.minute))
         self.end_time_edit.setTime(QTime(end.hour, end.minute))
+        if not task.all_day and task.ends_at is not None:
+            self.end_enabled_check.setChecked(True)
+            self.advanced_schedule_check.setChecked(True)
+        if schedule_type == "range":
+            self.advanced_schedule_check.setChecked(True)
         if task.recurrence_rule:
+            self.advanced_schedule_check.setChecked(True)
             recurrence = parse_simple_recurrence(task.recurrence_rule, task.timezone)
             if recurrence is None:
                 self._custom_recurrence_rule = task.recurrence_rule
@@ -378,20 +408,39 @@ class TaskEditorDialog(QDialog):
         has_schedule = schedule_type != "none"
         is_range = schedule_type == "range"
         is_timed = has_schedule and not self.all_day_check.isChecked()
+        if is_range and not self.advanced_schedule_check.isChecked():
+            self.advanced_schedule_check.setChecked(True)
+        advanced = has_schedule and self.advanced_schedule_check.isChecked()
+        has_end = (
+            (has_schedule and self.all_day_check.isChecked())
+            or is_range
+            or self.end_enabled_check.isChecked()
+        )
         self._set_row_visible(self.all_day_check, has_schedule)
         self._set_row_visible(self.start_date_edit, has_schedule)
         self._set_row_visible(self.start_time_edit, is_timed)
-        self._set_row_visible(self.end_date_edit, has_schedule and is_range)
-        self._set_row_visible(self.end_time_edit, is_timed)
-        self._set_row_visible(self.repeat_combo, has_schedule)
         self._set_row_visible(self.start_reminder_combo, has_schedule)
-        self._set_row_visible(self.end_reminder_combo, has_schedule)
+        self._set_row_visible(self.advanced_schedule_check, has_schedule)
+        self.advanced_schedule_check.setText(
+            "종료·반복 등 추가 설정 접기"
+            if advanced
+            else "종료·반복 등 추가 설정 보기"
+        )
+        target_height = 720 if advanced else 600
+        if self.height() != target_height:
+            self.resize(self.width(), target_height)
+        self._set_row_visible(self.end_enabled_check, advanced and is_timed and not is_range)
+        self._set_row_visible(self.end_date_edit, advanced and is_range)
+        self._set_row_visible(self.end_time_edit, advanced and is_timed and has_end)
+        self._set_row_visible(self.end_reminder_combo, advanced and has_end)
+        self._set_row_visible(self.repeat_combo, advanced)
         self._update_recurrence_visibility()
 
     def _update_recurrence_visibility(self) -> None:
         has_schedule = str(self.schedule_combo.currentData()) != "none"
+        advanced = has_schedule and self.advanced_schedule_check.isChecked()
         repeat_value = str(self.repeat_combo.currentData())
-        has_repeat = has_schedule and bool(repeat_value)
+        has_repeat = advanced and bool(repeat_value)
         is_editable = has_repeat and repeat_value != "custom"
         self._set_row_visible(self.repeat_interval, is_editable)
         self._set_row_visible(self.repeat_until_check, is_editable)
@@ -425,14 +474,16 @@ class TaskEditorDialog(QDialog):
             self.all_day_check,
             self.start_date_edit,
             self.start_time_edit,
+            self.start_reminder_combo,
+            self.advanced_schedule_check,
+            self.end_enabled_check,
             self.end_date_edit,
             self.end_time_edit,
+            self.end_reminder_combo,
             self.repeat_combo,
             self.repeat_interval,
             self.repeat_until_check,
             self.repeat_until_date,
-            self.start_reminder_combo,
-            self.end_reminder_combo,
             self.save_button,
             self.cancel_button,
         )
@@ -476,6 +527,8 @@ class TaskEditorDialog(QDialog):
                 if rule.relation is ReminderRelation.START
                 else self.end_reminder_combo
             )
+            if rule.relation is ReminderRelation.END:
+                self.advanced_schedule_check.setChecked(True)
             index = combo.findData(rule.offset_minutes)
             if index >= 0:
                 combo.setCurrentIndex(index)
@@ -489,7 +542,11 @@ class TaskEditorDialog(QDialog):
             populated.add(rule.relation)
         self._preserved_reminders = tuple(preserved)
 
-    def _build_reminder_rules(self) -> tuple[ReminderRuleInput, ...]:
+    def _build_reminder_rules(
+        self,
+        *,
+        include_end: bool,
+    ) -> tuple[ReminderRuleInput, ...]:
         rules: list[ReminderRuleInput] = list(self._preserved_reminders)
         for relation, combo, custom in (
             (
@@ -503,6 +560,8 @@ class TaskEditorDialog(QDialog):
                 self._custom_end_reminder,
             ),
         ):
+            if relation is ReminderRelation.END and not include_end:
+                continue
             value = combo.currentData()
             if value == "custom" and custom is not None:
                 rules.append(custom)

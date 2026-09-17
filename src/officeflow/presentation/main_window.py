@@ -320,12 +320,13 @@ class MainWindow(QMainWindow):
         titles = QVBoxLayout()
         self._page_title = self._named_label("오늘", "pageTitle")
         self._page_caption = self._named_label(self.VIEW_LABELS[TaskView.TODAY][1], "mutedText")
-        self._page_caption.setWordWrap(True)
+        self._page_caption.setWordWrap(False)
         titles.addWidget(self._page_title)
         titles.addWidget(self._page_caption)
         heading.addLayout(titles)
         heading.addStretch()
-        self._open_selected_button = QPushButton("선택 업무 열기")
+        self._open_selected_button = QPushButton("열기")
+        self._open_selected_button.setToolTip("선택한 업무 수정")
         self._open_selected_button.clicked.connect(self._open_selected_task)
         self._open_selected_button.hide()
         heading.addWidget(self._open_selected_button)
@@ -334,9 +335,10 @@ class MainWindow(QMainWindow):
         self._open_selected_records_button.clicked.connect(self._open_selected_records)
         self._open_selected_records_button.hide()
         heading.addWidget(self._open_selected_records_button)
-        self._open_selected_attachment_button = QPushButton("첨부 추가")
+        self._open_selected_attachment_button = QPushButton("첨부")
         self._open_selected_attachment_button.setObjectName("openSelectedAttachmentButton")
-        self._open_selected_attachment_button.clicked.connect(self._add_attachment_to_selected)
+        self._open_selected_attachment_button.setToolTip("등록된 첨부파일 보기 및 관리")
+        self._open_selected_attachment_button.clicked.connect(self._open_selected_attachments)
         self._open_selected_attachment_button.hide()
         heading.addWidget(self._open_selected_attachment_button)
         self._content_layout.addLayout(heading)
@@ -438,7 +440,7 @@ class MainWindow(QMainWindow):
             ("취소", TaskStatus.CANCELED),
         ):
             self._status_filter.addItem(label, status.value)
-        self._status_filter.setMaximumWidth(105)
+        self._status_filter.setFixedWidth(92)
 
         self._priority_filter = QComboBox()
         self._priority_filter.setObjectName("priorityFilter")
@@ -450,16 +452,18 @@ class MainWindow(QMainWindow):
             ("긴급", TaskPriority.URGENT),
         ):
             self._priority_filter.addItem(label, priority.value)
-        self._priority_filter.setMaximumWidth(115)
+        self._priority_filter.setFixedWidth(104)
 
-        self._pinned_filter = QPushButton("고정만")
+        self._pinned_filter = QPushButton("고정")
         self._pinned_filter.setObjectName("pinnedFilter")
         self._pinned_filter.setCheckable(True)
+        self._pinned_filter.setFixedWidth(58)
 
-        self._attachment_filter = QPushButton("첨부만")
+        self._attachment_filter = QPushButton("첨부")
         self._attachment_filter.setObjectName("attachmentFilter")
         self._attachment_filter.setCheckable(True)
         self._attachment_filter.setVisible(self._attachment_service is not None)
+        self._attachment_filter.setFixedWidth(58)
 
         self._sort_combo = QComboBox()
         self._sort_combo.setObjectName("taskSort")
@@ -467,16 +471,18 @@ class MainWindow(QMainWindow):
         self._sort_combo.addItem("중요도순", TaskSort.PRIORITY.value)
         self._sort_combo.addItem("최근 수정순", TaskSort.UPDATED.value)
         self._sort_combo.addItem("제목순", TaskSort.TITLE.value)
-        self._sort_combo.setMaximumWidth(115)
+        self._sort_combo.setFixedWidth(92)
 
-        self._compact_toggle = QPushButton("간결 보기")
+        self._compact_toggle = QPushButton("간결")
         self._compact_toggle.setObjectName("compactListToggle")
         self._compact_toggle.setCheckable(True)
         self._compact_toggle.setChecked(self._settings.compact_list)
+        self._compact_toggle.setFixedWidth(58)
 
-        self._clear_filters_button = QPushButton("필터 해제")
+        self._clear_filters_button = QPushButton("해제")
         self._clear_filters_button.setObjectName("clearTaskFilters")
         self._clear_filters_button.setEnabled(False)
+        self._clear_filters_button.setFixedWidth(58)
 
         self._result_count = self._named_label("", "mutedText")
         self._result_count.setObjectName("taskResultCount")
@@ -531,9 +537,9 @@ class MainWindow(QMainWindow):
         self._detail_records_button.clicked.connect(self._open_selected_records)
         self._detail_records_button.setEnabled(False)
         layout.addWidget(self._detail_records_button)
-        self._detail_attachment_button = QPushButton("첨부파일 추가")
+        self._detail_attachment_button = QPushButton("첨부파일 보기 · 관리")
         self._detail_attachment_button.setObjectName("detailAttachmentButton")
-        self._detail_attachment_button.clicked.connect(self._add_attachment_to_selected)
+        self._detail_attachment_button.clicked.connect(self._open_selected_attachments)
         self._detail_attachment_button.setEnabled(False)
         layout.addWidget(self._detail_attachment_button)
 
@@ -665,7 +671,7 @@ class MainWindow(QMainWindow):
             self._task_list.setVisible(total > 0)
             self._empty_panel.setVisible(total == 0)
             self._empty_description.setText(
-                "필터 조건에 맞는 업무가 없습니다. 위의 '필터 해제'를 누르면 전체 업무를 볼 수 있습니다."
+                "필터 조건에 맞는 업무가 없습니다. 위의 '해제'를 누르면 전체 업무를 볼 수 있습니다."
                 if total == 0 and self._active_filter_count()
                 else "빠르게 등록하거나 다른 보기를 선택해 보세요."
             )
@@ -805,8 +811,8 @@ class MainWindow(QMainWindow):
     def _update_filter_feedback(self) -> None:
         pinned = self._pinned_filter.isChecked()
         attached = self._attachment_filter.isChecked()
-        self._pinned_filter.setText("✓ 고정만" if pinned else "고정만")
-        self._attachment_filter.setText("✓ 첨부만" if attached else "첨부만")
+        self._pinned_filter.setText("✓고정" if pinned else "고정")
+        self._attachment_filter.setText("✓첨부" if attached else "첨부")
         self._pinned_filter.setToolTip(
             "고정된 업무만 표시 중" if pinned else "고정된 업무만 표시"
         )
@@ -857,8 +863,8 @@ class MainWindow(QMainWindow):
         if menu.actions():
             menu.addSeparator()
         if self._attachment_service is not None and self._record_service is not None:
-            add_attachment = menu.addAction("첨부파일 추가…")
-            add_attachment.triggered.connect(self._add_attachment_to_selected)
+            attachments = menu.addAction("첨부파일 보기 · 관리…")
+            attachments.triggered.connect(self._open_selected_attachments)
         if self._record_service is not None:
             records = menu.addAction("결과 · 기록 열기")
             records.triggered.connect(self._open_selected_records)
@@ -1037,7 +1043,6 @@ class MainWindow(QMainWindow):
         self,
         *,
         initial_tab: str | None = None,
-        start_attachment_picker: bool = False,
     ) -> None:
         if self._selected_task_id is None or self._record_service is None:
             return
@@ -1054,8 +1059,6 @@ class MainWindow(QMainWindow):
             )
             dialog.setStyleSheet(LIGHT_STYLESHEET)
             dialog.changed.connect(self._refresh_tasks)
-            if start_attachment_picker:
-                QTimer.singleShot(0, dialog.start_attachment_picker)
             dialog.exec()
         except Exception as error:
             self._show_error("업무 기록을 열지 못했습니다.", error)
@@ -1063,11 +1066,8 @@ class MainWindow(QMainWindow):
     def _open_selected_result(self) -> None:
         self._open_selected_records(initial_tab="result")
 
-    def _add_attachment_to_selected(self) -> None:
-        self._open_selected_records(
-            initial_tab="attachments",
-            start_attachment_picker=True,
-        )
+    def _open_selected_attachments(self) -> None:
+        self._open_selected_records(initial_tab="attachments")
 
     def _complete_selected_with_result(self) -> None:
         if self._selected_task_id is None:
@@ -1536,7 +1536,7 @@ class MainWindow(QMainWindow):
         width = self.width()
         compact_navigation = width < self.COMPACT_BREAKPOINT
         show_detail = width >= self.DETAIL_BREAKPOINT
-        wrap_filters = width < self.DETAIL_BREAKPOINT
+        compact_filters = compact_navigation
 
         self._detail_panel.setVisible(show_detail)
         self._body_layout.setSpacing(16 if show_detail else 0)
@@ -1608,8 +1608,9 @@ class MainWindow(QMainWindow):
 
         if compact_navigation != self._compact_summaries:
             self._arrange_summary_cards(compact=compact_navigation)
-        if wrap_filters != self._filters_wrapped:
-            self._arrange_filter_bar(wrapped=wrap_filters)
+        self._page_caption.setVisible(not compact_navigation and show_detail)
+        if compact_filters != self._filters_wrapped:
+            self._arrange_filter_bar(wrapped=compact_filters)
 
     @staticmethod
     def _set_nav_selected(button: QPushButton, selected: bool) -> None:
@@ -1630,27 +1631,16 @@ class MainWindow(QMainWindow):
             self._filter_layout.removeWidget(widget)
         for column in range(9):
             self._filter_layout.setColumnStretch(column, 0)
-        if wrapped:
-            self._filter_layout.addWidget(self._status_filter, 0, 0)
-            self._filter_layout.addWidget(self._priority_filter, 0, 1)
-            self._filter_layout.addWidget(self._sort_combo, 0, 2)
-            self._filter_layout.setColumnStretch(3, 1)
-            self._filter_layout.addWidget(self._result_count, 0, 4)
-            self._filter_layout.addWidget(self._pinned_filter, 1, 0)
-            self._filter_layout.addWidget(self._attachment_filter, 1, 1)
-            self._filter_layout.addWidget(self._compact_toggle, 1, 2)
-            self._filter_layout.addWidget(self._clear_filters_button, 1, 4)
-        else:
-            self._filter_layout.addWidget(self._status_filter, 0, 0)
-            self._filter_layout.addWidget(self._priority_filter, 0, 1)
-            self._filter_layout.addWidget(self._pinned_filter, 0, 2)
-            self._filter_layout.addWidget(self._attachment_filter, 0, 3)
-            self._filter_layout.addWidget(self._sort_combo, 0, 4)
-            self._filter_layout.addWidget(self._compact_toggle, 0, 5)
-            self._filter_layout.addWidget(self._clear_filters_button, 0, 6)
-            self._filter_layout.setColumnStretch(7, 1)
-            self._filter_layout.addWidget(self._result_count, 0, 8)
-        self._result_count.show()
+        self._filter_layout.addWidget(self._status_filter, 0, 0)
+        self._filter_layout.addWidget(self._priority_filter, 0, 1)
+        self._filter_layout.addWidget(self._sort_combo, 0, 2)
+        self._filter_layout.addWidget(self._pinned_filter, 0, 3)
+        self._filter_layout.addWidget(self._attachment_filter, 0, 4)
+        self._filter_layout.addWidget(self._compact_toggle, 0, 5)
+        self._filter_layout.addWidget(self._clear_filters_button, 0, 6)
+        self._filter_layout.setColumnStretch(7, 1)
+        self._filter_layout.addWidget(self._result_count, 0, 8)
+        self._result_count.setVisible(not wrapped)
         self._filters_wrapped = wrapped
 
     def _restore_window_position(self, settings: AppSettings) -> None:
