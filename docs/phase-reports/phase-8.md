@@ -48,7 +48,7 @@
 
 - Ruff: 통과
 - mypy strict: 통과
-- 전체 pytest: 133개 통과, 코드 커버리지 80%
+- 전체 pytest: 134개 통과, 코드 커버리지 80%
 - 설치 파일과 실행 파일 버전 3.0.0 일치: 통과
 - 패키지 Alembic 스키마 생성: 통과
 - 설치·업그레이드·제거 및 데이터 보존: 통과
@@ -62,7 +62,7 @@
 - `dist/release-manifest.json`
 
 최종 설치 파일의 SHA-256은
-`414b64e3d3459e0ec72a6d423e6def15654c73c6b6cdfa4b47b588d581cae88e`이다.
+`b7b870cc27ca74e7e3b293535f6d0688a3bd3d0f4b31d722e167a5d721bcdaed`이다.
 
 ## 알려진 배포 조건
 

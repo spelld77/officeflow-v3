@@ -12,6 +12,70 @@ QMainWindow, #appRoot {
 QDialog {
     background: #F4F6FA;
 }
+QMenu {
+    color: #172033;
+    background: #FFFFFF;
+    border: 1px solid #D5DBE7;
+    border-radius: 7px;
+    padding: 5px;
+}
+QMenu::item {
+    color: #172033;
+    background: transparent;
+    border-radius: 5px;
+    padding: 7px 28px 7px 12px;
+}
+QMenu::item:selected {
+    color: #172033;
+    background: #DFE9FF;
+}
+QMenu::item:disabled {
+    color: #9AA5B7;
+}
+QMenu::separator {
+    height: 1px;
+    background: #E1E6EF;
+    margin: 5px 8px;
+}
+QCalendarWidget {
+    color: #172033;
+    background: #FFFFFF;
+}
+QCalendarWidget QWidget {
+    color: #172033;
+    background: #FFFFFF;
+}
+QCalendarWidget QWidget#qt_calendar_navigationbar {
+    background: #2F6FED;
+}
+QCalendarWidget QToolButton {
+    color: #FFFFFF;
+    background: #2F6FED;
+    border: none;
+    border-radius: 4px;
+    padding: 5px;
+}
+QCalendarWidget QToolButton:hover {
+    background: #245CCC;
+}
+QCalendarWidget QSpinBox {
+    color: #172033;
+    background: #FFFFFF;
+    border: 1px solid #DCE2EC;
+    selection-color: #172033;
+    selection-background-color: #DFE9FF;
+}
+QCalendarWidget QAbstractItemView:enabled {
+    color: #172033;
+    background: #FFFFFF;
+    alternate-background-color: #F1F4F8;
+    selection-color: #172033;
+    selection-background-color: #DFE9FF;
+    outline: none;
+}
+QCalendarWidget QAbstractItemView:disabled {
+    color: #9AA5B7;
+}
 #sidebar {
     background: #162033;
     border: none;
