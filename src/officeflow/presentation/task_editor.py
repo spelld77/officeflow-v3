@@ -230,6 +230,9 @@ class TaskEditorDialog(QDialog):
         else:
             self.schedule_combo.setCurrentIndex(1)
             self.all_day_check.setChecked(False)
+            self.start_reminder_combo.setCurrentIndex(
+                self.start_reminder_combo.findData(0)
+            )
             if initial_date is not None:
                 selected = QDate(initial_date.year, initial_date.month, initial_date.day)
                 self.start_date_edit.setDate(selected)

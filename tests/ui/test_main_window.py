@@ -364,6 +364,62 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
     assert f"{local_due:%m월 %d일 %H:%M}" in window.statusBar().currentMessage()
 
 
+def test_reminder_actions_immediately_refresh_current_view(qtbot: QtBot) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    reminder_repository = InMemoryReminderRepository(task_repository)
+    reminder_service = ReminderService(reminder_repository, task_service)
+    now = datetime.now(UTC).replace(microsecond=0)
+    task = task_service.create(
+        TaskDraft(title="즉시 반영 업무", starts_at=now - timedelta(minutes=1)),
+        now=now - timedelta(minutes=2),
+    )
+    assert task.id is not None
+    reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )
+    window = MainWindow(AppSettings(), task_service, reminder_service=reminder_service)
+    qtbot.addWidget(window)
+    window.show()
+
+    qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
+    assert window._summary_counts[TaskGroup.OVERDUE.value].text() == "1"
+    assert window._reminder_dialog is not None
+    qtbot.mouseClick(window._reminder_dialog.complete_button, Qt.MouseButton.LeftButton)
+
+    assert window._summary_counts[TaskGroup.OVERDUE.value].text() == "0"
+    assert window._summary_counts[TaskGroup.COMPLETED.value].text() == "1"
+
+
+def test_acknowledging_reminder_refreshes_current_view(qtbot: QtBot, monkeypatch) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    reminder_repository = InMemoryReminderRepository(task_repository)
+    reminder_service = ReminderService(reminder_repository, task_service)
+    now = datetime.now(UTC).replace(microsecond=0)
+    task = task_service.create(
+        TaskDraft(title="확인 후 갱신", starts_at=now - timedelta(minutes=1)),
+        now=now - timedelta(minutes=2),
+    )
+    assert task.id is not None
+    reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )
+    window = MainWindow(AppSettings(), task_service, reminder_service=reminder_service)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
+    refreshes: list[bool] = []
+    monkeypatch.setattr(window, "_refresh_tasks", lambda: refreshes.append(True))
+
+    assert window._reminder_dialog is not None
+    qtbot.mouseClick(window._reminder_dialog.acknowledge_button, Qt.MouseButton.LeftButton)
+
+    assert refreshes == [True]
+
+
 def test_hidden_app_shows_persistent_topmost_alert(
     qtbot: QtBot,
 ) -> None:

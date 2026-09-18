@@ -1381,8 +1381,7 @@ class MainWindow(QMainWindow):
             return
         if self._reminder_dialog is not None:
             self._reminder_dialog.remove_delivery(delivery_id)
-        if action_name in {"complete", "defer"}:
-            self._refresh_tasks()
+        self._refresh_tasks()
         messages = {
             "complete": "업무를 완료했습니다.",
             "defer": "업무를 대기로 전환했습니다.",

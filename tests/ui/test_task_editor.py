@@ -88,6 +88,7 @@ def test_new_task_defaults_to_timed_schedule_without_end_or_repeat(qtbot: QtBot)
     assert not editor.all_day_check.isChecked()
     assert editor.start_time_edit.isVisible()
     assert editor.start_reminder_combo.isVisible()
+    assert editor.start_reminder_combo.currentData() == 0
     assert editor.end_time_edit.isHidden()
     assert editor.end_reminder_combo.isHidden()
     assert editor.repeat_combo.isHidden()
@@ -98,6 +99,24 @@ def test_new_task_defaults_to_timed_schedule_without_end_or_repeat(qtbot: QtBot)
     assert editor.draft().starts_at is not None
     assert editor.draft().ends_at is None
     assert editor.draft().recurrence_rule is None
+    assert editor.draft().reminder_rules == (
+        ReminderRuleInput(ReminderRelation.START, offset_minutes=0),
+    )
+
+
+def test_existing_task_without_reminders_keeps_reminders_disabled(qtbot: QtBot) -> None:
+    task = Task.create(
+        title="기존 무알림 업무",
+        starts_at=datetime(2026, 9, 18, 1, 0, tzinfo=UTC),
+    )
+    editor = TaskEditorDialog(
+        timezone="Asia/Seoul",
+        task=task,
+        reminder_rules=(),
+    )
+    qtbot.addWidget(editor)
+
+    assert editor.start_reminder_combo.currentData() is None
 
 
 def test_default_tab_flow_skips_collapsed_advanced_fields(qtbot: QtBot) -> None:
