@@ -104,7 +104,7 @@ class AttachmentService:
     def attachments_for_task(
         self, task_id: int, *, now: datetime | None = None
     ) -> tuple[Attachment, ...]:
-        self._task_service.get(task_id)
+        self._task_service.get_including_deleted(task_id)
         checked_at = now or datetime.now(UTC)
         refreshed: list[Attachment] = []
         for attachment in self._repository.list_attachments(task_id):

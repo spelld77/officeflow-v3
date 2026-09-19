@@ -139,6 +139,7 @@ class TaskRecordsDialog(QDialog):
             raise ValueError("저장된 업무만 기록을 작성할 수 있습니다.")
         self._task = task
         self._task_id = task.id
+        self._read_only = task.deleted_at is not None
         self._task_service = task_service
         self._record_service = record_service
         self._attachment_service = attachment_service
@@ -165,6 +166,8 @@ class TaskRecordsDialog(QDialog):
         heading.setWordWrap(True)
         root.addWidget(heading)
         context = "이 반복 일정 건의 기록" if occurrence_start is not None else "업무 전체 기록"
+        if self._read_only:
+            context += " · 휴지통에서는 조회만 가능하며 수정하려면 먼저 복원하세요."
         caption = QLabel(context)
         caption.setObjectName("mutedText")
         root.addWidget(caption)
@@ -194,6 +197,33 @@ class TaskRecordsDialog(QDialog):
         self._refresh_work_logs()
         if attachment_service is not None:
             self._refresh_attachments()
+        if self._read_only:
+            self._apply_read_only_mode()
+
+    def _apply_read_only_mode(self) -> None:
+        self.checklist_edit.setReadOnly(True)
+        self.checklist_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for index in range(self.checklist_list.count()):
+            item = self.checklist_list.item(index)
+            item.setFlags(
+                item.flags()
+                & ~Qt.ItemFlag.ItemIsEditable
+                & ~Qt.ItemFlag.ItemIsUserCheckable
+            )
+        self.result_edit.setReadOnly(True)
+        self.log_date_edit.setEnabled(False)
+        self.log_content_edit.setReadOnly(True)
+        self.log_result_edit.setReadOnly(True)
+        for tab_index in range(min(3, self.tabs.count())):
+            tab = self.tabs.widget(tab_index)
+            if tab is None:
+                continue
+            for button in tab.findChildren(QPushButton):
+                button.setEnabled(False)
+        if self._attachment_service is not None:
+            self.add_attachment_button.setEnabled(False)
+            self.unlink_attachment_button.setEnabled(False)
+            self.delete_attachment_button.setEnabled(False)
 
     def _build_checklist_tab(self) -> QWidget:
         tab = QWidget()
@@ -389,7 +419,7 @@ class TaskRecordsDialog(QDialog):
         self.changed.emit()
 
     def _checklist_changed(self, item: QListWidgetItem) -> None:
-        if self._loading_checklist:
+        if self._loading_checklist or self._read_only:
             return
         item_id = item.data(Qt.ItemDataRole.UserRole)
         checklist = self._checklist_by_id.get(item_id)
@@ -602,7 +632,7 @@ class TaskRecordsDialog(QDialog):
         if self._attachment_progress is not None:
             self._attachment_progress.close()
         if hasattr(self, "add_attachment_button"):
-            self.add_attachment_button.setEnabled(True)
+            self.add_attachment_button.setEnabled(not self._read_only)
         thread = self._attachment_thread
         self._attachment_thread = None
         self._attachment_worker = None
@@ -721,13 +751,10 @@ class TaskRecordsDialog(QDialog):
         self.changed.emit()
 
     def _set_attachment_actions_enabled(self, enabled: bool) -> None:
-        for button in (
-            self.open_attachment_button,
-            self.verify_attachment_button,
-            self.unlink_attachment_button,
-            self.delete_attachment_button,
-        ):
-            button.setEnabled(enabled)
+        self.open_attachment_button.setEnabled(enabled)
+        self.verify_attachment_button.setEnabled(enabled)
+        self.unlink_attachment_button.setEnabled(enabled and not self._read_only)
+        self.delete_attachment_button.setEnabled(enabled and not self._read_only)
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:

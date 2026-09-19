@@ -892,6 +892,14 @@ class MainWindow(QMainWindow):
     def _build_task_context_menu(self, task: Task) -> QMenu:
         menu = QMenu(self)
         if task.deleted_at is not None:
+            if self._attachment_service is not None and self._record_service is not None:
+                attachments = menu.addAction("첨부파일 보기…")
+                attachments.triggered.connect(self._open_selected_attachments)
+            if self._record_service is not None:
+                records = menu.addAction("결과 · 기록 보기")
+                records.triggered.connect(self._open_selected_records)
+            if menu.actions():
+                menu.addSeparator()
             restore = menu.addAction("휴지통에서 복원")
             restore.triggered.connect(self._restore_selected_from_trash)
             return menu
@@ -1210,7 +1218,7 @@ class MainWindow(QMainWindow):
         if self._selected_task_id is None or self._record_service is None:
             return
         try:
-            task = self._task_service.get(self._selected_task_id)
+            task = self._task_service.get_including_deleted(self._selected_task_id)
             dialog = TaskRecordsDialog(
                 task,
                 task_service=self._task_service,
@@ -1421,11 +1429,10 @@ class MainWindow(QMainWindow):
                     )
         self._detail_description.setText(task.description or "설명이 없습니다.")
         self._edit_button.setEnabled(not deleted)
-        self._detail_records_button.setEnabled(self._record_service is not None and not deleted)
+        self._detail_records_button.setEnabled(self._record_service is not None)
         self._detail_attachment_button.setEnabled(
             self._record_service is not None
             and self._attachment_service is not None
-            and not deleted
         )
         self._pending_button.setEnabled(not deleted and task.status is TaskStatus.ACTIVE)
         self._complete_button.setEnabled(
@@ -1446,14 +1453,11 @@ class MainWindow(QMainWindow):
         )
         self._open_selected_button.setVisible(not self._detail_panel.isVisible())
         self._open_selected_records_button.setVisible(
-            self._record_service is not None
-            and not deleted
-            and not self._detail_panel.isVisible()
+            self._record_service is not None and not self._detail_panel.isVisible()
         )
         self._open_selected_attachment_button.setVisible(
             self._record_service is not None
             and self._attachment_service is not None
-            and not deleted
             and not self._detail_panel.isVisible()
         )
 

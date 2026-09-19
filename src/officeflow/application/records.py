@@ -42,7 +42,7 @@ class RecordService:
         self._task_service = task_service
 
     def checklist_for_task(self, task_id: int) -> tuple[ChecklistItem, ...]:
-        self._task_service.get(task_id)
+        self._task_service.get_including_deleted(task_id)
         return self._repository.list_checklist(task_id)
 
     def add_checklist_item(self, task_id: int, content: str) -> ChecklistItem:
@@ -84,7 +84,7 @@ class RecordService:
         search: str = "",
     ) -> tuple[WorkLog, ...]:
         if task_id is not None:
-            self._task_service.get(task_id)
+            self._task_service.get_including_deleted(task_id)
         return self._repository.list_work_logs(
             log_date=log_date,
             task_id=task_id,

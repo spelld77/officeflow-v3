@@ -190,6 +190,51 @@ def test_task_records_dialog_can_open_on_attachment_tab(qtbot: QtBot, tmp_path: 
     assert dialog.tabs.tabText(dialog.tabs.currentIndex()) == "첨부파일"
 
 
+def test_deleted_task_records_and_attachments_open_read_only(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    task_service, record_service = make_dialog_services()
+    task = task_service.create(TaskDraft(title="휴지통 기록 조회"))
+    assert task.id is not None
+    record_service.add_checklist_item(task.id, "확인한 항목")
+    record_service.add_work_log(
+        task_id=task.id,
+        log_date=date(2026, 9, 19),
+        content="처리한 내용",
+    )
+    task_service.update_result_note(task.id, "처리 결과")
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    source = tmp_path / "보존자료.txt"
+    source.write_text("preserved", encoding="utf-8")
+    attachment_service.attach(task.id, source)
+    task_service.move_to_trash(task.id)
+
+    deleted = task_service.get_including_deleted(task.id)
+    dialog = TaskRecordsDialog(
+        deleted,
+        task_service=task_service,
+        record_service=record_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.checklist_list.count() == 1
+    assert dialog.result_edit.toPlainText() == "처리 결과"
+    assert dialog.work_log_list.count() == 1
+    assert dialog.attachment_list.count() == 1
+    assert dialog.result_edit.isReadOnly()
+    assert dialog.add_attachment_button.isEnabled() is False
+    dialog.attachment_list.setCurrentRow(0)
+    assert dialog.open_attachment_button.isEnabled()
+    assert dialog.unlink_attachment_button.isEnabled() is False
+    assert dialog.delete_attachment_button.isEnabled() is False
+
+
 def test_task_records_dialog_imports_attachment_without_blocking_ui(
     qtbot: QtBot,
     tmp_path: Path,

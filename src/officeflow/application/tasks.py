@@ -276,7 +276,7 @@ class TaskService:
         return self._repository.update(task.transition_to(status, now=now or datetime.now(UTC)))
 
     def result_note(self, task_id: int, occurrence_start: datetime | None = None) -> str:
-        task = self.get(task_id)
+        task = self.get_including_deleted(task_id)
         if occurrence_start is None:
             return task.result_note
         occurrence = self._repository.get_occurrence(task_id, occurrence_start)
@@ -323,6 +323,12 @@ class TaskService:
 
     def get(self, task_id: int) -> Task:
         task = self._repository.get(task_id)
+        if task is None:
+            raise TaskNotFoundError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
+        return task
+
+    def get_including_deleted(self, task_id: int) -> Task:
+        task = self._repository.get(task_id) or self._repository.get_deleted(task_id)
         if task is None:
             raise TaskNotFoundError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
         return task

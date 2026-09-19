@@ -214,6 +214,41 @@ def test_task_can_move_to_trash_and_be_restored(
     assert task_service.list(TaskView.TRASH) == []
 
 
+def test_trash_view_exposes_preserved_records_and_attachments(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    task_service = TaskService(InMemoryTaskRepository())
+    task = task_service.create(TaskDraft(title="삭제 업무 자료"))
+    assert task.id is not None
+    record_service = RecordService(InMemoryRecordRepository(), task_service)
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    task_service.move_to_trash(task.id)
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        record_service=record_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(window)
+    window._set_view(TaskView.TRASH)
+    index = window._task_model.index_for_task(task.id)
+    window._task_list.setCurrentIndex(index)
+    deleted = window._task_model.task_at(index)
+    assert deleted is not None
+
+    labels = [action.text() for action in window._build_task_context_menu(deleted).actions()]
+
+    assert "결과 · 기록 보기" in labels
+    assert "첨부파일 보기…" in labels
+    assert window._detail_records_button.isEnabled()
+    assert window._detail_attachment_button.isEnabled()
+
+
 def test_quick_complete_can_be_undone(qtbot: QtBot) -> None:
     task_repository = InMemoryTaskRepository()
     task_service = TaskService(task_repository)
