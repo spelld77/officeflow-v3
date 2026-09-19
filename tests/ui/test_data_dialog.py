@@ -16,21 +16,33 @@ from officeflow.application.migration import (
     MigrationResult,
 )
 from officeflow.application.tasks import TaskQuery
+from officeflow.bootstrap.paths import AppPaths
 from officeflow.infrastructure.backup import BackupManager
+from officeflow.infrastructure.database.migrate import upgrade_database
 from officeflow.presentation.data_dialog import DataManagementDialog, OperationWorker
 from officeflow.presentation.migration_dialog import LegacyMigrationDialog
 
 
-def test_data_dialog_exposes_all_phase_seven_actions_at_minimum_size(qtbot: QtBot) -> None:
+def test_data_dialog_exposes_usage_and_all_data_actions_at_minimum_size(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths(tmp_path / "officeflow")
+    paths.ensure_directories()
+    upgrade_database(paths.database_file)
     dialog = DataManagementDialog(
         export_service=cast(ExportService, object()),
-        backup_manager=cast(BackupManager, object()),
+        backup_manager=BackupManager(paths),
         query=TaskQuery(),
         migration_service=cast(LegacyMigration, object()),
     )
     qtbot.addWidget(dialog)
     dialog.resize(480, 470)
     dialog.show()
+    qtbot.waitUntil(
+        lambda: "현재 사용량" in dialog.usage_total_label.text(),
+        timeout=3_000,
+    )
 
     labels = {button.text() for button in dialog.findChildren(QPushButton)}
     assert {
@@ -39,10 +51,13 @@ def test_data_dialog_exposes_all_phase_seven_actions_at_minimum_size(qtbot: QtBo
         "지금 백업",
         "백업에서 복원",
         "2.6 데이터 가져오기",
+        "새로 고침",
         "닫기",
     } <= labels
-    assert dialog.width() >= 480
-    assert dialog.height() >= 470
+    assert dialog.width() >= 500
+    assert dialog.height() >= 480
+    assert "현재 사용량" in dialog.usage_total_label.text()
+    assert "휴지통" in dialog.usage_task_label.text()
 
 
 def test_migration_dialog_shows_preview_and_has_keyboard_order(qtbot: QtBot) -> None:

@@ -51,9 +51,146 @@ class BackupInfo:
     attachment_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class LargeStoredFile:
+    name: str
+    size_bytes: int
+    orphaned: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DataUsageSnapshot:
+    task_count: int
+    open_task_count: int
+    completed_task_count: int
+    archived_task_count: int
+    trash_task_count: int
+    aged_trash_task_count: int
+    linked_attachment_count: int
+    linked_attachment_bytes: int
+    stored_attachment_count: int
+    stored_attachment_bytes: int
+    missing_attachment_count: int
+    orphan_attachment_count: int
+    orphan_attachment_bytes: int
+    backup_count: int
+    backup_bytes: int
+    database_bytes: int
+    largest_files: tuple[LargeStoredFile, ...]
+
+    @property
+    def total_bytes(self) -> int:
+        return self.database_bytes + self.stored_attachment_bytes + self.backup_bytes
+
+
 class BackupManager:
     def __init__(self, paths: AppPaths) -> None:
         self._paths = paths
+
+    def inspect_data_usage(
+        self,
+        *,
+        now: datetime | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> DataUsageSnapshot:
+        """Return a read-only inventory of records and files using local storage."""
+        if not self._paths.database_file.is_file():
+            raise BackupError("확인할 OfficeFlow 데이터베이스가 없습니다.")
+        current = now or datetime.now(UTC)
+        cutoff = (
+            (current - timedelta(days=30))
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+            .strftime("%Y-%m-%d %H:%M:%S.%f")
+        )
+        try:
+            with closing(sqlite3.connect(self._paths.database_file)) as connection:
+                connection.execute("PRAGMA busy_timeout=5000")
+                task_row = connection.execute(
+                    """
+                    SELECT
+                        COUNT(*),
+                        COALESCE(SUM(deleted_at IS NULL AND status IN ('active','pending')), 0),
+                        COALESCE(SUM(deleted_at IS NULL AND status = 'completed'), 0),
+                        COALESCE(SUM(deleted_at IS NULL AND status = 'archived'), 0),
+                        COALESCE(SUM(deleted_at IS NOT NULL), 0),
+                        COALESCE(SUM(deleted_at IS NOT NULL AND deleted_at <= ?), 0)
+                    FROM tasks
+                    """,
+                    (cutoff,),
+                ).fetchone()
+                attachment_rows = connection.execute(
+                    "SELECT original_name, relative_path, size_bytes FROM attachments"
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise BackupError(f"데이터 사용량을 확인하지 못했습니다: {error}") from error
+        if task_row is None:
+            raise BackupError("업무 사용량을 확인하지 못했습니다.")
+
+        linked = {
+            str(relative_path): (str(original_name), int(size_bytes))
+            for original_name, relative_path, size_bytes in attachment_rows
+        }
+        stored: dict[str, tuple[Path, int]] = {}
+        if self._paths.attachment_dir.is_dir():
+            for path in self._paths.attachment_dir.rglob("*"):
+                _raise_if_canceled(cancel_requested)
+                relative_path = path.relative_to(self._paths.attachment_dir)
+                if not path.is_file() or any(part.startswith(".") for part in relative_path.parts):
+                    continue
+                stored[relative_path.as_posix()] = (path, path.stat().st_size)
+
+        linked_paths = set(linked)
+        stored_paths = set(stored)
+        orphan_paths = stored_paths - linked_paths
+        largest = sorted(
+            (
+                LargeStoredFile(
+                    name=(linked[relative][0] if relative in linked else stored[relative][0].name),
+                    size_bytes=stored[relative][1],
+                    orphaned=relative in orphan_paths,
+                )
+                for relative in stored_paths
+            ),
+            key=lambda item: item.size_bytes,
+            reverse=True,
+        )[:5]
+
+        backups = tuple(self._paths.backup_dir.glob("*.ofbackup"))
+        backup_sizes: list[int] = []
+        for path in backups:
+            _raise_if_canceled(cancel_requested)
+            if path.is_file():
+                backup_sizes.append(path.stat().st_size)
+
+        database_bytes = sum(
+            path.stat().st_size
+            for path in (
+                self._paths.database_file,
+                self._paths.database_file.with_name(self._paths.database_file.name + "-wal"),
+                self._paths.database_file.with_name(self._paths.database_file.name + "-shm"),
+            )
+            if path.is_file()
+        )
+        return DataUsageSnapshot(
+            task_count=int(task_row[0]),
+            open_task_count=int(task_row[1]),
+            completed_task_count=int(task_row[2]),
+            archived_task_count=int(task_row[3]),
+            trash_task_count=int(task_row[4]),
+            aged_trash_task_count=int(task_row[5]),
+            linked_attachment_count=len(linked),
+            linked_attachment_bytes=sum(size for _name, size in linked.values()),
+            stored_attachment_count=len(stored),
+            stored_attachment_bytes=sum(size for _path, size in stored.values()),
+            missing_attachment_count=len(linked_paths - stored_paths),
+            orphan_attachment_count=len(orphan_paths),
+            orphan_attachment_bytes=sum(stored[path][1] for path in orphan_paths),
+            backup_count=len(backup_sizes),
+            backup_bytes=sum(backup_sizes),
+            database_bytes=database_bytes,
+            largest_files=tuple(largest),
+        )
 
     def create_backup(
         self,
@@ -400,7 +537,7 @@ def _database_counts(path: Path) -> dict[str, int]:
 
 def _raise_if_canceled(cancel_requested: Callable[[], bool] | None) -> None:
     if cancel_requested is not None and cancel_requested():
-        raise BackupError("백업 작업을 취소했습니다.")
+        raise BackupError("데이터 작업을 취소했습니다.")
 
 
 def _sha256(
