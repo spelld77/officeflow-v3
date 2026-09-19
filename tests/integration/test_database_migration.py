@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from sqlalchemy import inspect, text
 
+from officeflow.application.records import RecordService
+from officeflow.application.tasks import TaskDraft, TaskQuery, TaskService, TaskView
 from officeflow.infrastructure.database.migrate import upgrade_database
-from officeflow.infrastructure.database.session import create_database_engine
+from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
+from officeflow.infrastructure.database.session import (
+    SessionFactory,
+    create_database_engine,
+)
+from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 
 
 def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
@@ -26,6 +34,12 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     attachment_columns = {column["name"] for column in inspector.get_columns("attachments")}
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            )
+        }
     engine.dispose()
 
     assert {
@@ -39,6 +53,8 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "task_occurrences",
         "tasks",
         "work_logs",
+        "task_search",
+        "work_log_search",
     } <= tables
     assert {
         "ix_tasks_active_schedule",
@@ -55,7 +71,15 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     assert "ix_work_logs_date_updated" in work_log_indexes
     assert {"ix_attachments_task_missing", "ix_attachments_detached_created"} <= attachment_indexes
     assert "detached_at" in attachment_columns
-    assert revision == "0007_attachment_cleanup"
+    assert {
+        "task_search_insert",
+        "task_search_update",
+        "task_search_delete",
+        "work_log_search_insert",
+        "work_log_search_update",
+        "work_log_search_delete",
+    } <= triggers
+    assert revision == "0008_full_text_search"
 
 
 def test_initial_migration_is_idempotent(tmp_path: Path) -> None:
@@ -138,4 +162,50 @@ def test_existing_database_receives_attachment_cleanup_state(tmp_path: Path) -> 
     assert "ix_attachments_detached_created" in {
         index["name"] for index in inspector.get_indexes("attachments")
     }
+    migrated_engine.dispose()
+
+
+def test_existing_records_are_backfilled_into_full_text_indexes(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    sessions = SessionFactory(engine)
+    task_service = TaskService(SqlAlchemyTaskRepository(sessions))
+    record_service = RecordService(SqlAlchemyRecordRepository(sessions), task_service)
+    task = task_service.create(TaskDraft(title="기존 계약 검색"))
+    assert task.id is not None
+    record_service.add_work_log(
+        task_id=task.id,
+        log_date=date(2026, 9, 20),
+        content="이전 업무일지 본문",
+    )
+    with engine.begin() as connection:
+        for trigger in (
+            "work_log_search_delete",
+            "work_log_search_update",
+            "work_log_search_insert",
+            "task_search_delete",
+            "task_search_update",
+            "task_search_insert",
+        ):
+            connection.exec_driver_sql(f"DROP TRIGGER {trigger}")
+        connection.exec_driver_sql("DROP TABLE work_log_search")
+        connection.exec_driver_sql("DROP TABLE task_search")
+        connection.exec_driver_sql(
+            "UPDATE alembic_version SET version_num = '0007_attachment_cleanup'"
+        )
+    engine.dispose()
+
+    upgrade_database(database_file)
+    migrated_engine = create_database_engine(database_file)
+    migrated_sessions = SessionFactory(migrated_engine)
+    migrated_tasks = TaskService(SqlAlchemyTaskRepository(migrated_sessions))
+    migrated_records = RecordService(
+        SqlAlchemyRecordRepository(migrated_sessions), migrated_tasks
+    )
+
+    assert migrated_tasks.query(
+        TaskQuery(view=TaskView.ALL, search="기존 계약")
+    ).total == 1
+    assert migrated_records.work_log_page(search="이전 업무일지").total == 1
     migrated_engine.dispose()

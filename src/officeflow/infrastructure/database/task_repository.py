@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, and_, case, func, or_, select
+from sqlalchemy import Select, and_, case, func, literal_column, or_, select, text
 
 from officeflow.application.tasks import TaskGroup, TaskPage, TaskQuery, TaskSort, TaskView
 from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
@@ -14,8 +14,8 @@ from officeflow.infrastructure.database.models import (
     AttachmentRecord,
     TaskOccurrenceRecord,
     TaskRecord,
-    WorkLogRecord,
 )
+from officeflow.infrastructure.database.search import fts_prefix_query
 from officeflow.infrastructure.database.session import SessionFactory
 
 
@@ -58,6 +58,29 @@ class SqlAlchemyTaskRepository:
             if row is None or row[0].deleted_at is None:
                 return None
             return self._to_domain(row[0], has_attachments=bool(row[1]))
+
+    def get_many(
+        self,
+        task_ids: tuple[int, ...],
+        *,
+        include_deleted: bool = False,
+    ) -> dict[int, Task]:
+        if not task_ids:
+            return {}
+        attachment_exists = self._attachment_exists()
+        statement = select(TaskRecord, attachment_exists).where(
+            TaskRecord.id.in_(task_ids)
+        )
+        if not include_deleted:
+            statement = statement.where(TaskRecord.deleted_at.is_(None))
+        with self._sessions.transaction() as session:
+            return {
+                record.id: self._to_domain(
+                    record,
+                    has_attachments=bool(has_attachments),
+                )
+                for record, has_attachments in session.execute(statement).all()
+            }
 
     def soft_delete(self, task_id: int, *, deleted_at: datetime) -> Task:
         with self._sessions.transaction() as session:
@@ -152,20 +175,7 @@ class SqlAlchemyTaskRepository:
         ]
         normalized = search.strip()
         if normalized:
-            escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            pattern = f"%{escaped}%"
-            predicates.append(
-                TaskRecord.title.ilike(pattern, escape="\\")
-                | TaskRecord.description.ilike(pattern, escape="\\")
-                | TaskRecord.result_note.ilike(pattern, escape="\\")
-                | select(WorkLogRecord.id)
-                .where(
-                    WorkLogRecord.task_id == TaskRecord.id,
-                    WorkLogRecord.content.ilike(pattern, escape="\\")
-                    | WorkLogRecord.result.ilike(pattern, escape="\\"),
-                )
-                .exists()
-            )
+            predicates.append(self._search_predicate(normalized))
         attachment_exists = self._attachment_exists()
         statement = (
             select(TaskRecord, attachment_exists)
@@ -261,20 +271,7 @@ class SqlAlchemyTaskRepository:
 
         normalized = query.search.strip()
         if normalized:
-            escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            pattern = f"%{escaped}%"
-            predicates.append(
-                TaskRecord.title.ilike(pattern, escape="\\")
-                | TaskRecord.description.ilike(pattern, escape="\\")
-                | TaskRecord.result_note.ilike(pattern, escape="\\")
-                | select(WorkLogRecord.id)
-                .where(
-                    WorkLogRecord.task_id == TaskRecord.id,
-                    WorkLogRecord.content.ilike(pattern, escape="\\")
-                    | WorkLogRecord.result.ilike(pattern, escape="\\"),
-                )
-                .exists()
-            )
+            predicates.append(cls._search_predicate(normalized))
         if query.statuses:
             predicates.append(
                 TaskRecord.status.in_(tuple(status.value for status in query.statuses))
@@ -290,7 +287,33 @@ class SqlAlchemyTaskRepository:
             predicates.append(
                 attachment_exists if query.has_attachments else ~attachment_exists
             )
+        if query.completed_after is not None:
+            predicates.append(TaskRecord.completed_at >= query.completed_after)
+        if query.completed_before is not None:
+            predicates.append(TaskRecord.completed_at < query.completed_before)
         return predicates
+
+    @staticmethod
+    def _search_predicate(search: str) -> Any:
+        query = fts_prefix_query(search)
+        matching_tasks: Any = (
+            select(literal_column("rowid"))
+            .select_from(text("task_search"))
+            .where(text("task_search MATCH :task_fts").bindparams(task_fts=query))
+        )
+        matching_work_log_tasks: Any = (
+            select(literal_column("task_id"))
+            .select_from(text("work_log_search"))
+            .where(
+                text("work_log_search MATCH :work_log_fts").bindparams(
+                    work_log_fts=query
+                )
+            )
+        )
+        return or_(
+            TaskRecord.id.in_(matching_tasks),
+            TaskRecord.id.in_(matching_work_log_tasks),
+        )
 
     @staticmethod
     def _attachment_exists() -> Any:

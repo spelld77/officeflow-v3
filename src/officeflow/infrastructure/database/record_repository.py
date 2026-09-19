@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, literal_column, or_, select, text
 
+from officeflow.application.records import WorkLogPage
 from officeflow.domain.enums import TaskPriority
 from officeflow.domain.records import ChecklistItem, WorkLog
 from officeflow.infrastructure.database.models import (
@@ -11,6 +13,7 @@ from officeflow.infrastructure.database.models import (
     TaskRecord,
     WorkLogRecord,
 )
+from officeflow.infrastructure.database.search import fts_prefix_query
 from officeflow.infrastructure.database.session import SessionFactory
 
 
@@ -109,20 +112,7 @@ class SqlAlchemyRecordRepository:
             statement = statement.where(WorkLogRecord.task_id == task_id)
         normalized = search.strip()
         if normalized:
-            escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            pattern = f"%{escaped}%"
-            statement = statement.outerjoin(
-                TaskRecord,
-                WorkLogRecord.task_id == TaskRecord.id,
-            ).where(
-                or_(
-                    WorkLogRecord.content.ilike(pattern, escape="\\"),
-                    WorkLogRecord.result.ilike(pattern, escape="\\"),
-                    TaskRecord.title.ilike(pattern, escape="\\"),
-                    TaskRecord.description.ilike(pattern, escape="\\"),
-                    TaskRecord.result_note.ilike(pattern, escape="\\"),
-                )
-            )
+            statement = statement.where(self._work_log_search_predicate(normalized))
         statement = statement.order_by(
             WorkLogRecord.log_date.desc(),
             WorkLogRecord.updated_at.desc(),
@@ -130,6 +120,64 @@ class SqlAlchemyRecordRepository:
         )
         with self._sessions.transaction() as session:
             return tuple(self._to_work_log(record) for record in session.scalars(statement).all())
+
+    def query_work_logs(
+        self,
+        *,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> WorkLogPage:
+        predicates: list[Any] = []
+        if date_from is not None:
+            predicates.append(WorkLogRecord.log_date >= date_from)
+        if date_to is not None:
+            predicates.append(WorkLogRecord.log_date <= date_to)
+        normalized = search.strip()
+        if normalized:
+            predicates.append(self._work_log_search_predicate(normalized))
+        count_statement = select(func.count(WorkLogRecord.id)).where(*predicates)
+        statement = (
+            select(WorkLogRecord)
+            .where(*predicates)
+            .order_by(
+                WorkLogRecord.log_date.desc(),
+                WorkLogRecord.updated_at.desc(),
+                WorkLogRecord.id.desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+        with self._sessions.transaction() as session:
+            total = int(session.scalar(count_statement) or 0)
+            items = tuple(
+                self._to_work_log(record) for record in session.scalars(statement).all()
+            )
+        return WorkLogPage(items=items, total=total, offset=offset, limit=limit)
+
+    @staticmethod
+    def _work_log_search_predicate(search: str) -> Any:
+        query = fts_prefix_query(search)
+        matching_logs: Any = (
+            select(literal_column("rowid"))
+            .select_from(text("work_log_search"))
+            .where(
+                text("work_log_search MATCH :work_log_fts").bindparams(
+                    work_log_fts=query
+                )
+            )
+        )
+        matching_tasks: Any = (
+            select(literal_column("rowid"))
+            .select_from(text("task_search"))
+            .where(text("task_search MATCH :task_fts").bindparams(task_fts=query))
+        )
+        return or_(
+            WorkLogRecord.id.in_(matching_logs),
+            WorkLogRecord.task_id.in_(matching_tasks),
+        )
 
     def add_work_log(self, work_log: WorkLog) -> WorkLog:
         with self._sessions.transaction() as session:

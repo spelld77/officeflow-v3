@@ -170,6 +170,48 @@ def test_work_log_browser_searches_past_tasks_and_log_content(qtbot: QtBot) -> N
     assert dialog.date_edit.isEnabled()
 
 
+def test_work_log_browser_pages_search_results_and_filters_date_range(
+    qtbot: QtBot,
+) -> None:
+    task_service, record_service = make_dialog_services()
+    for index in range(30):
+        completed_at = datetime(2026, 8, index % 20 + 1, 4, 0, tzinfo=UTC)
+        task = task_service.create(
+            TaskDraft(title=f"누적 검색 완료 {index:02d}"),
+            now=completed_at,
+        )
+        assert task.id is not None
+        task_service.transition(task.id, TaskStatus.COMPLETED, now=completed_at)
+        record_service.add_work_log(
+            task_id=task.id,
+            log_date=date(2026, 8, index % 20 + 1),
+            content=f"누적 검색 일지 {index:02d}",
+        )
+    dialog = WorkLogBrowserDialog(
+        task_service=task_service,
+        record_service=record_service,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.search_edit.setText("누적 검색")
+    dialog._refresh()
+
+    assert dialog.list_widget.count() == 50
+    assert dialog.load_more_button.isVisible()
+    qtbot.mouseClick(dialog.load_more_button, Qt.MouseButton.LeftButton)
+    assert dialog.list_widget.count() == 60
+    assert not dialog.load_more_button.isVisible()
+
+    dialog.range_checkbox.setChecked(True)
+    dialog.range_from_edit.setDate(QDate(2026, 8, 10))
+    dialog.range_to_edit.setDate(QDate(2026, 8, 12))
+    dialog._refresh()
+
+    assert dialog.list_widget.count() == 8
+    assert all("2026-08-1" in dialog.list_widget.item(i).text() for i in range(8))
+
+
 def test_task_records_dialog_can_open_on_attachment_tab(qtbot: QtBot, tmp_path: Path) -> None:
     task_service, record_service = make_dialog_services()
     task = task_service.create(TaskDraft(title="첨부 바로가기"))

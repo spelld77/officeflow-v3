@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol
 
 from officeflow.application.tasks import TaskService
 from officeflow.domain.enums import TaskPriority
 from officeflow.domain.records import ChecklistItem, WorkLog
+
+
+@dataclass(frozen=True, slots=True)
+class WorkLogPage:
+    items: tuple[WorkLog, ...]
+    total: int
+    offset: int
+    limit: int
+
+    @property
+    def has_more(self) -> bool:
+        return self.offset + len(self.items) < self.total
 
 
 class RecordRepository(Protocol):
@@ -28,6 +41,16 @@ class RecordRepository(Protocol):
         task_id: int | None = None,
         search: str = "",
     ) -> tuple[WorkLog, ...]: ...
+
+    def query_work_logs(
+        self,
+        *,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> WorkLogPage: ...
 
     def add_work_log(self, work_log: WorkLog) -> WorkLog: ...
 
@@ -89,6 +112,29 @@ class RecordService:
             log_date=log_date,
             task_id=task_id,
             search=search,
+        )
+
+    def work_log_page(
+        self,
+        *,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> WorkLogPage:
+        if offset < 0:
+            raise ValueError("조회 시작 위치는 0 이상이어야 합니다.")
+        if not 1 <= limit <= 100:
+            raise ValueError("한 번에 조회할 업무일지는 1~100개여야 합니다.")
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise ValueError("검색 시작일은 종료일보다 늦을 수 없습니다.")
+        return self._repository.query_work_logs(
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+            offset=offset,
+            limit=limit,
         )
 
     def add_work_log(

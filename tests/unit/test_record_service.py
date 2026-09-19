@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from officeflow.application.records import RecordRepository, RecordService
+from officeflow.application.records import RecordRepository, RecordService, WorkLogPage
 from officeflow.application.tasks import TaskDraft, TaskService
 from officeflow.domain.enums import TaskPriority
 from officeflow.domain.records import ChecklistItem, RecordValidationError, WorkLog
@@ -73,6 +73,28 @@ class InMemoryRecordRepository(RecordRepository):
             )
         )
 
+    def query_work_logs(
+        self,
+        *,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> WorkLogPage:
+        items = tuple(
+            item
+            for item in self.list_work_logs(search=search)
+            if (date_from is None or item.log_date >= date_from)
+            and (date_to is None or item.log_date <= date_to)
+        )
+        return WorkLogPage(
+            items=items[offset : offset + limit],
+            total=len(items),
+            offset=offset,
+            limit=limit,
+        )
+
     def add_work_log(self, work_log: WorkLog) -> WorkLog:
         saved = replace(work_log, id=self.next_log_id)
         self.work_log_items[self.next_log_id] = saved
@@ -120,6 +142,37 @@ def test_blank_checklist_and_work_log_are_rejected() -> None:
         service.add_checklist_item(task.id, "   ")
     with pytest.raises(RecordValidationError):
         service.add_work_log(task_id=task.id, log_date=date(2026, 9, 15), content="")
+
+
+def test_work_log_page_applies_date_range_and_pagination() -> None:
+    task_service, service, _repository = make_services()
+    task = task_service.create(TaskDraft(title="검색 업무"))
+    assert task.id is not None
+    for day in range(1, 31):
+        service.add_work_log(
+            task_id=task.id,
+            log_date=date(2026, 8, day),
+            content=f"검색 기록 {day}",
+        )
+
+    first = service.work_log_page(
+        search="검색",
+        date_from=date(2026, 8, 10),
+        date_to=date(2026, 8, 30),
+        limit=10,
+    )
+    second = service.work_log_page(
+        search="검색",
+        date_from=date(2026, 8, 10),
+        date_to=date(2026, 8, 30),
+        offset=10,
+        limit=10,
+    )
+
+    assert first.total == 21
+    assert len(first.items) == 10
+    assert first.has_more
+    assert len(second.items) == 10
 
 
 def test_work_log_keeps_priority_snapshot_and_can_be_edited() -> None:

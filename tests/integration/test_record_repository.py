@@ -40,12 +40,30 @@ def test_record_repository_round_trip_and_task_search(tmp_path: Path) -> None:
     assert record_service.work_logs(log_date=date(2026, 9, 15)) == (work_log,)
     assert record_service.work_logs(search="매출지표") == (work_log,)
     assert record_service.work_logs(search="영업팀 자료") == (work_log,)
+    page = record_service.work_log_page(
+        search="매출",
+        date_from=date(2026, 9, 1),
+        date_to=date(2026, 9, 30),
+        limit=10,
+    )
+    assert page.items == (work_log,)
+    assert page.total == 1
     search = task_service.query(TaskQuery(view=TaskView.ALL, search="매출지표"))
     assert [item.id for item in search.items] == [task.id]
 
+    assert work_log.id is not None
+    updated_log = record_service.update_work_log(
+        work_log.id,
+        log_date=date(2026, 9, 15),
+        content="갱신지표 검증",
+        result="오류 없음",
+    )
+    assert record_service.work_logs(search="매출지표") == ()
+    assert record_service.work_logs(search="갱신지표") == (updated_log,)
+
     record_service.delete_checklist_item(first.id)
     assert [item.position for item in record_service.checklist_for_task(task.id)] == [0]
-    assert work_log.id is not None
     record_service.delete_work_log(work_log.id)
     assert record_service.work_logs(task_id=task.id) == ()
+    assert record_service.work_logs(search="매출지표") == ()
     engine.dispose()

@@ -52,6 +52,8 @@ class TaskQuery:
     has_attachments: bool | None = None
     group: TaskGroup | None = None
     sort: TaskSort = TaskSort.SCHEDULE
+    completed_after: datetime | None = None
+    completed_before: datetime | None = None
     offset: int = 0
     limit: int | None = 100
 
@@ -62,6 +64,12 @@ class TaskQuery:
             raise ValueError("한 번에 조회할 업무는 1~500개여야 합니다.")
         if self.group is not None and self.view is not TaskView.TODAY:
             raise ValueError("업무 그룹은 오늘 보기에서만 사용할 수 있습니다.")
+        if (
+            self.completed_after is not None
+            and self.completed_before is not None
+            and self.completed_after >= self.completed_before
+        ):
+            raise ValueError("완료일 검색 시작은 종료보다 빨라야 합니다.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +177,10 @@ class TaskRepository(Protocol):
     def get(self, task_id: int) -> Task | None: ...
 
     def get_deleted(self, task_id: int) -> Task | None: ...
+
+    def get_many(
+        self, task_ids: tuple[int, ...], *, include_deleted: bool = False
+    ) -> dict[int, Task]: ...
 
     def soft_delete(self, task_id: int, *, deleted_at: datetime) -> Task: ...
 
@@ -333,6 +345,9 @@ class TaskService:
             raise TaskNotFoundError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
         return task
 
+    def get_many_including_deleted(self, task_ids: tuple[int, ...]) -> dict[int, Task]:
+        return self._repository.get_many(task_ids, include_deleted=True)
+
     def move_to_trash(self, task_id: int, *, now: datetime | None = None) -> Task:
         """Hide a task from active views while preserving its related data."""
         return self._repository.soft_delete(
@@ -376,6 +391,39 @@ class TaskService:
             now=local_noon,
         )
         return list(page.items)
+
+    def completed_search_page(
+        self,
+        *,
+        search: str,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        offset: int = 0,
+        limit: int = 25,
+    ) -> TaskPage:
+        zone = ZoneInfo(self._timezone)
+        completed_after = (
+            datetime.combine(date_from, time.min, tzinfo=zone).astimezone(UTC)
+            if date_from is not None
+            else None
+        )
+        completed_before = (
+            datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone).astimezone(
+                UTC
+            )
+            if date_to is not None
+            else None
+        )
+        return self.query(
+            TaskQuery(
+                view=TaskView.COMPLETED,
+                search=search,
+                completed_after=completed_after,
+                completed_before=completed_before,
+                offset=offset,
+                limit=limit,
+            )
+        )
 
     def calendar_range(
         self,
@@ -550,7 +598,10 @@ class TaskService:
         day_start: datetime,
         day_end: datetime,
     ) -> TaskPage:
-        regular_query = replace(query, offset=0, limit=None)
+        fetch_limit = (
+            None if query.limit is None else query.offset + query.limit
+        )
+        regular_query = replace(query, offset=0, limit=fetch_limit)
         regular = self._repository.query(
             regular_query,
             current=current,
@@ -574,7 +625,7 @@ class TaskService:
         end = None if query.limit is None else query.offset + query.limit
         return TaskPage(
             items=tuple(combined[query.offset : end]),
-            total=len(combined),
+            total=regular.total + len(recurring),
             offset=query.offset,
             limit=query.limit,
         )
@@ -705,14 +756,15 @@ class TaskService:
         if section is not TaskGroup.IN_PROGRESS:
             return self.query(replace(query, group=section), now=now)
 
-        base = replace(query, offset=0, limit=None)
+        fetch_limit = None if query.limit is None else query.offset + query.limit
+        base = replace(query, offset=0, limit=fetch_limit)
         active = self.query(replace(base, group=TaskGroup.IN_PROGRESS), now=now)
         upcoming = self.query(replace(base, group=TaskGroup.UPCOMING), now=now)
         combined = [*active.items, *upcoming.items]
         end = None if query.limit is None else query.offset + query.limit
         return TaskPage(
             items=tuple(combined[query.offset : end]),
-            total=len(combined),
+            total=active.total + upcoming.total,
             offset=query.offset,
             limit=query.limit,
         )

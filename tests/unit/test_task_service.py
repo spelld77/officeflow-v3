@@ -22,6 +22,7 @@ class InMemoryTaskRepository(TaskRepository):
     def __init__(self) -> None:
         self.tasks: dict[int, Task] = {}
         self.occurrences: dict[tuple[int, datetime], TaskOccurrence] = {}
+        self.queries: list[TaskQuery] = []
         self.next_id = 1
         self.next_occurrence_id = 1
 
@@ -63,6 +64,19 @@ class InMemoryTaskRepository(TaskRepository):
         task = self.tasks.get(task_id)
         return task if task is not None and task.deleted_at is not None else None
 
+    def get_many(
+        self,
+        task_ids: tuple[int, ...],
+        *,
+        include_deleted: bool = False,
+    ) -> dict[int, Task]:
+        return {
+            task_id: task
+            for task_id in task_ids
+            if (task := self.tasks.get(task_id)) is not None
+            and (include_deleted or task.deleted_at is None)
+        }
+
     def soft_delete(self, task_id: int, *, deleted_at: datetime) -> Task:
         task = self.get(task_id)
         if task is None:
@@ -87,6 +101,7 @@ class InMemoryTaskRepository(TaskRepository):
         day_start: datetime,
         day_end: datetime,
     ) -> TaskPage:
+        self.queries.append(query)
         tasks = [
             task
             for task in self.tasks.values()
@@ -227,6 +242,20 @@ class InMemoryTaskRepository(TaskRepository):
             and (
                 query.has_attachments is None
                 or task.has_attachments is query.has_attachments
+            )
+            and (
+                query.completed_after is None
+                or (
+                    task.completed_at is not None
+                    and task.completed_at >= query.completed_after
+                )
+            )
+            and (
+                query.completed_before is None
+                or (
+                    task.completed_at is not None
+                    and task.completed_at < query.completed_before
+                )
             )
         )
 
@@ -481,6 +510,35 @@ def test_views_and_search_filter_tasks() -> None:
     assert all(task.id != pending.id for task in service.list(TaskView.ALL, now=NOW))
 
 
+def test_completed_search_pages_without_global_result_cap() -> None:
+    service = TaskService(InMemoryTaskRepository())
+    for index in range(30):
+        completed_at = datetime(2026, 8, index % 20 + 1, 3, 0, tzinfo=UTC)
+        task = service.create(TaskDraft(title=f"과거 보고 {index:02d}"), now=completed_at)
+        assert task.id is not None
+        service.transition(task.id, TaskStatus.COMPLETED, now=completed_at)
+
+    first = service.completed_search_page(
+        search="과거 보고",
+        date_from=date(2026, 8, 1),
+        date_to=date(2026, 8, 20),
+        limit=25,
+    )
+    second = service.completed_search_page(
+        search="과거 보고",
+        date_from=date(2026, 8, 1),
+        date_to=date(2026, 8, 20),
+        offset=25,
+        limit=25,
+    )
+
+    assert first.total == 30
+    assert len(first.items) == 25
+    assert first.has_more
+    assert len(second.items) == 5
+    assert not second.has_more
+
+
 def test_summary_counts_time_based_states() -> None:
     repository = InMemoryTaskRepository()
     service = TaskService(repository)
@@ -615,6 +673,7 @@ def test_today_flow_merges_in_progress_and_upcoming_in_work_order() -> None:
     query = TaskQuery(view=TaskView.TODAY, limit=2)
 
     first = service.today_flow_page(query, TaskGroup.IN_PROGRESS, now=NOW)
+    first_queries = repository.queries.copy()
     second = service.today_flow_page(
         replace(query, offset=2),
         TaskGroup.IN_PROGRESS,
@@ -623,6 +682,7 @@ def test_today_flow_merges_in_progress_and_upcoming_in_work_order() -> None:
     pages = service.today_flow_pages(query, now=NOW)
 
     assert first.total == 3
+    assert all(item.limit == 2 for item in first_queries)
     assert [task.title for task in first.items] == ["진행 중 업무", "곧 시작할 업무"]
     assert [task.title for task in second.items] == ["나중 업무"]
     assert tuple(pages) == (

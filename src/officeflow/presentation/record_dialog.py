@@ -10,6 +10,7 @@ from PySide6.QtCore import QDate, QObject, Qt, QThread, QTimer, QUrl, Signal, Sl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
@@ -36,7 +37,7 @@ from officeflow.application.attachments import (
     AttachmentService,
 )
 from officeflow.application.records import RecordService
-from officeflow.application.tasks import TaskQuery, TaskService, TaskView
+from officeflow.application.tasks import TaskService
 from officeflow.domain.attachment import Attachment
 from officeflow.domain.records import ChecklistItem, RecordValidationError, WorkLog
 from officeflow.domain.task import Task
@@ -786,6 +787,8 @@ class TaskRecordsDialog(QDialog):
 
 
 class WorkLogBrowserDialog(QDialog):
+    SEARCH_BATCH_SIZE = 25
+
     def __init__(
         self,
         *,
@@ -801,6 +804,11 @@ class WorkLogBrowserDialog(QDialog):
         self._logs_by_id: dict[int, WorkLog] = {}
         self._completed_by_key: dict[tuple[int, str], Task] = {}
         self._selected_task_context: tuple[int, datetime | None] | None = None
+        self._loaded_completed: list[Task] = []
+        self._loaded_logs: list[WorkLog] = []
+        self._completed_offset = 0
+        self._log_offset = 0
+        self._search_total = 0
         self.setWindowTitle("날짜별 업무일지")
         self.resize(680, 560)
         self.setMinimumSize(500, 440)
@@ -820,7 +828,30 @@ class WorkLogBrowserDialog(QDialog):
         self._search_timer.setInterval(200)
         self._search_timer.timeout.connect(self._refresh)
         self.search_edit.textChanged.connect(self._search_timer.start)
-        controls = QHBoxLayout()
+        self.range_controls_widget = QWidget()
+        range_controls = QHBoxLayout(self.range_controls_widget)
+        range_controls.setContentsMargins(0, 0, 0, 0)
+        self.range_checkbox = QCheckBox("기간 지정")
+        self.range_checkbox.setObjectName("workLogRangeEnabled")
+        self.range_checkbox.toggled.connect(self._refresh)
+        range_controls.addWidget(self.range_checkbox)
+        self.range_from_edit = QDateEdit(QDate.currentDate().addYears(-1))
+        self.range_from_edit.setObjectName("workLogRangeFrom")
+        self.range_from_edit.setCalendarPopup(True)
+        self.range_from_edit.setDisplayFormat("yyyy-MM-dd")
+        self.range_from_edit.dateChanged.connect(self._refresh)
+        range_controls.addWidget(self.range_from_edit, 1)
+        range_controls.addWidget(QLabel("~"))
+        self.range_to_edit = QDateEdit(QDate.currentDate())
+        self.range_to_edit.setObjectName("workLogRangeTo")
+        self.range_to_edit.setCalendarPopup(True)
+        self.range_to_edit.setDisplayFormat("yyyy-MM-dd")
+        self.range_to_edit.dateChanged.connect(self._refresh)
+        range_controls.addWidget(self.range_to_edit, 1)
+        root.addWidget(self.range_controls_widget)
+        self.day_controls_widget = QWidget()
+        controls = QHBoxLayout(self.day_controls_widget)
+        controls.setContentsMargins(0, 0, 0, 0)
         self.previous_button = QPushButton("이전 날")
         self.previous_button.clicked.connect(lambda: self._move_date(-1))
         self.date_edit = QDateEdit(QDate.currentDate())
@@ -833,13 +864,18 @@ class WorkLogBrowserDialog(QDialog):
         controls.addWidget(self.previous_button)
         controls.addWidget(self.date_edit, 1)
         controls.addWidget(self.next_button)
-        root.addLayout(controls)
+        root.addWidget(self.day_controls_widget)
 
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("workLogBrowserList")
         self.list_widget.currentItemChanged.connect(self._show_selected)
         self.list_widget.itemDoubleClicked.connect(lambda _item: self._open_selected_records())
         root.addWidget(self.list_widget, 1)
+        self.load_more_button = QPushButton("검색 결과 더 보기")
+        self.load_more_button.setObjectName("workLogLoadMoreButton")
+        self.load_more_button.clicked.connect(self._load_more_search)
+        self.load_more_button.hide()
+        root.addWidget(self.load_more_button, alignment=Qt.AlignmentFlag.AlignCenter)
         self.detail = QLabel("날짜를 선택하면 기록을 확인할 수 있습니다.")
         self.detail.setObjectName("workLogBrowserDetail")
         self.detail.setWordWrap(True)
@@ -867,16 +903,81 @@ class WorkLogBrowserDialog(QDialog):
         self.previous_button.setEnabled(not searching)
         self.date_edit.setEnabled(not searching)
         self.next_button.setEnabled(not searching)
+        self.day_controls_widget.setVisible(not searching)
+        self.range_controls_widget.setVisible(searching)
+        self.range_checkbox.setEnabled(searching)
+        range_enabled = searching and self.range_checkbox.isChecked()
+        self.range_from_edit.setEnabled(range_enabled)
+        self.range_to_edit.setEnabled(range_enabled)
         if searching:
-            logs = self._record_service.work_logs(search=search)
-            completed = list(
-                self._task_service.query(
-                    TaskQuery(view=TaskView.COMPLETED, search=search, limit=500)
-                ).items
-            )
-        else:
-            logs = self._record_service.work_logs(log_date=selected_date)
-            completed = self._task_service.completed_on(selected_date)
+            self._loaded_completed.clear()
+            self._loaded_logs.clear()
+            self._completed_offset = 0
+            self._log_offset = 0
+            self._load_search_page(search)
+            return
+        self.load_more_button.hide()
+        logs = list(self._record_service.work_logs(log_date=selected_date))
+        completed = self._task_service.completed_on(selected_date)
+        self._render_entries(completed, logs, searching=False)
+
+    def _search_dates(self) -> tuple[date | None, date | None]:
+        if not self.range_checkbox.isChecked():
+            return None, None
+        date_from = cast(date, self.range_from_edit.date().toPython())
+        date_to = cast(date, self.range_to_edit.date().toPython())
+        return date_from, date_to
+
+    def _load_more_search(self) -> None:
+        search = self.search_edit.text().strip()
+        if search:
+            self._load_search_page(search)
+
+    def _load_search_page(self, search: str) -> None:
+        date_from, date_to = self._search_dates()
+        if date_from is not None and date_to is not None and date_from > date_to:
+            self.load_more_button.hide()
+            self.list_widget.clear()
+            self.detail.setText("검색 시작일은 종료일보다 늦을 수 없습니다.")
+            return
+        completed_page = self._task_service.completed_search_page(
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+            offset=self._completed_offset,
+            limit=self.SEARCH_BATCH_SIZE,
+        )
+        log_page = self._record_service.work_log_page(
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+            offset=self._log_offset,
+            limit=self.SEARCH_BATCH_SIZE,
+        )
+        self._loaded_completed.extend(completed_page.items)
+        self._loaded_logs.extend(log_page.items)
+        self._completed_offset += len(completed_page.items)
+        self._log_offset += len(log_page.items)
+        self._search_total = completed_page.total + log_page.total
+        self._render_entries(
+            self._loaded_completed,
+            self._loaded_logs,
+            searching=True,
+        )
+        has_more = completed_page.has_more or log_page.has_more
+        self.load_more_button.setVisible(has_more)
+        self.load_more_button.setText(
+            f"더 보기 ({len(self._loaded_completed) + len(self._loaded_logs):,} / "
+            f"{self._search_total:,})"
+        )
+
+    def _render_entries(
+        self,
+        completed: list[Task],
+        logs: list[WorkLog],
+        *,
+        searching: bool,
+    ) -> None:
         self._logs_by_id = {log.id: log for log in logs if log.id is not None}
         self._completed_by_key.clear()
         self._selected_task_context = None
@@ -900,13 +1001,13 @@ class WorkLogBrowserDialog(QDialog):
             item = QListWidgetItem(f"{prefix} {task.title}  ·  {result_state}")
             item.setData(Qt.ItemDataRole.UserRole, ("task", *key))
             self.list_widget.addItem(item)
+        task_ids = tuple({log.task_id for log in logs if log.task_id is not None})
+        tasks_by_id = self._task_service.get_many_including_deleted(task_ids)
         for log in logs:
             task_title = "연결되지 않은 기록"
             if log.task_id is not None:
-                try:
-                    task_title = self._task_service.get(log.task_id).title
-                except LookupError:
-                    task_title = "삭제된 업무"
+                log_task = tasks_by_id.get(log.task_id)
+                task_title = log_task.title if log_task is not None else "삭제된 업무"
             preview = " ".join(log.content.splitlines())
             prefix = f"[일지 {log.log_date.isoformat()}]" if searching else "[일지]"
             item = QListWidgetItem(f"{prefix} {task_title}  ·  {preview}")
