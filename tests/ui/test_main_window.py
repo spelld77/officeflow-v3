@@ -7,7 +7,15 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QListView, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QLineEdit,
+    QListView,
+    QMessageBox,
+    QPushButton,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 import officeflow.presentation.main_window as main_window_module
@@ -167,6 +175,43 @@ def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> N
     saved = task_service.get(task.id)
     assert saved.status is TaskStatus.COMPLETED
     assert saved.result_note == "검수까지 완료"
+
+
+def test_task_can_move_to_trash_and_be_restored(
+    qtbot: QtBot,
+    monkeypatch,
+) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    task = task_service.create(TaskDraft(title="휴지통 테스트"))
+    assert task.id is not None
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    actions = [action.text() for action in window._build_task_context_menu(task).actions()]
+    assert "휴지통으로 이동" in actions
+    window._move_selected_to_trash()
+
+    assert task_service.list(TaskView.ALL) == []
+    window._set_view(TaskView.TRASH)
+    deleted = window._task_model.task_at(window._task_model.index(0, 0))
+    assert deleted is not None and deleted.deleted_at is not None
+    assert [
+        action.text() for action in window._build_task_context_menu(deleted).actions()
+    ] == ["휴지통에서 복원"]
+
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
+    window._restore_selected_from_trash()
+
+    assert task_service.get(task.id).title == "휴지통 테스트"
+    assert task_service.list(TaskView.TRASH) == []
 
 
 def test_quick_complete_can_be_undone(qtbot: QtBot) -> None:

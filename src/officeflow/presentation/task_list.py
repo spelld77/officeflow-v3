@@ -338,12 +338,27 @@ class TaskItemDelegate(QStyledItemDelegate):
         painter.setBrush(background)
         painter.drawRoundedRect(rect, 9, 9)
 
+        deleted = task.deleted_at is not None
         completion_rect = self._completion_rect(option)
         completed = task.status is TaskStatus.COMPLETED
-        painter.setPen(QPen(QColor("#2F6FED" if completed else "#A8B3C5"), 1.6))
-        painter.setBrush(QColor("#2F6FED") if completed else QColor("#FFFFFF"))
+        painter.setPen(
+            QPen(QColor("#A8B3C5" if deleted else "#2F6FED" if completed else "#A8B3C5"), 1.6)
+        )
+        painter.setBrush(
+            QColor("#EEF2F7" if deleted else "#2F6FED" if completed else "#FFFFFF")
+        )
         painter.drawEllipse(completion_rect)
-        if completed:
+        if deleted:
+            painter.setPen(QPen(QColor("#778197"), 1.5))
+            painter.drawLine(
+                QPoint(int(completion_rect.left() + 5), int(completion_rect.top() + 5)),
+                QPoint(int(completion_rect.right() - 5), int(completion_rect.bottom() - 5)),
+            )
+            painter.drawLine(
+                QPoint(int(completion_rect.right() - 5), int(completion_rect.top() + 5)),
+                QPoint(int(completion_rect.left() + 5), int(completion_rect.bottom() - 5)),
+            )
+        elif completed:
             painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
             painter.drawLine(
                 QPoint(int(completion_rect.left() + 4), int(completion_rect.center().y())),
@@ -370,7 +385,13 @@ class TaskItemDelegate(QStyledItemDelegate):
         title_font = QFont(option.font)
         title_font.setBold(True)
         painter.setFont(title_font)
-        painter.setPen(QColor("#172033" if task.status is not TaskStatus.COMPLETED else "#778197"))
+        painter.setPen(
+            QColor(
+                "#778197"
+                if deleted or task.status is TaskStatus.COMPLETED
+                else "#172033"
+            )
+        )
         title = (
             f"{format_task_schedule_compact(task)}  ·  {task.title}"
             if self._compact
@@ -409,7 +430,11 @@ class TaskItemDelegate(QStyledItemDelegate):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(status_rect, 12, 12)
         painter.setPen(QColor("#526078"))
-        painter.drawText(status_rect, Qt.AlignmentFlag.AlignCenter, self.STATUS_LABELS[task.status])
+        painter.drawText(
+            status_rect,
+            Qt.AlignmentFlag.AlignCenter,
+            "휴지통" if deleted else self.STATUS_LABELS[task.status],
+        )
         painter.setPen(QColor("#68738A"))
         painter.drawText(
             self._menu_rect(option),
@@ -437,7 +462,8 @@ class TaskItemDelegate(QStyledItemDelegate):
             self.menuRequested.emit(entry, event.globalPosition().toPoint())
             return True
         if (
-            entry.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+            entry.deleted_at is None
+            and entry.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
             and self._completion_rect(option).contains(event.position())
         ):
             self.quickCompleteRequested.emit(entry)

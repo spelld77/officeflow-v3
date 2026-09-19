@@ -96,6 +96,10 @@ class MainWindow(QMainWindow):
         TaskView.PENDING: ("대기", "잠시 보류한 업무입니다."),
         TaskView.COMPLETED: ("완료", "완료한 업무 기록입니다."),
         TaskView.ALL: ("전체 업무", "일정이 없는 업무를 포함한 전체 목록입니다."),
+        TaskView.TRASH: (
+            "휴지통",
+            "삭제한 업무를 보관합니다. 첨부파일과 기록도 함께 유지됩니다.",
+        ),
     }
 
     @property
@@ -237,6 +241,7 @@ class MainWindow(QMainWindow):
                 ("대기", TaskView.PENDING),
                 ("완료", TaskView.COMPLETED),
                 ("전체 업무", TaskView.ALL),
+                ("휴지통", TaskView.TRASH),
             )
         ):
             self._sidebar_layout.addWidget(
@@ -342,7 +347,7 @@ class MainWindow(QMainWindow):
         heading.addStretch()
         self._open_selected_button = QPushButton("열기")
         self._open_selected_button.setToolTip("선택한 업무 수정")
-        self._open_selected_button.clicked.connect(self._open_selected_task)
+        self._open_selected_button.clicked.connect(self._open_or_restore_selected)
         self._open_selected_button.hide()
         heading.addWidget(self._open_selected_button)
         self._open_selected_records_button = QPushButton("기록")
@@ -561,6 +566,11 @@ class MainWindow(QMainWindow):
             button.setEnabled(False)
             actions.addWidget(button)
         layout.addLayout(actions)
+        self._trash_button = QPushButton("휴지통으로 이동")
+        self._trash_button.setToolTip("업무와 기록, 첨부파일을 보존한 채 일반 화면에서 숨깁니다.")
+        self._trash_button.clicked.connect(self._trash_or_restore_selected)
+        self._trash_button.setEnabled(False)
+        layout.addWidget(self._trash_button)
         return panel
 
     def _configure_input_tab_order(self) -> None:
@@ -617,6 +627,9 @@ class MainWindow(QMainWindow):
         self._set_nav_selected(self._calendar_button, False)
         self._selected_task_id = None
         self._selected_occurrence_start = None
+        trash = view is TaskView.TRASH
+        self._quick_add_edit.setVisible(not trash)
+        self._quick_add_button.setVisible(not trash)
         self._apply_responsive_layout()
         self._refresh_tasks()
 
@@ -792,9 +805,12 @@ class MainWindow(QMainWindow):
         self._set_combo_value(self._priority_filter, str(preferences.get("priority", "")))
         self._pinned_filter.setChecked(bool(preferences.get("pinned_only", False)))
         self._attachment_filter.setChecked(bool(preferences.get("has_attachments", False)))
+        default_sort = (
+            TaskSort.UPDATED.value if view is TaskView.TRASH else TaskSort.SCHEDULE.value
+        )
         self._set_combo_value(
             self._sort_combo,
-            str(preferences.get("sort", TaskSort.SCHEDULE.value)),
+            str(preferences.get("sort", default_sort)),
         )
         del blockers
         self._update_filter_feedback()
@@ -867,10 +883,18 @@ class MainWindow(QMainWindow):
         if index.isValid():
             self._task_list.setCurrentIndex(index)
         self._selected_task_id = task.id
-        self._selected_occurrence_start = task.starts_at if task.recurrence_rule else None
+        self._selected_occurrence_start = (
+            task.starts_at
+            if task.deleted_at is None and task.recurrence_rule
+            else None
+        )
 
     def _build_task_context_menu(self, task: Task) -> QMenu:
         menu = QMenu(self)
+        if task.deleted_at is not None:
+            restore = menu.addAction("휴지통에서 복원")
+            restore.triggered.connect(self._restore_selected_from_trash)
+            return menu
         if task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}:
             complete_now = menu.addAction("바로 완료")
             complete_now.triggered.connect(self._quick_complete_selected)
@@ -895,6 +919,9 @@ class MainWindow(QMainWindow):
             records.triggered.connect(self._open_selected_records)
         edit = menu.addAction("업무 수정")
         edit.triggered.connect(self._open_selected_task)
+        menu.addSeparator()
+        delete = menu.addAction("휴지통으로 이동")
+        delete.triggered.connect(self._move_selected_to_trash)
         return menu
 
     def _quick_complete_task(self, task: Task) -> None:
@@ -1112,6 +1139,69 @@ class MainWindow(QMainWindow):
         except Exception as error:
             self._show_error("업무를 열지 못했습니다.", error)
 
+    def _open_or_restore_selected(self) -> None:
+        if self._current_view is TaskView.TRASH:
+            self._restore_selected_from_trash()
+            return
+        self._open_selected_task()
+
+    def _trash_or_restore_selected(self) -> None:
+        if self._current_view is TaskView.TRASH:
+            self._restore_selected_from_trash()
+            return
+        self._move_selected_to_trash()
+
+    def _move_selected_to_trash(self) -> None:
+        if self._selected_task_id is None:
+            return
+        try:
+            task = self._task_service.get(self._selected_task_id)
+        except LookupError as error:
+            self._show_error("업무를 휴지통으로 이동하지 못했습니다.", error)
+            return
+        title = task.title
+        detail = (
+            f"'{title}' 업무를 휴지통으로 이동할까요?\n\n"
+            "일반 목록, 캘린더와 알림에서는 사라지지만 기록과 첨부파일은 보존됩니다."
+        )
+        if task.recurrence_rule:
+            detail += "\n반복 일정 전체가 휴지통으로 이동합니다."
+        answer = QMessageBox.question(
+            self,
+            "업무 삭제",
+            detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._task_service.move_to_trash(self._selected_task_id)
+        except (LookupError, ValueError) as error:
+            self._show_error("업무를 휴지통으로 이동하지 못했습니다.", error)
+            return
+        self._selected_task_id = None
+        self._selected_occurrence_start = None
+        self._update_detail(None)
+        self._refresh_tasks()
+        self.statusBar().showMessage(f"'{title}' 업무를 휴지통으로 이동했습니다.", 4000)
+
+    def _restore_selected_from_trash(self) -> None:
+        if self._selected_task_id is None:
+            return
+        task = self._task_model.task_at(self._task_list.currentIndex())
+        title = task.title if task is not None else "선택한 업무"
+        try:
+            self._task_service.restore_from_trash(self._selected_task_id)
+        except (LookupError, ValueError) as error:
+            self._show_error("업무를 복원하지 못했습니다.", error)
+            return
+        self._selected_task_id = None
+        self._selected_occurrence_start = None
+        self._update_detail(None)
+        self._refresh_tasks()
+        self.statusBar().showMessage(f"'{title}' 업무를 복원했습니다.", 4000)
+
     def _open_selected_records(
         self,
         *,
@@ -1180,6 +1270,11 @@ class MainWindow(QMainWindow):
         task = self._task_model.task_at(index)
         if task is not None:
             self._selected_task_id = task.id
+            if task.deleted_at is not None:
+                self.statusBar().showMessage(
+                    "휴지통의 업무는 먼저 복원한 뒤 열 수 있습니다.", 3500
+                )
+                return
             self._open_editor(
                 self._task_service.get(task.id)
                 if task.recurrence_rule and task.id is not None
@@ -1253,7 +1348,9 @@ class MainWindow(QMainWindow):
         task = self._task_model.task_at(current)
         self._selected_task_id = task.id if task else None
         self._selected_occurrence_start = (
-            task.starts_at if task is not None and task.recurrence_rule else None
+            task.starts_at
+            if task is not None and task.deleted_at is None and task.recurrence_rule
+            else None
         )
         self._update_detail(task)
         self._apply_responsive_layout()
@@ -1271,6 +1368,7 @@ class MainWindow(QMainWindow):
                 self._edit_button,
                 self._detail_records_button,
                 self._detail_attachment_button,
+                self._trash_button,
             ):
                 button.setEnabled(False)
             self._open_selected_button.hide()
@@ -1292,15 +1390,23 @@ class MainWindow(QMainWindow):
             "urgent": "긴급",
         }
         self._detail_title.setText(task.title)
+        deleted = task.deleted_at is not None
         self._detail_status.setText(
-            f"{status_labels[task.status]} · 중요도 {priority_labels[task.priority.value]}"
+            "휴지통 · 원래 상태 " + status_labels[task.status]
+            if deleted
+            else f"{status_labels[task.status]} · 중요도 {priority_labels[task.priority.value]}"
         )
         self._detail_schedule.setText(format_task_schedule(task))
+        if deleted and task.deleted_at is not None:
+            deleted_local = task.deleted_at.astimezone(ZoneInfo(self._settings.timezone))
+            self._detail_schedule.setText(
+                f"{self._detail_schedule.text()}\n삭제: {deleted_local:%Y.%m.%d %H:%M}"
+            )
         if task.has_attachments:
             self._detail_schedule.setText(f"{self._detail_schedule.text()}\n첨부파일 있음")
         if task.recurrence_rule:
             self._detail_schedule.setText(f"{self._detail_schedule.text()}\n반복 일정")
-        if self._reminder_service is not None and task.id is not None:
+        if not deleted and self._reminder_service is not None and task.id is not None:
             try:
                 reminder_rules = self._reminder_service.rules_for_task(task.id)
             except Exception:
@@ -1314,27 +1420,40 @@ class MainWindow(QMainWindow):
                         f"{self._detail_schedule.text()}\n알림: {reminder_text}"
                     )
         self._detail_description.setText(task.description or "설명이 없습니다.")
-        self._edit_button.setEnabled(True)
-        self._detail_records_button.setEnabled(self._record_service is not None)
+        self._edit_button.setEnabled(not deleted)
+        self._detail_records_button.setEnabled(self._record_service is not None and not deleted)
         self._detail_attachment_button.setEnabled(
-            self._record_service is not None and self._attachment_service is not None
+            self._record_service is not None
+            and self._attachment_service is not None
+            and not deleted
         )
-        self._pending_button.setEnabled(task.status is TaskStatus.ACTIVE)
-        self._complete_button.setEnabled(task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING})
-        self._archive_button.setEnabled(task.status is not TaskStatus.ARCHIVED)
+        self._pending_button.setEnabled(not deleted and task.status is TaskStatus.ACTIVE)
+        self._complete_button.setEnabled(
+            not deleted and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+        )
+        self._archive_button.setEnabled(not deleted and task.status is not TaskStatus.ARCHIVED)
+        self._trash_button.setText("복원" if deleted else "휴지통으로 이동")
+        self._trash_button.setEnabled(True)
         if self._selected_occurrence_start is not None:
             self._pending_button.setText("건너뛰기")
             self._pending_button.setEnabled(task.status is not TaskStatus.COMPLETED)
             self._archive_button.setEnabled(False)
         else:
             self._pending_button.setText("대기")
+        self._open_selected_button.setText("복원" if deleted else "열기")
+        self._open_selected_button.setToolTip(
+            "선택한 업무 복원" if deleted else "선택한 업무 수정"
+        )
         self._open_selected_button.setVisible(not self._detail_panel.isVisible())
         self._open_selected_records_button.setVisible(
-            self._record_service is not None and not self._detail_panel.isVisible()
+            self._record_service is not None
+            and not deleted
+            and not self._detail_panel.isVisible()
         )
         self._open_selected_attachment_button.setVisible(
             self._record_service is not None
             and self._attachment_service is not None
+            and not deleted
             and not self._detail_panel.isVisible()
         )
 

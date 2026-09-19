@@ -50,6 +50,36 @@ class SqlAlchemyTaskRepository:
                 return None
             return self._to_domain(row[0], has_attachments=bool(row[1]))
 
+    def get_deleted(self, task_id: int) -> Task | None:
+        attachment_exists = self._attachment_exists()
+        statement = select(TaskRecord, attachment_exists).where(TaskRecord.id == task_id)
+        with self._sessions.transaction() as session:
+            row = session.execute(statement).one_or_none()
+            if row is None or row[0].deleted_at is None:
+                return None
+            return self._to_domain(row[0], has_attachments=bool(row[1]))
+
+    def soft_delete(self, task_id: int, *, deleted_at: datetime) -> Task:
+        with self._sessions.transaction() as session:
+            record = session.get(TaskRecord, task_id)
+            if record is None or record.deleted_at is not None:
+                raise LookupError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
+            record.deleted_at = deleted_at
+            record.updated_at = deleted_at
+        deleted = self.get_deleted(task_id)
+        if deleted is None:
+            raise LookupError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
+        return deleted
+
+    def restore(self, task_id: int, *, restored_at: datetime) -> Task:
+        with self._sessions.transaction() as session:
+            record = session.get(TaskRecord, task_id)
+            if record is None or record.deleted_at is None:
+                raise LookupError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
+            record.deleted_at = None
+            record.updated_at = restored_at
+        return self.get_required(task_id)
+
     def get_required(self, task_id: int) -> Task:
         task = self.get(task_id)
         if task is None:
@@ -219,7 +249,11 @@ class SqlAlchemyTaskRepository:
         day_start: datetime,
         day_end: datetime,
     ) -> list[Any]:
-        predicates: list[Any] = [TaskRecord.deleted_at.is_(None)]
+        predicates: list[Any] = [
+            TaskRecord.deleted_at.is_not(None)
+            if query.view is TaskView.TRASH
+            else TaskRecord.deleted_at.is_(None)
+        ]
         if query.group is None:
             predicates.extend(cls._view_predicates(query.view, day_start, day_end))
         else:
@@ -291,6 +325,8 @@ class SqlAlchemyTaskRepository:
             return [TaskRecord.status == TaskStatus.PENDING.value]
         if view is TaskView.COMPLETED:
             return [TaskRecord.status == TaskStatus.COMPLETED.value]
+        if view is TaskView.TRASH:
+            return []
         return [TaskRecord.status != TaskStatus.ARCHIVED.value]
 
     @staticmethod

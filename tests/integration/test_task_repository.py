@@ -15,6 +15,7 @@ from officeflow.application.tasks import (
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.database.migrate import upgrade_database
+from officeflow.infrastructure.database.models import AttachmentRecord
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
@@ -62,6 +63,52 @@ def test_repository_round_trip_and_search(tmp_path: Path) -> None:
 
     completed = service.transition(saved.id, TaskStatus.COMPLETED, now=start + timedelta(hours=1))
     assert completed.completed_at == start + timedelta(hours=1)
+    engine.dispose()
+
+
+def test_repository_soft_delete_and_restore_round_trip(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    sessions = SessionFactory(engine)
+    service = TaskService(SqlAlchemyTaskRepository(sessions))
+    created_at = datetime(2026, 9, 19, 1, 0, tzinfo=UTC)
+    task = service.create(
+        TaskDraft(title="휴지통 보존", description="기록과 첨부는 지우지 않음"),
+        now=created_at,
+    )
+    assert task.id is not None
+    with sessions.transaction() as session:
+        session.add(
+            AttachmentRecord(
+                task_id=task.id,
+                original_name="evidence.txt",
+                stored_name="preserved-evidence.txt",
+                relative_path="preserved-evidence.txt",
+                size_bytes=12,
+                checksum=None,
+                created_at=created_at,
+                missing_at=None,
+            )
+        )
+
+    service.move_to_trash(task.id, now=created_at + timedelta(minutes=1))
+
+    assert service.list(TaskView.ALL, now=created_at) == []
+    trash = service.list(TaskView.TRASH, now=created_at)
+    assert [item.id for item in trash] == [task.id]
+    assert trash[0].deleted_at == created_at + timedelta(minutes=1)
+    assert trash[0].has_attachments is True
+
+    restored = service.restore_from_trash(
+        task.id,
+        now=created_at + timedelta(minutes=2),
+    )
+
+    assert restored.description == "기록과 첨부는 지우지 않음"
+    assert restored.deleted_at is None
+    assert restored.has_attachments is True
+    assert service.list(TaskView.TRASH, now=created_at) == []
     engine.dispose()
 
 
@@ -192,4 +239,28 @@ def test_reminder_delivery_history_prevents_duplicate_after_repository_restart(
     assert snoozed.snoozed_until == start + timedelta(minutes=11)
     assert len(refired) == 1
     assert refired[0].delivery.id == first[0].delivery.id
+    engine.dispose()
+
+
+def test_soft_deleted_task_does_not_fire_reminders(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    sessions = SessionFactory(engine)
+    task_service = TaskService(SqlAlchemyTaskRepository(sessions))
+    reminder_service = ReminderService(SqlAlchemyReminderRepository(sessions), task_service)
+    due_at = datetime(2026, 9, 19, 3, 0, tzinfo=UTC)
+    task = task_service.create(
+        TaskDraft(title="삭제한 업무 알림", starts_at=due_at),
+        now=due_at - timedelta(hours=1),
+    )
+    assert task.id is not None
+    reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )
+
+    task_service.move_to_trash(task.id, now=due_at - timedelta(minutes=1))
+
+    assert reminder_service.poll_due(now=due_at) == ()
     engine.dispose()

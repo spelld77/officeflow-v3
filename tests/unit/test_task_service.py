@@ -42,6 +42,9 @@ class InMemoryTaskRepository(TaskRepository):
             completed_at=task.completed_at,
             created_at=task.created_at,
             updated_at=task.updated_at,
+            deleted_at=task.deleted_at,
+            legacy_id=task.legacy_id,
+            has_attachments=task.has_attachments,
         )
         self.tasks[self.next_id] = saved
         self.next_id += 1
@@ -53,7 +56,28 @@ class InMemoryTaskRepository(TaskRepository):
         return task
 
     def get(self, task_id: int) -> Task | None:
-        return self.tasks.get(task_id)
+        task = self.tasks.get(task_id)
+        return task if task is not None and task.deleted_at is None else None
+
+    def get_deleted(self, task_id: int) -> Task | None:
+        task = self.tasks.get(task_id)
+        return task if task is not None and task.deleted_at is not None else None
+
+    def soft_delete(self, task_id: int, *, deleted_at: datetime) -> Task:
+        task = self.get(task_id)
+        if task is None:
+            raise LookupError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
+        deleted = replace(task, deleted_at=deleted_at, updated_at=deleted_at)
+        self.tasks[task_id] = deleted
+        return deleted
+
+    def restore(self, task_id: int, *, restored_at: datetime) -> Task:
+        task = self.get_deleted(task_id)
+        if task is None:
+            raise LookupError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
+        restored = replace(task, deleted_at=None, updated_at=restored_at)
+        self.tasks[task_id] = restored
+        return restored
 
     def query(
         self,
@@ -84,7 +108,8 @@ class InMemoryTaskRepository(TaskRepository):
         return tuple(
             task
             for task in self.tasks.values()
-            if task.status is not TaskStatus.ARCHIVED
+            if task.deleted_at is None
+            and task.status is not TaskStatus.ARCHIVED
             and task.starts_at is not None
             and task.starts_at < ends_at
             and (
@@ -125,6 +150,12 @@ class InMemoryTaskRepository(TaskRepository):
         day_start: datetime,
         day_end: datetime,
     ) -> bool:
+        if query.view is TaskView.TRASH:
+            deleted_match = task.deleted_at is not None
+        else:
+            deleted_match = task.deleted_at is None
+        if not deleted_match:
+            return False
         if (query.view is TaskView.TODAY or query.group is not None) and task.recurrence_rule:
             return False
         active = {TaskStatus.ACTIVE, TaskStatus.PENDING}
@@ -182,6 +213,8 @@ class InMemoryTaskRepository(TaskRepository):
             view_match = task.status is TaskStatus.PENDING
         elif query.view is TaskView.COMPLETED:
             view_match = task.status is TaskStatus.COMPLETED
+        elif query.view is TaskView.TRASH:
+            view_match = True
         else:
             view_match = task.status is not TaskStatus.ARCHIVED
         normalized = query.search.casefold().strip()
@@ -230,6 +263,30 @@ class InMemoryTaskRepository(TaskRepository):
                 task.title,
             ),
         )
+
+
+def test_move_to_trash_hides_task_and_restore_preserves_its_state() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    task = service.create(
+        TaskDraft(title="삭제 후 복원", status=TaskStatus.PENDING),
+        now=NOW,
+    )
+    assert task.id is not None
+
+    deleted = service.move_to_trash(task.id, now=NOW + timedelta(minutes=1))
+
+    assert deleted.deleted_at == NOW + timedelta(minutes=1)
+    assert repository.get(task.id) is None
+    assert service.list(TaskView.ALL, now=NOW) == []
+    assert [item.id for item in service.list(TaskView.TRASH, now=NOW)] == [task.id]
+
+    restored = service.restore_from_trash(task.id, now=NOW + timedelta(minutes=2))
+
+    assert restored.deleted_at is None
+    assert restored.status is TaskStatus.PENDING
+    assert [item.id for item in service.list(TaskView.ALL, now=NOW)] == [task.id]
+    assert service.list(TaskView.TRASH, now=NOW) == []
 
 
 NOW = datetime(2026, 9, 12, 3, 0, tzinfo=UTC)

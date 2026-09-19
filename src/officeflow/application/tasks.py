@@ -25,6 +25,7 @@ class TaskView(StrEnum):
     PENDING = "pending"
     COMPLETED = "completed"
     ALL = "all"
+    TRASH = "trash"
 
 
 class TaskGroup(StrEnum):
@@ -166,6 +167,12 @@ class TaskRepository(Protocol):
     def update(self, task: Task) -> Task: ...
 
     def get(self, task_id: int) -> Task | None: ...
+
+    def get_deleted(self, task_id: int) -> Task | None: ...
+
+    def soft_delete(self, task_id: int, *, deleted_at: datetime) -> Task: ...
+
+    def restore(self, task_id: int, *, restored_at: datetime) -> Task: ...
 
     def query(
         self,
@@ -319,6 +326,20 @@ class TaskService:
         if task is None:
             raise TaskNotFoundError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
         return task
+
+    def move_to_trash(self, task_id: int, *, now: datetime | None = None) -> Task:
+        """Hide a task from active views while preserving its related data."""
+        return self._repository.soft_delete(
+            task_id,
+            deleted_at=now or datetime.now(UTC),
+        )
+
+    def restore_from_trash(self, task_id: int, *, now: datetime | None = None) -> Task:
+        """Restore a soft-deleted task with its original status and related data."""
+        return self._repository.restore(
+            task_id,
+            restored_at=now or datetime.now(UTC),
+        )
 
     def query(self, query: TaskQuery, *, now: datetime | None = None) -> TaskPage:
         current, day_start, day_end = self._time_context(now)
