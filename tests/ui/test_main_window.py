@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QListView, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -106,13 +106,10 @@ def test_medium_window_prioritizes_task_list(qtbot: QtBot, task_service: TaskSer
     sidebar = window.findChild(QWidget, "sidebar")
     assert detail is not None and detail.isHidden()
     assert sidebar is not None and sidebar.width() == 180
-    assert window._summary_layout.getItemPosition(3)[:2] == (0, 3)
-    pinned_position = window._filter_layout.getItemPosition(
-        window._filter_layout.indexOf(window._pinned_filter)
-    )
-    assert pinned_position[:2] == (0, 3)
+    assert window._filter_options.isHidden()
+    assert window._filter_toggle.isVisible()
     assert window._result_count.geometry().right() <= window._filter_bar.contentsRect().right()
-    assert window._page_caption.isHidden()
+    assert window._page_caption.isVisible()
 
 
 def test_medium_window_exposes_records_without_detail_panel(qtbot: QtBot) -> None:
@@ -146,7 +143,7 @@ def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> N
     window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
 
     menu = window._build_task_context_menu(task)
-    assert "완료 및 결과 입력…" in [action.text() for action in menu.actions()]
+    assert "결과 입력 후 완료…" in [action.text() for action in menu.actions()]
     assert "바로 완료" in [action.text() for action in menu.actions()]
 
     class FakeCompleteDialog:
@@ -170,6 +167,73 @@ def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> N
     saved = task_service.get(task.id)
     assert saved.status is TaskStatus.COMPLETED
     assert saved.result_note == "검수까지 완료"
+
+
+def test_quick_complete_can_be_undone(qtbot: QtBot) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    task = task_service.create(TaskDraft(title="빠른 완료"))
+    assert task.id is not None
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    window.show()
+    index = window._task_model.index_for_task(task.id)
+    rect = window._task_list.visualRect(index)
+
+    qtbot.mouseClick(
+        window._task_list.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(rect.left() + 25, rect.center().y()),
+    )
+
+    assert task_service.get(task.id).status is TaskStatus.COMPLETED
+    assert window._undo_button.isVisible()
+    assert "완료했습니다" in window.statusBar().currentMessage()
+
+    qtbot.mouseClick(window._undo_button, Qt.MouseButton.LeftButton)
+
+    assert task_service.get(task.id).status is TaskStatus.ACTIVE
+    assert window._undo_button.isHidden()
+
+
+def test_quick_complete_undo_restores_pending_status(qtbot: QtBot) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    task = task_service.create(
+        TaskDraft(title="대기 업무 완료", status=TaskStatus.PENDING)
+    )
+    assert task.id is not None
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+
+    window._quick_complete_task(task)
+    window._undo_last_completion()
+
+    assert task_service.get(task.id).status is TaskStatus.PENDING
+
+
+def test_filter_controls_are_collapsed_but_active_filters_remain_visible(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.show()
+
+    assert window._filter_options.isHidden()
+    qtbot.mouseClick(window._filter_toggle, Qt.MouseButton.LeftButton)
+    assert window._filter_options.isVisible()
+
+    window._priority_filter.setCurrentIndex(
+        window._priority_filter.findData(TaskPriority.IMPORTANT.value)
+    )
+    window._filter_toggle.setChecked(False)
+
+    assert window._filter_options.isHidden()
+    assert window._filter_toggle.text() == "필터 1개"
+    assert window._active_filter_label.text() == "중요"
+    assert window._clear_filters_button.isVisible()
 
 
 def test_attachment_filter_combines_with_task_view(qtbot: QtBot, tmp_path: Path) -> None:
@@ -228,7 +292,7 @@ def test_attachment_context_action_opens_management_instead_of_file_picker(
     assert "첨부파일 추가…" not in action_labels
 
 
-def test_compact_window_uses_small_navigation_and_wrapped_summaries(
+def test_compact_window_uses_small_navigation_and_compact_filters(
     qtbot: QtBot, task_service: TaskService
 ) -> None:
     window = MainWindow(AppSettings(), task_service)
@@ -241,7 +305,9 @@ def test_compact_window_uses_small_navigation_and_wrapped_summaries(
     detail = window.findChild(QWidget, "detailPanel")
     assert sidebar is not None and sidebar.width() == 88
     assert detail is not None and detail.isHidden()
-    assert window._summary_layout.getItemPosition(2)[:2] == (1, 0)
+    assert window._filter_options.isHidden()
+    assert window._filter_toggle.isVisible()
+    assert window._result_count.geometry().right() <= window._filter_bar.contentsRect().right()
 
 
 def test_window_geometry_is_saved_on_close(qtbot: QtBot, task_service: TaskService) -> None:
@@ -384,12 +450,20 @@ def test_reminder_actions_immediately_refresh_current_view(qtbot: QtBot) -> None
     window.show()
 
     qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
-    assert window._summary_counts[TaskGroup.OVERDUE.value].text() == "1"
+    overdue = window._task_model.entry_at(
+        window._task_model.index_for_group(TaskGroup.OVERDUE)
+    )
+    assert isinstance(overdue, GroupHeader)
+    assert overdue.total == 1
     assert window._reminder_dialog is not None
     qtbot.mouseClick(window._reminder_dialog.complete_button, Qt.MouseButton.LeftButton)
 
-    assert window._summary_counts[TaskGroup.OVERDUE.value].text() == "0"
-    assert window._summary_counts[TaskGroup.COMPLETED.value].text() == "1"
+    assert not window._task_model.index_for_group(TaskGroup.OVERDUE).isValid()
+    completed = window._task_model.entry_at(
+        window._task_model.index_for_group(TaskGroup.COMPLETED)
+    )
+    assert isinstance(completed, GroupHeader)
+    assert completed.total == 1
 
 
 def test_acknowledging_reminder_refreshes_current_view(qtbot: QtBot, monkeypatch) -> None:
@@ -450,7 +524,7 @@ def test_hidden_app_shows_persistent_topmost_alert(
     assert tray.messages
 
 
-def test_today_view_has_collapsible_groups_and_summary_jump(
+def test_today_view_has_collapsible_completed_section(
     qtbot: QtBot, task_service: TaskService
 ) -> None:
     now = datetime.now(UTC)
@@ -471,9 +545,7 @@ def test_today_view_has_collapsible_groups_and_summary_jump(
     assert isinstance(header, GroupHeader)
     assert header.collapsed is True
 
-    jump = window.findChild(QPushButton, "summaryJump-completed")
-    assert jump is not None
-    qtbot.mouseClick(jump, Qt.MouseButton.LeftButton)
+    window._on_list_clicked(window._task_model.index_for_group(TaskGroup.COMPLETED))
 
     expanded = window._task_model.entry_at(window._task_model.index_for_group(TaskGroup.COMPLETED))
     assert isinstance(expanded, GroupHeader)
@@ -552,12 +624,17 @@ def test_today_filter_feedback_explains_hidden_all_day_task(
     qtbot.mouseClick(window._clear_filters_button, Qt.MouseButton.LeftButton)
 
     assert window._task_model.total_task_count == 1
-    assert window._summary_counts[TaskGroup.IN_PROGRESS.value].text() == "1"
+    today_header = window._task_model.entry_at(
+        window._task_model.index_for_group(TaskGroup.IN_PROGRESS)
+    )
+    assert isinstance(today_header, GroupHeader)
+    assert today_header.label == "오늘 할 일"
+    assert today_header.total == 1
 
     window._set_view(TaskView.UPCOMING)
 
     assert window._task_model.total_task_count == 0
-    assert all(frame.isHidden() for frame in window._summary_frames)
+    assert not window._task_model.index_for_group(TaskGroup.IN_PROGRESS).isValid()
 
 
 def test_flat_view_loads_fifty_rows_then_fetches_more(
@@ -577,7 +654,7 @@ def test_flat_view_loads_fifty_rows_then_fetches_more(
     assert window._task_model.loaded_task_count == 100
 
 
-def test_view_preferences_and_compact_mode_are_saved(
+def test_view_preferences_and_one_line_mode_are_saved(
     qtbot: QtBot, task_service: TaskService
 ) -> None:
     saved: list[AppSettings] = []
@@ -585,11 +662,8 @@ def test_view_preferences_and_compact_mode_are_saved(
     qtbot.addWidget(window)
     window._set_view(TaskView.ALL)
     status = window.findChild(QComboBox, "statusFilter")
-    compact = window.findChild(QPushButton, "compactListToggle")
     assert status is not None
-    assert compact is not None
     status.setCurrentIndex(status.findData(TaskStatus.ACTIVE.value))
-    compact.setChecked(True)
     window.close()
 
     assert saved[-1].compact_list is True

@@ -528,6 +528,53 @@ def test_today_groups_do_not_duplicate_exact_start_boundary() -> None:
     assert [task.title for task in groups[TaskGroup.UPCOMING].items] == ["현재 시점 업무"]
 
 
+def test_today_flow_merges_in_progress_and_upcoming_in_work_order() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    service.create(
+        TaskDraft(
+            title="진행 중 업무",
+            starts_at=NOW - timedelta(hours=1),
+            ends_at=NOW + timedelta(hours=1),
+        ),
+        now=NOW,
+    )
+    service.create(
+        TaskDraft(
+            title="곧 시작할 업무",
+            starts_at=NOW + timedelta(hours=1),
+            ends_at=NOW + timedelta(hours=2),
+        ),
+        now=NOW,
+    )
+    service.create(
+        TaskDraft(
+            title="나중 업무",
+            starts_at=NOW + timedelta(hours=3),
+            ends_at=NOW + timedelta(hours=4),
+        ),
+        now=NOW,
+    )
+    query = TaskQuery(view=TaskView.TODAY, limit=2)
+
+    first = service.today_flow_page(query, TaskGroup.IN_PROGRESS, now=NOW)
+    second = service.today_flow_page(
+        replace(query, offset=2),
+        TaskGroup.IN_PROGRESS,
+        now=NOW,
+    )
+    pages = service.today_flow_pages(query, now=NOW)
+
+    assert first.total == 3
+    assert [task.title for task in first.items] == ["진행 중 업무", "곧 시작할 업무"]
+    assert [task.title for task in second.items] == ["나중 업무"]
+    assert tuple(pages) == (
+        TaskGroup.OVERDUE,
+        TaskGroup.IN_PROGRESS,
+        TaskGroup.COMPLETED,
+    )
+
+
 def test_query_combines_filters_sorting_and_pagination() -> None:
     repository = InMemoryTaskRepository()
     service = TaskService(repository)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from itertools import pairwise
 from typing import ClassVar
@@ -11,11 +11,9 @@ from zoneinfo import ZoneInfo
 from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QComboBox,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -77,6 +75,14 @@ from officeflow.presentation.theme import LIGHT_STYLESHEET
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _CompletionUndo:
+    task_id: int
+    occurrence_start: datetime | None
+    previous_status: TaskStatus
+    title: str
+
+
 class MainWindow(QMainWindow):
     DETAIL_BREAKPOINT = 1100
     COMPACT_BREAKPOINT = 850
@@ -84,7 +90,7 @@ class MainWindow(QMainWindow):
     MINIMUM_HEIGHT = 560
 
     VIEW_LABELS: ClassVar[dict[TaskView, tuple[str, str]]] = {
-        TaskView.TODAY: ("오늘", "지연 업무와 오늘 일정을 그룹별로 보여드립니다."),
+        TaskView.TODAY: ("오늘", "처리할 업무를 시간 흐름대로 보여드립니다."),
         TaskView.UPCOMING: ("예정", "오늘 이후에 시작하는 업무입니다."),
         TaskView.IMPORTANT: ("중요", "중요 또는 긴급으로 지정한 업무입니다."),
         TaskView.PENDING: ("대기", "잠시 보류한 업무입니다."),
@@ -134,11 +140,10 @@ class MainWindow(QMainWindow):
         self._selected_task_id: int | None = None
         self._selected_occurrence_start: datetime | None = None
         self._compact_navigation = False
-        self._compact_summaries = False
-        self._filters_wrapped: bool | None = None
         self._collapsed_groups = {
             group for group in TaskGroup if group.value in settings.collapsed_today_groups
         }
+        self._collapsed_groups.add(TaskGroup.COMPLETED)
         self._view_preferences = {
             view: dict(preferences)
             for view, preferences in settings.view_preferences.items()
@@ -146,9 +151,11 @@ class MainWindow(QMainWindow):
         }
         self._nav_buttons: list[QPushButton] = []
         self._view_buttons: dict[TaskView, QPushButton] = {}
-        self._summary_frames: list[QFrame] = []
-        self._summary_counts: dict[str, QLabel] = {}
-        self._summary_jump_buttons: dict[TaskGroup, QPushButton] = {}
+        self._undo_completion: _CompletionUndo | None = None
+        self._undo_timer = QTimer(self)
+        self._undo_timer.setSingleShot(True)
+        self._undo_timer.setInterval(10_000)
+        self._undo_timer.timeout.connect(self._clear_completion_undo)
         self._reminder_dialog: ReminderDialog | None = None
         self._automatic_backup_thread: QThread | None = None
         self._automatic_backup_worker: OperationWorker | None = None
@@ -171,8 +178,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._sidebar)
         layout.addWidget(self._build_workspace(), 1)
         self.setCentralWidget(root)
+        self._undo_button = QPushButton("실행 취소")
+        self._undo_button.setObjectName("undoCompletionButton")
+        self._undo_button.clicked.connect(self._undo_last_completion)
+        self._undo_button.hide()
+        self.statusBar().addPermanentWidget(self._undo_button)
         self._restore_view_preferences(self._current_view)
-        self._set_compact_list(settings.compact_list)
+        self._set_compact_list(True)
         self._configure_input_tab_order()
 
         self._search_timer = QTimer(self)
@@ -347,36 +359,6 @@ class MainWindow(QMainWindow):
         self._content_layout.addLayout(heading)
         self._content_layout.addWidget(self._build_filter_bar())
 
-        self._summary_layout = QGridLayout()
-        self._summary_layout.setSpacing(10)
-        for group, name in (
-            (TaskGroup.OVERDUE, "지연"),
-            (TaskGroup.IN_PROGRESS, "진행 중"),
-            (TaskGroup.UPCOMING, "오늘 예정"),
-            (TaskGroup.COMPLETED, "오늘 완료"),
-        ):
-            frame = QFrame()
-            frame.setProperty("summary", True)
-            item_layout = QVBoxLayout(frame)
-            item_layout.setContentsMargins(12, 7, 12, 7)
-            item_layout.setSpacing(1)
-            count = QLabel("0")
-            count.setProperty("count", True)
-            self._summary_counts[group.value] = count
-            item_layout.addWidget(count)
-            jump_button = QPushButton(name)
-            jump_button.setObjectName(f"summaryJump-{group.value}")
-            jump_button.setProperty("summaryJump", True)
-            jump_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            jump_button.clicked.connect(
-                lambda _checked=False, selected_group=group: self._jump_to_group(selected_group)
-            )
-            self._summary_jump_buttons[group] = jump_button
-            item_layout.addWidget(jump_button)
-            self._summary_frames.append(frame)
-        self._arrange_summary_cards(compact=False)
-        self._content_layout.addLayout(self._summary_layout)
-
         quick_add = QHBoxLayout()
         self._quick_add_edit = QLineEdit()
         self._quick_add_edit.setObjectName("quickAddEdit")
@@ -395,6 +377,8 @@ class MainWindow(QMainWindow):
         self._task_list.setModel(self._task_model)
         self._task_delegate = TaskItemDelegate(self._task_list)
         self._task_list.setItemDelegate(self._task_delegate)
+        self._task_delegate.quickCompleteRequested.connect(self._quick_complete_task)
+        self._task_delegate.menuRequested.connect(self._show_task_menu_for_task)
         self._task_list.setMouseTracking(True)
         self._task_list.setFrameShape(QFrame.Shape.NoFrame)
         self._task_list.setSpacing(1)
@@ -428,10 +412,17 @@ class MainWindow(QMainWindow):
         bar = QFrame()
         bar.setObjectName("filterBar")
         self._filter_bar = bar
-        layout = QGridLayout(bar)
-        self._filter_layout = layout
+        layout = QVBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        primary = QHBoxLayout()
+        primary.setSpacing(6)
+
+        self._filter_toggle = QPushButton("필터")
+        self._filter_toggle.setObjectName("taskFilterToggle")
+        self._filter_toggle.setCheckable(True)
+        self._filter_toggle.setFixedWidth(82)
+        primary.addWidget(self._filter_toggle)
 
         self._status_filter = QComboBox()
         self._status_filter.setObjectName("statusFilter")
@@ -476,37 +467,42 @@ class MainWindow(QMainWindow):
         self._sort_combo.addItem("제목순", TaskSort.TITLE.value)
         self._sort_combo.setFixedWidth(92)
 
-        self._compact_toggle = QPushButton("간결")
-        self._compact_toggle.setObjectName("compactListToggle")
-        self._compact_toggle.setCheckable(True)
-        self._compact_toggle.setChecked(self._settings.compact_list)
-        self._compact_toggle.setFixedWidth(58)
-
-        self._clear_filters_button = QPushButton("해제")
+        self._clear_filters_button = QPushButton("모두 해제")
         self._clear_filters_button.setObjectName("clearTaskFilters")
         self._clear_filters_button.setEnabled(False)
-        self._clear_filters_button.setFixedWidth(58)
+        self._clear_filters_button.setFixedWidth(82)
+        self._clear_filters_button.hide()
 
         self._result_count = self._named_label("", "mutedText")
         self._result_count.setObjectName("taskResultCount")
-        self._filter_widgets = (
-            self._status_filter,
-            self._priority_filter,
-            self._pinned_filter,
-            self._attachment_filter,
-            self._sort_combo,
-            self._compact_toggle,
-            self._clear_filters_button,
-            self._result_count,
-        )
-        self._arrange_filter_bar(wrapped=False)
+        self._active_filter_label = self._named_label("", "mutedText")
+        self._active_filter_label.setObjectName("activeTaskFilters")
+        primary.addWidget(self._sort_combo)
+        primary.addWidget(self._active_filter_label)
+        primary.addWidget(self._clear_filters_button)
+        primary.addStretch()
+        primary.addWidget(self._result_count)
+        layout.addLayout(primary)
 
+        self._filter_options = QFrame()
+        self._filter_options.setObjectName("filterOptions")
+        options = QHBoxLayout(self._filter_options)
+        options.setContentsMargins(0, 0, 0, 0)
+        options.setSpacing(6)
+        options.addWidget(self._status_filter)
+        options.addWidget(self._priority_filter)
+        options.addWidget(self._pinned_filter)
+        options.addWidget(self._attachment_filter)
+        options.addStretch()
+        self._filter_options.hide()
+        layout.addWidget(self._filter_options)
+
+        self._filter_toggle.toggled.connect(self._filter_options.setVisible)
         self._status_filter.currentIndexChanged.connect(self._on_filter_changed)
         self._priority_filter.currentIndexChanged.connect(self._on_filter_changed)
         self._pinned_filter.toggled.connect(self._on_filter_changed)
         self._attachment_filter.toggled.connect(self._on_filter_changed)
         self._sort_combo.currentIndexChanged.connect(self._on_filter_changed)
-        self._compact_toggle.toggled.connect(self._set_compact_list)
         self._clear_filters_button.clicked.connect(self._clear_filters)
         return bar
 
@@ -550,9 +546,7 @@ class MainWindow(QMainWindow):
         self._pending_button = QPushButton("대기")
         self._pending_button.clicked.connect(lambda: self._transition_selected(TaskStatus.PENDING))
         self._complete_button = QPushButton("완료")
-        self._complete_button.clicked.connect(
-            lambda: self._transition_selected(TaskStatus.COMPLETED)
-        )
+        self._complete_button.clicked.connect(self._quick_complete_selected)
         self._archive_button = QPushButton("보관")
         self._archive_button.clicked.connect(lambda: self._transition_selected(TaskStatus.ARCHIVED))
         self._edit_button = QPushButton("수정")
@@ -573,12 +567,12 @@ class MainWindow(QMainWindow):
         fields: tuple[QWidget, ...] = (
             self._search,
             self._add_button,
+            self._filter_toggle,
+            self._sort_combo,
             self._status_filter,
             self._priority_filter,
             self._pinned_filter,
             self._attachment_filter,
-            self._sort_combo,
-            self._compact_toggle,
             self._clear_filters_button,
             self._quick_add_edit,
             self._quick_add_button,
@@ -616,8 +610,6 @@ class MainWindow(QMainWindow):
         title, caption = self.VIEW_LABELS[view]
         self._page_title.setText(title)
         self._page_caption.setText(caption)
-        for frame in self._summary_frames:
-            frame.setVisible(view is TaskView.TODAY)
         for button_view, button in self._view_buttons.items():
             button.setProperty("selected", button_view is view)
             button.style().unpolish(button)
@@ -648,14 +640,12 @@ class MainWindow(QMainWindow):
         try:
             selected_id = self._selected_task_id
             if self._current_view is TaskView.TODAY:
-                pages = self._task_service.today_groups(
-                    search=self._search.text(),
-                    statuses=self._selected_statuses(),
-                    priorities=self._selected_priorities(),
-                    pinned_only=self._pinned_filter.isChecked(),
-                    has_attachments=(True if self._attachment_filter.isChecked() else None),
-                    sort=self._selected_sort(),
-                    limit_per_group=TaskListModel.PAGE_SIZE,
+                local_day = datetime.now(ZoneInfo(self._settings.timezone)).date()
+                self._page_title.setText(
+                    f"오늘 · {local_day.month}월 {local_day.day}일"
+                )
+                pages = self._task_service.today_flow_pages(
+                    self._build_query(offset=0, group=None),
                 )
                 self._task_model.set_group_pages(
                     pages,
@@ -663,14 +653,19 @@ class MainWindow(QMainWindow):
                     loader=self._load_group_page,
                 )
                 total = sum(page.total for page in pages.values())
-                for group, page in pages.items():
-                    self._summary_counts[group.value].setText(str(page.total))
+                remaining = (
+                    pages[TaskGroup.OVERDUE].total
+                    + pages[TaskGroup.IN_PROGRESS].total
+                )
+                completed = pages[TaskGroup.COMPLETED].total
+                self._page_caption.setText(
+                    f"남은 업무 {remaining}개 · 완료 {completed}개"
+                )
             else:
+                self._page_title.setText(self.VIEW_LABELS[self._current_view][0])
                 page = self._task_service.query(self._build_query(offset=0))
                 self._task_model.set_page(page, self._load_flat_page)
                 total = page.total
-            for button in self._summary_jump_buttons.values():
-                button.setEnabled(self._current_view is TaskView.TODAY)
             self._task_list.setVisible(total > 0)
             self._empty_panel.setVisible(total == 0)
             self._empty_description.setText(
@@ -730,7 +725,10 @@ class MainWindow(QMainWindow):
         return self._task_service.query(self._build_query(offset=offset, limit=limit))
 
     def _load_group_page(self, group: TaskGroup, offset: int, limit: int) -> TaskPage:
-        return self._task_service.query(self._build_query(offset=offset, limit=limit, group=group))
+        return self._task_service.today_flow_page(
+            self._build_query(offset=offset, limit=limit, group=None),
+            group,
+        )
 
     def _selected_statuses(self) -> frozenset[TaskStatus]:
         value = str(self._status_filter.currentData())
@@ -823,6 +821,19 @@ class MainWindow(QMainWindow):
             "첨부파일이 있는 업무만 표시 중" if attached else "첨부파일이 있는 업무만 표시"
         )
         self._clear_filters_button.setEnabled(self._active_filter_count() > 0)
+        active = self._active_filter_count()
+        self._clear_filters_button.setVisible(active > 0)
+        self._filter_toggle.setText(f"필터 {active}개" if active else "필터")
+        labels: list[str] = []
+        if self._selected_statuses():
+            labels.append(self._status_filter.currentText())
+        if self._selected_priorities():
+            labels.append(self._priority_filter.currentText())
+        if pinned:
+            labels.append("고정")
+        if attached:
+            labels.append("첨부 있음")
+        self._active_filter_label.setText(" · ".join(labels))
 
     def _on_list_clicked(self, index: QModelIndex) -> None:
         entry = self._task_model.entry_at(index)
@@ -845,15 +856,26 @@ class MainWindow(QMainWindow):
         menu = self._build_task_context_menu(task)
         menu.exec(self._task_list.viewport().mapToGlobal(position))
 
+    def _show_task_menu_for_task(self, task: Task, global_position: QPoint) -> None:
+        self._select_task_for_action(task)
+        self._build_task_context_menu(task).exec(global_position)
+
+    def _select_task_for_action(self, task: Task) -> None:
+        if task.id is None:
+            return
+        index = self._task_model.index_for_task(task.id)
+        if index.isValid():
+            self._task_list.setCurrentIndex(index)
+        self._selected_task_id = task.id
+        self._selected_occurrence_start = task.starts_at if task.recurrence_rule else None
+
     def _build_task_context_menu(self, task: Task) -> QMenu:
         menu = QMenu(self)
         if task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}:
-            complete_with_result = menu.addAction("완료 및 결과 입력…")
-            complete_with_result.triggered.connect(self._complete_selected_with_result)
             complete_now = menu.addAction("바로 완료")
-            complete_now.triggered.connect(
-                lambda: self._transition_selected(TaskStatus.COMPLETED)
-            )
+            complete_now.triggered.connect(self._quick_complete_selected)
+            complete_with_result = menu.addAction("결과 입력 후 완료…")
+            complete_with_result.triggered.connect(self._complete_selected_with_result)
         elif task.status is TaskStatus.COMPLETED:
             edit_result = menu.addAction("결과 입력 · 수정…")
             edit_result.triggered.connect(self._open_selected_result)
@@ -875,15 +897,63 @@ class MainWindow(QMainWindow):
         edit.triggered.connect(self._open_selected_task)
         return menu
 
-    def _jump_to_group(self, group: TaskGroup) -> None:
-        if self._current_view is not TaskView.TODAY:
+    def _quick_complete_task(self, task: Task) -> None:
+        self._select_task_for_action(task)
+        self._quick_complete_selected()
+
+    def _quick_complete_selected(self) -> None:
+        if self._selected_task_id is None:
             return
-        self._task_model.expand_group(group)
-        self._collapsed_groups.discard(group)
-        index = self._task_model.index_for_group(group)
-        if index.isValid():
-            self._task_list.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtTop)
-            self._task_list.setCurrentIndex(index)
+        try:
+            task = self._task_service.get(self._selected_task_id)
+        except LookupError as error:
+            self._show_error("업무를 완료하지 못했습니다.", error)
+            return
+        previous_status = task.status
+        undo = _CompletionUndo(
+            task_id=self._selected_task_id,
+            occurrence_start=self._selected_occurrence_start,
+            previous_status=previous_status,
+            title=task.title,
+        )
+        if not self._transition_selected(TaskStatus.COMPLETED):
+            return
+        self._undo_completion = undo
+        self._undo_button.show()
+        self._undo_timer.start()
+        target = "현재 반복 일정을" if undo.occurrence_start is not None else "업무를"
+        self.statusBar().showMessage(
+            f"'{undo.title}' {target} 완료했습니다.",
+            10_000,
+        )
+
+    def _undo_last_completion(self) -> None:
+        undo = self._undo_completion
+        if undo is None:
+            return
+        try:
+            if undo.occurrence_start is not None:
+                self._task_service.transition_occurrence(
+                    undo.task_id,
+                    undo.occurrence_start,
+                    OccurrenceStatus.PENDING,
+                )
+            else:
+                self._task_service.transition(undo.task_id, TaskStatus.ACTIVE)
+                if undo.previous_status is TaskStatus.PENDING:
+                    self._task_service.transition(undo.task_id, TaskStatus.PENDING)
+        except (TaskValidationError, LookupError, ValueError) as error:
+            self._show_error("완료를 되돌리지 못했습니다.", error)
+            return
+        self._clear_completion_undo()
+        self._refresh_tasks()
+        self.statusBar().showMessage(f"'{undo.title}' 완료를 취소했습니다.", 4000)
+
+    def _clear_completion_undo(self) -> None:
+        self._undo_timer.stop()
+        self._undo_completion = None
+        if hasattr(self, "_undo_button"):
+            self._undo_button.hide()
 
     def _update_result_count(self, *_args: object) -> None:
         if not hasattr(self, "_result_count"):
@@ -1273,9 +1343,9 @@ class MainWindow(QMainWindow):
         status: TaskStatus,
         *,
         result_note: str | None = None,
-    ) -> None:
+    ) -> bool:
         if self._selected_task_id is None:
-            return
+            return False
         try:
             if self._selected_occurrence_start is not None:
                 occurrence_status = (
@@ -1302,9 +1372,10 @@ class MainWindow(QMainWindow):
                     )
         except (TaskValidationError, LookupError, ValueError) as error:
             self._show_error("상태를 변경하지 못했습니다.", error)
-            return
+            return False
         self._refresh_tasks()
         self.statusBar().showMessage("업무 상태를 변경했습니다.", 2500)
+        return True
 
     def _check_reminders(self) -> None:
         if self._reminder_service is None:
@@ -1557,8 +1628,6 @@ class MainWindow(QMainWindow):
         width = self.width()
         compact_navigation = width < self.COMPACT_BREAKPOINT
         show_detail = width >= self.DETAIL_BREAKPOINT
-        compact_filters = compact_navigation
-
         self._detail_panel.setVisible(show_detail)
         self._body_layout.setSpacing(16 if show_detail else 0)
         self._open_selected_button.setVisible(
@@ -1627,42 +1696,13 @@ class MainWindow(QMainWindow):
                 button.style().unpolish(button)
                 button.style().polish(button)
 
-        if compact_navigation != self._compact_summaries:
-            self._arrange_summary_cards(compact=compact_navigation)
-        self._page_caption.setVisible(not compact_navigation and show_detail)
-        if compact_filters != self._filters_wrapped:
-            self._arrange_filter_bar(wrapped=compact_filters)
+        self._page_caption.setVisible(not compact_navigation)
 
     @staticmethod
     def _set_nav_selected(button: QPushButton, selected: bool) -> None:
         button.setProperty("selected", selected)
         button.style().unpolish(button)
         button.style().polish(button)
-
-    def _arrange_summary_cards(self, *, compact: bool) -> None:
-        for frame in self._summary_frames:
-            self._summary_layout.removeWidget(frame)
-        columns = 2 if compact else 4
-        for index, frame in enumerate(self._summary_frames):
-            self._summary_layout.addWidget(frame, index // columns, index % columns)
-        self._compact_summaries = compact
-
-    def _arrange_filter_bar(self, *, wrapped: bool) -> None:
-        for widget in self._filter_widgets:
-            self._filter_layout.removeWidget(widget)
-        for column in range(9):
-            self._filter_layout.setColumnStretch(column, 0)
-        self._filter_layout.addWidget(self._status_filter, 0, 0)
-        self._filter_layout.addWidget(self._priority_filter, 0, 1)
-        self._filter_layout.addWidget(self._sort_combo, 0, 2)
-        self._filter_layout.addWidget(self._pinned_filter, 0, 3)
-        self._filter_layout.addWidget(self._attachment_filter, 0, 4)
-        self._filter_layout.addWidget(self._compact_toggle, 0, 5)
-        self._filter_layout.addWidget(self._clear_filters_button, 0, 6)
-        self._filter_layout.setColumnStretch(7, 1)
-        self._filter_layout.addWidget(self._result_count, 0, 8)
-        self._result_count.setVisible(not wrapped)
-        self._filters_wrapped = wrapped
 
     def _restore_window_position(self, settings: AppSettings) -> None:
         if settings.window_x is None or settings.window_y is None:
@@ -1712,7 +1752,7 @@ class MainWindow(QMainWindow):
             window_height=max(self.MINIMUM_HEIGHT, geometry.height()),
             window_x=geometry.x(),
             window_y=geometry.y(),
-            compact_list=self._compact_toggle.isChecked(),
+            compact_list=True,
             collapsed_today_groups=tuple(
                 group.value for group in TaskGroup if group in self._collapsed_groups
             ),

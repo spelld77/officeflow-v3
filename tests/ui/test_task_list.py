@@ -53,7 +53,6 @@ def test_group_model_collapses_completed_and_loads_a_group_page() -> None:
     pages = {
         TaskGroup.OVERDUE: TaskPage(overdue[:50], 60, 0, 50),
         TaskGroup.IN_PROGRESS: TaskPage((), 0, 0, 50),
-        TaskGroup.UPCOMING: TaskPage((), 0, 0, 50),
         TaskGroup.COMPLETED: TaskPage((make_task(99, status=TaskStatus.COMPLETED),), 1, 0, 50),
     }
     model = TaskListModel()
@@ -71,6 +70,7 @@ def test_group_model_collapses_completed_and_loads_a_group_page() -> None:
     completed_header = model.entry_at(model.index_for_group(TaskGroup.COMPLETED))
     assert isinstance(completed_header, GroupHeader)
     assert completed_header.collapsed is True
+    assert not model.index_for_group(TaskGroup.IN_PROGRESS).isValid()
     load_more_index = next(
         model.index(row, 0)
         for row in range(model.rowCount())

@@ -277,26 +277,6 @@ QPushButton[primaryAction="true"]:hover {
 QPushButton#primaryButton:hover {
     background: #245CCC;
 }
-QFrame[summary="true"] {
-    background: #F8FAFD;
-    border: 1px solid #E5EAF2;
-    border-radius: 10px;
-}
-QLabel[count="true"] {
-    font-size: 20px;
-    font-weight: 700;
-}
-QPushButton[summaryJump="true"] {
-    color: #68738A;
-    background: transparent;
-    border: none;
-    padding: 1px 0;
-    text-align: left;
-}
-QPushButton[summaryJump="true"]:hover {
-    color: #2F6FED;
-    background: transparent;
-}
 #filterBar QComboBox {
     padding: 6px 8px;
 }

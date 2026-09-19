@@ -2,20 +2,24 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
+    QAbstractItemModel,
     QAbstractListModel,
+    QEvent,
     QModelIndex,
     QObject,
     QPersistentModelIndex,
+    QPoint,
     QRectF,
     QSize,
     Qt,
+    Signal,
 )
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from officeflow.application.tasks import TaskGroup, TaskPage
@@ -52,10 +56,10 @@ class TaskListModel(QAbstractListModel):
     ENTRY_ROLE = Qt.ItemDataRole.UserRole + 2
     PAGE_SIZE = 50
     GROUP_LABELS: ClassVar[dict[TaskGroup, str]] = {
-        TaskGroup.OVERDUE: "지연",
-        TaskGroup.IN_PROGRESS: "진행 중",
-        TaskGroup.UPCOMING: "오늘 예정",
-        TaskGroup.COMPLETED: "오늘 완료",
+        TaskGroup.OVERDUE: "처리 필요",
+        TaskGroup.IN_PROGRESS: "오늘 할 일",
+        TaskGroup.UPCOMING: "오늘 할 일",
+        TaskGroup.COMPLETED: "완료한 업무",
     }
 
     def __init__(self) -> None:
@@ -131,7 +135,7 @@ class TaskListModel(QAbstractListModel):
                 items=list(pages[group].items),
                 collapsed=group in collapsed,
             )
-            for group in TaskGroup
+            for group in pages
         }
         self._rebuild_group_rows()
         self.endResetModel()
@@ -226,8 +230,9 @@ class TaskListModel(QAbstractListModel):
 
     def _rebuild_group_rows(self) -> None:
         rows: list[Task | GroupHeader | LoadMoreRow] = []
-        for group in TaskGroup:
-            state = self._groups[group]
+        for group, state in self._groups.items():
+            if state.total == 0:
+                continue
             rows.append(
                 GroupHeader(
                     group=group,
@@ -246,6 +251,9 @@ class TaskListModel(QAbstractListModel):
 
 
 class TaskItemDelegate(QStyledItemDelegate):
+    quickCompleteRequested = Signal(object)
+    menuRequested = Signal(object, object)
+
     PRIORITY_COLORS: ClassVar[dict[TaskPriority, QColor]] = {
         TaskPriority.NORMAL: QColor("#94A3B8"),
         TaskPriority.ATTENTION: QColor("#2F6FED"),
@@ -330,16 +338,32 @@ class TaskItemDelegate(QStyledItemDelegate):
         painter.setBrush(background)
         painter.drawRoundedRect(rect, 9, 9)
 
+        completion_rect = self._completion_rect(option)
+        completed = task.status is TaskStatus.COMPLETED
+        painter.setPen(QPen(QColor("#2F6FED" if completed else "#A8B3C5"), 1.6))
+        painter.setBrush(QColor("#2F6FED") if completed else QColor("#FFFFFF"))
+        painter.drawEllipse(completion_rect)
+        if completed:
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
+            painter.drawLine(
+                QPoint(int(completion_rect.left() + 4), int(completion_rect.center().y())),
+                QPoint(int(completion_rect.left() + 8), int(completion_rect.bottom() - 4)),
+            )
+            painter.drawLine(
+                QPoint(int(completion_rect.left() + 8), int(completion_rect.bottom() - 4)),
+                QPoint(int(completion_rect.right() - 3), int(completion_rect.top() + 4)),
+            )
+
         marker = self.PRIORITY_COLORS[task.priority]
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(marker)
         painter.drawRoundedRect(
-            QRectF(rect.left() + 10, rect.top() + 10, 5, rect.height() - 20), 2, 2
+            QRectF(rect.left() + 40, rect.top() + 10, 4, rect.height() - 20), 2, 2
         )
 
-        text_left = int(rect.left() + 27)
+        text_left = int(rect.left() + 54)
         title_bottom = -8 if self._compact else -31
-        title_right_margin = -146 if task.has_attachments else -92
+        title_right_margin = -178 if task.has_attachments else -124
         title_rect = option.rect.adjusted(
             text_left - option.rect.left(), 8, title_right_margin, title_bottom
         )
@@ -347,11 +371,16 @@ class TaskItemDelegate(QStyledItemDelegate):
         title_font.setBold(True)
         painter.setFont(title_font)
         painter.setPen(QColor("#172033" if task.status is not TaskStatus.COMPLETED else "#778197"))
+        title = (
+            f"{format_task_schedule_compact(task)}  ·  {task.title}"
+            if self._compact
+            else task.title
+        )
         painter.drawText(
             title_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             option.fontMetrics.elidedText(
-                task.title, Qt.TextElideMode.ElideRight, title_rect.width()
+                title, Qt.TextElideMode.ElideRight, title_rect.width()
             ),
         )
 
@@ -369,19 +398,60 @@ class TaskItemDelegate(QStyledItemDelegate):
 
         status_top = rect.top() + (7 if self._compact else 12)
         if task.has_attachments:
-            attachment_rect = QRectF(rect.right() - 126, status_top, 48, 24)
+            attachment_rect = QRectF(rect.right() - 158, status_top, 48, 24)
             painter.setBrush(QColor("#EAF1FF"))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(attachment_rect, 12, 12)
             painter.setPen(QColor("#2F6FED"))
             painter.drawText(attachment_rect, Qt.AlignmentFlag.AlignCenter, "첨부")
-        status_rect = QRectF(rect.right() - 72, status_top, 60, 24)
+        status_rect = QRectF(rect.right() - 104, status_top, 60, 24)
         painter.setBrush(QColor("#EEF2F7"))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(status_rect, 12, 12)
         painter.setPen(QColor("#526078"))
         painter.drawText(status_rect, Qt.AlignmentFlag.AlignCenter, self.STATUS_LABELS[task.status])
+        painter.setPen(QColor("#68738A"))
+        painter.drawText(
+            self._menu_rect(option),
+            Qt.AlignmentFlag.AlignCenter,
+            "⋯",
+        )
         painter.restore()
+
+    def editorEvent(
+        self,
+        event: QEvent,
+        model: QAbstractItemModel,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> bool:
+        entry = index.data(TaskListModel.ENTRY_ROLE)
+        if (
+            not isinstance(entry, Task)
+            or event.type() is not QEvent.Type.MouseButtonRelease
+            or not isinstance(event, QMouseEvent)
+            or event.button() is not Qt.MouseButton.LeftButton
+        ):
+            return super().editorEvent(event, model, option, index)
+        if self._menu_rect(option).contains(event.position()):
+            self.menuRequested.emit(entry, event.globalPosition().toPoint())
+            return True
+        if (
+            entry.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+            and self._completion_rect(option).contains(event.position())
+        ):
+            self.quickCompleteRequested.emit(entry)
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    @staticmethod
+    def _completion_rect(option: QStyleOptionViewItem) -> QRectF:
+        center_y = option.rect.center().y()
+        return QRectF(option.rect.left() + 16, center_y - 9, 18, 18)
+
+    @staticmethod
+    def _menu_rect(option: QStyleOptionViewItem) -> QRectF:
+        return QRectF(option.rect.right() - 38, option.rect.top(), 34, option.rect.height())
 
     def sizeHint(
         self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
@@ -412,3 +482,14 @@ def format_task_schedule(task: Task) -> str:
     if start.date() == end.date():
         return f"{start:%Y.%m.%d %H:%M}부터 {end:%H:%M}까지"
     return f"{start:%Y.%m.%d %H:%M}부터 {end:%Y.%m.%d %H:%M}까지"
+
+
+def format_task_schedule_compact(task: Task) -> str:
+    if task.starts_at is None:
+        return "일정 없음"
+    zone = ZoneInfo(task.timezone)
+    start = task.starts_at.astimezone(zone)
+    today = datetime.now(zone).date()
+    if task.all_day:
+        return "종일" if start.date() == today else start.strftime("%m.%d 종일")
+    return start.strftime("%H:%M" if start.date() == today else "%m.%d %H:%M")

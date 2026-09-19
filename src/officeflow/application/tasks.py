@@ -654,6 +654,57 @@ class TaskService:
             for group in TaskGroup
         }
 
+    def today_flow_page(
+        self,
+        query: TaskQuery,
+        section: TaskGroup,
+        *,
+        now: datetime | None = None,
+    ) -> TaskPage:
+        """Return one of the three user-facing Today sections.
+
+        The presentation combines in-progress and upcoming tasks into one
+        chronological work stream while keeping overdue and completed tasks
+        separate.
+        """
+        if query.view is not TaskView.TODAY:
+            raise ValueError("오늘 흐름은 오늘 보기에서만 조회할 수 있습니다.")
+        if section not in {
+            TaskGroup.OVERDUE,
+            TaskGroup.IN_PROGRESS,
+            TaskGroup.COMPLETED,
+        }:
+            raise ValueError("지원하지 않는 오늘 흐름 구역입니다.")
+        if section is not TaskGroup.IN_PROGRESS:
+            return self.query(replace(query, group=section), now=now)
+
+        base = replace(query, offset=0, limit=None)
+        active = self.query(replace(base, group=TaskGroup.IN_PROGRESS), now=now)
+        upcoming = self.query(replace(base, group=TaskGroup.UPCOMING), now=now)
+        combined = [*active.items, *upcoming.items]
+        end = None if query.limit is None else query.offset + query.limit
+        return TaskPage(
+            items=tuple(combined[query.offset : end]),
+            total=len(combined),
+            offset=query.offset,
+            limit=query.limit,
+        )
+
+    def today_flow_pages(
+        self,
+        query: TaskQuery,
+        *,
+        now: datetime | None = None,
+    ) -> dict[TaskGroup, TaskPage]:
+        return {
+            section: self.today_flow_page(query, section, now=now)
+            for section in (
+                TaskGroup.OVERDUE,
+                TaskGroup.IN_PROGRESS,
+                TaskGroup.COMPLETED,
+            )
+        }
+
     def summary(self, *, now: datetime | None = None) -> TaskSummary:
         groups = self.today_groups(limit_per_group=1, now=now)
         today = self.query(TaskQuery(view=TaskView.TODAY, limit=1), now=now)
