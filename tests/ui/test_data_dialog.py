@@ -7,6 +7,7 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QFileDialog, QLineEdit, QMessageBox, QPushButton
 from pytestqt.qtbot import QtBot
 
+from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.migration import (
     LegacyMigration,
@@ -15,10 +16,16 @@ from officeflow.application.migration import (
     MigrationPreview,
     MigrationResult,
 )
-from officeflow.application.tasks import TaskQuery
+from officeflow.application.tasks import TaskDraft, TaskQuery, TaskService
 from officeflow.bootstrap.paths import AppPaths
+from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from officeflow.infrastructure.backup import BackupManager
+from officeflow.infrastructure.database.attachment_repository import (
+    SqlAlchemyAttachmentRepository,
+)
 from officeflow.infrastructure.database.migrate import upgrade_database
+from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
+from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 from officeflow.presentation.data_dialog import DataManagementDialog, OperationWorker
 from officeflow.presentation.migration_dialog import LegacyMigrationDialog
 
@@ -58,6 +65,52 @@ def test_data_dialog_exposes_usage_and_all_data_actions_at_minimum_size(
     assert dialog.height() >= 480
     assert "현재 사용량" in dialog.usage_total_label.text()
     assert "휴지통" in dialog.usage_task_label.text()
+
+
+def test_data_dialog_restores_detached_attachment(qtbot: QtBot, tmp_path: Path) -> None:
+    paths = AppPaths(tmp_path / "officeflow")
+    paths.ensure_directories()
+    upgrade_database(paths.database_file)
+    engine = create_database_engine(paths.database_file)
+    sessions = SessionFactory(engine)
+    task_service = TaskService(SqlAlchemyTaskRepository(sessions))
+    attachment_service = AttachmentService(
+        SqlAlchemyAttachmentRepository(sessions),
+        ManagedAttachmentStorage(paths.attachment_dir),
+        task_service,
+    )
+    task = task_service.create(TaskDraft(title="복원할 업무"))
+    assert task.id is not None
+    source = tmp_path / "보고서.txt"
+    source.write_text("content", encoding="utf-8")
+    attachment = attachment_service.attach(task.id, source)
+    attachment_service.unlink(attachment.id_required)
+    dialog = DataManagementDialog(
+        export_service=cast(ExportService, object()),
+        backup_manager=BackupManager(paths),
+        query=TaskQuery(),
+        attachment_service=attachment_service,
+        task_service=task_service,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    assert dialog._cleanup_tab_index is not None
+    dialog.tabs.setCurrentIndex(dialog._cleanup_tab_index)
+    qtbot.waitUntil(
+        lambda: dialog._cleanup_loaded and dialog.cleanup_list.count() > 0,
+        timeout=3_000,
+    )
+    assert "보고서.txt" in dialog.cleanup_list.item(0).text()
+
+    dialog.cleanup_list.setCurrentRow(0)
+    assert dialog.restore_attachment_button.isEnabled()
+    dialog._restore_cleanup_item()
+
+    assert attachment_service.detached_attachments() == ()
+    assert attachment_service.attachments_for_task(task.id)[0].id == attachment.id
+    qtbot.waitUntil(lambda: dialog._thread is None)
+    dialog.reject()
+    engine.dispose()
 
 
 def test_migration_dialog_shows_preview_and_has_keyboard_order(qtbot: QtBot) -> None:

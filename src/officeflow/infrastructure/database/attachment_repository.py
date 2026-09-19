@@ -16,7 +16,10 @@ class SqlAlchemyAttachmentRepository:
     def list_attachments(self, task_id: int) -> tuple[Attachment, ...]:
         statement = (
             select(AttachmentRecord)
-            .where(AttachmentRecord.task_id == task_id)
+            .where(
+                AttachmentRecord.task_id == task_id,
+                AttachmentRecord.detached_at.is_(None),
+            )
             .order_by(AttachmentRecord.created_at.desc(), AttachmentRecord.id.desc())
         )
         with self._sessions.transaction() as session:
@@ -25,6 +28,25 @@ class SqlAlchemyAttachmentRepository:
     def get_attachment(self, attachment_id: int) -> Attachment | None:
         with self._sessions.transaction() as session:
             record = session.get(AttachmentRecord, attachment_id)
+            return self._to_domain(record) if record is not None else None
+
+    def list_detached(self) -> tuple[Attachment, ...]:
+        statement = (
+            select(AttachmentRecord)
+            .where(AttachmentRecord.detached_at.is_not(None))
+            .order_by(AttachmentRecord.detached_at.desc(), AttachmentRecord.id.desc())
+        )
+        with self._sessions.transaction() as session:
+            return tuple(self._to_domain(record) for record in session.scalars(statement).all())
+
+    def find_active_by_checksum(self, task_id: int, checksum: str) -> Attachment | None:
+        statement = select(AttachmentRecord).where(
+            AttachmentRecord.task_id == task_id,
+            AttachmentRecord.checksum == checksum,
+            AttachmentRecord.detached_at.is_(None),
+        )
+        with self._sessions.transaction() as session:
+            record = session.scalars(statement).first()
             return self._to_domain(record) if record is not None else None
 
     def add_attachment(self, attachment: Attachment) -> Attachment:
@@ -41,6 +63,7 @@ class SqlAlchemyAttachmentRepository:
                 checksum=attachment.checksum,
                 created_at=attachment.created_at,
                 missing_at=attachment.missing_at,
+                detached_at=attachment.detached_at,
             )
             session.add(record)
             session.flush()
@@ -65,6 +88,18 @@ class SqlAlchemyAttachmentRepository:
             if record is None:
                 raise LookupError(f"첨부파일 {attachment_id}을(를) 찾을 수 없습니다.")
             record.checksum = checksum
+        return self._get_required(attachment_id)
+
+    def set_detached_at(
+        self,
+        attachment_id: int,
+        detached_at: datetime | None,
+    ) -> Attachment:
+        with self._sessions.transaction() as session:
+            record = session.get(AttachmentRecord, attachment_id)
+            if record is None:
+                raise LookupError(f"첨부파일 {attachment_id}을(를) 찾을 수 없습니다.")
+            record.detached_at = detached_at
         return self._get_required(attachment_id)
 
     def delete_attachment(self, attachment_id: int) -> None:
@@ -92,4 +127,5 @@ class SqlAlchemyAttachmentRepository:
             checksum=record.checksum,
             created_at=record.created_at,
             missing_at=record.missing_at,
+            detached_at=record.detached_at,
         )

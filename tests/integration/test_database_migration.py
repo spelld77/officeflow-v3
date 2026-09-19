@@ -23,6 +23,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     checklist_indexes = {index["name"] for index in inspector.get_indexes("checklist_items")}
     work_log_indexes = {index["name"] for index in inspector.get_indexes("work_logs")}
     attachment_indexes = {index["name"] for index in inspector.get_indexes("attachments")}
+    attachment_columns = {column["name"] for column in inspector.get_columns("attachments")}
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
     engine.dispose()
@@ -52,8 +53,9 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     } <= delivery_indexes
     assert "ix_checklist_items_task_position" in checklist_indexes
     assert "ix_work_logs_date_updated" in work_log_indexes
-    assert "ix_attachments_task_missing" in attachment_indexes
-    assert revision == "0006_attachment_index"
+    assert {"ix_attachments_task_missing", "ix_attachments_detached_created"} <= attachment_indexes
+    assert "detached_at" in attachment_columns
+    assert revision == "0007_attachment_cleanup"
 
 
 def test_initial_migration_is_idempotent(tmp_path: Path) -> None:
@@ -112,3 +114,28 @@ def test_phase_five_database_receives_reminder_delivery_history(tmp_path: Path) 
         "ix_reminder_deliveries_schedule",
     } <= {index["name"] for index in inspector.get_indexes("reminder_deliveries")}
     engine.dispose()
+
+
+def test_existing_database_receives_attachment_cleanup_state(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP INDEX ix_attachments_detached_created")
+        connection.exec_driver_sql("ALTER TABLE attachments DROP COLUMN detached_at")
+        connection.exec_driver_sql(
+            "UPDATE alembic_version SET version_num = '0006_attachment_index'"
+        )
+    engine.dispose()
+
+    upgrade_database(database_file)
+    migrated_engine = create_database_engine(database_file)
+    inspector = inspect(migrated_engine)
+
+    assert "detached_at" in {
+        column["name"] for column in inspector.get_columns("attachments")
+    }
+    assert "ix_attachments_detached_created" in {
+        index["name"] for index in inspector.get_indexes("attachments")
+    }
+    migrated_engine.dispose()

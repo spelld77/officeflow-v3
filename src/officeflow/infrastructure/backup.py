@@ -24,6 +24,22 @@ class BackupError(RuntimeError):
     """Raised when a backup cannot be created, verified, or restored safely."""
 
 
+def _safe_attachment_relative_path(value: str) -> PurePosixPath:
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or "\\" in value or ".." in path.parts:
+        raise BackupError("첨부파일 상대 경로가 올바르지 않습니다.")
+    return path
+
+
+def _format_bytes(size_bytes: int) -> str:
+    size = float(max(0, size_bytes))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{int(size):,} {unit}" if unit == "B" else f"{size:,.1f} {unit}"
+        size /= 1024
+    return f"{size_bytes:,} B"
+
+
 @dataclass(frozen=True, slots=True)
 class BackupFile:
     path: str
@@ -56,6 +72,15 @@ class LargeStoredFile:
     name: str
     size_bytes: int
     orphaned: bool = False
+    detached: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class OrphanAttachmentFile:
+    relative_path: str
+    name: str
+    size_bytes: int
+    modified_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +93,11 @@ class DataUsageSnapshot:
     aged_trash_task_count: int
     linked_attachment_count: int
     linked_attachment_bytes: int
+    detached_attachment_count: int
+    detached_attachment_bytes: int
+    aged_detached_attachment_count: int
+    duplicate_attachment_count: int
+    duplicate_attachment_bytes: int
     stored_attachment_count: int
     stored_attachment_bytes: int
     missing_attachment_count: int
@@ -120,17 +150,35 @@ class BackupManager:
                     (cutoff,),
                 ).fetchone()
                 attachment_rows = connection.execute(
-                    "SELECT original_name, relative_path, size_bytes FROM attachments"
+                    """
+                    SELECT original_name, relative_path, size_bytes, checksum, detached_at
+                    FROM attachments
+                    """
                 ).fetchall()
         except sqlite3.Error as error:
             raise BackupError(f"데이터 사용량을 확인하지 못했습니다: {error}") from error
         if task_row is None:
             raise BackupError("업무 사용량을 확인하지 못했습니다.")
 
-        linked = {
-            str(relative_path): (str(original_name), int(size_bytes))
-            for original_name, relative_path, size_bytes in attachment_rows
+        tracked = {
+            str(relative_path): (str(original_name), int(size_bytes), checksum, detached_at)
+            for original_name, relative_path, size_bytes, checksum, detached_at in attachment_rows
         }
+        linked = {
+            relative: (name, size, checksum)
+            for relative, (name, size, checksum, detached_at) in tracked.items()
+            if detached_at is None
+        }
+        detached = {
+            relative: (name, size, checksum, detached_at)
+            for relative, (name, size, checksum, detached_at) in tracked.items()
+            if detached_at is not None
+        }
+        checksum_sizes: dict[str, list[int]] = {}
+        for _name, size, checksum in linked.values():
+            if checksum:
+                checksum_sizes.setdefault(str(checksum), []).append(size)
+        duplicate_groups = [sizes for sizes in checksum_sizes.values() if len(sizes) > 1]
         stored: dict[str, tuple[Path, int]] = {}
         if self._paths.attachment_dir.is_dir():
             for path in self._paths.attachment_dir.rglob("*"):
@@ -141,14 +189,20 @@ class BackupManager:
                 stored[relative_path.as_posix()] = (path, path.stat().st_size)
 
         linked_paths = set(linked)
+        tracked_paths = set(tracked)
         stored_paths = set(stored)
-        orphan_paths = stored_paths - linked_paths
+        orphan_paths = stored_paths - tracked_paths
         largest = sorted(
             (
                 LargeStoredFile(
-                    name=(linked[relative][0] if relative in linked else stored[relative][0].name),
+                    name=(
+                        tracked[relative][0]
+                        if relative in tracked
+                        else stored[relative][0].name
+                    ),
                     size_bytes=stored[relative][1],
                     orphaned=relative in orphan_paths,
+                    detached=relative in detached,
                 )
                 for relative in stored_paths
             ),
@@ -180,7 +234,20 @@ class BackupManager:
             trash_task_count=int(task_row[4]),
             aged_trash_task_count=int(task_row[5]),
             linked_attachment_count=len(linked),
-            linked_attachment_bytes=sum(size for _name, size in linked.values()),
+            linked_attachment_bytes=sum(size for _name, size, _checksum in linked.values()),
+            detached_attachment_count=len(detached),
+            detached_attachment_bytes=sum(
+                size for _name, size, _checksum, _at in detached.values()
+            ),
+            aged_detached_attachment_count=sum(
+                1
+                for _name, _size, _checksum, detached_at in detached.values()
+                if detached_at is not None and str(detached_at) <= cutoff
+            ),
+            duplicate_attachment_count=sum(len(sizes) - 1 for sizes in duplicate_groups),
+            duplicate_attachment_bytes=sum(
+                sum(sorted(sizes)[1:]) for sizes in duplicate_groups
+            ),
             stored_attachment_count=len(stored),
             stored_attachment_bytes=sum(size for _path, size in stored.values()),
             missing_attachment_count=len(linked_paths - stored_paths),
@@ -192,6 +259,68 @@ class BackupManager:
             largest_files=tuple(largest),
         )
 
+    def list_orphan_attachment_files(
+        self,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> tuple[OrphanAttachmentFile, ...]:
+        """Return stored files that have no attachment metadata and cannot be restored."""
+        tracked = self._tracked_attachment_paths()
+        items: list[OrphanAttachmentFile] = []
+        if not self._paths.attachment_dir.is_dir():
+            return ()
+        for path in self._paths.attachment_dir.rglob("*"):
+            _raise_if_canceled(cancel_requested)
+            relative = path.relative_to(self._paths.attachment_dir)
+            if not path.is_file() or any(part.startswith(".") for part in relative.parts):
+                continue
+            relative_path = relative.as_posix()
+            if relative_path in tracked:
+                continue
+            stat = path.stat()
+            items.append(
+                OrphanAttachmentFile(
+                    relative_path=relative_path,
+                    name=path.name,
+                    size_bytes=stat.st_size,
+                    modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                )
+            )
+        return tuple(sorted(items, key=lambda item: item.modified_at, reverse=True))
+
+    def delete_orphan_attachment_file(self, relative_path: str) -> None:
+        """Delete one still-untracked file after the UI has obtained confirmation."""
+        safe_relative = _safe_attachment_relative_path(relative_path)
+        if safe_relative.as_posix() in self._tracked_attachment_paths():
+            raise BackupError("이 파일은 현재 업무 또는 정리 대기 기록에 연결되어 있습니다.")
+        root = self._paths.attachment_dir.resolve()
+        target = (root / safe_relative).resolve()
+        if not target.is_relative_to(root):
+            raise BackupError("첨부파일 경로가 관리 폴더를 벗어납니다.")
+        try:
+            target.unlink()
+        except FileNotFoundError as error:
+            raise BackupError("삭제할 파일을 찾을 수 없습니다.") from error
+        parent = target.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+    def _tracked_attachment_paths(self) -> set[str]:
+        if not self._paths.database_file.is_file():
+            return set()
+        try:
+            with closing(sqlite3.connect(self._paths.database_file)) as connection:
+                return {
+                    str(row[0])
+                    for row in connection.execute("SELECT relative_path FROM attachments")
+                }
+        except sqlite3.Error as error:
+            raise BackupError(f"첨부파일 연결 정보를 확인하지 못했습니다: {error}") from error
+
     def create_backup(
         self,
         *,
@@ -202,6 +331,15 @@ class BackupManager:
         if not self._paths.database_file.is_file():
             raise BackupError("백업할 OfficeFlow 데이터베이스가 없습니다.")
         self._paths.ensure_directories()
+        estimated_source_bytes = self._estimated_backup_source_bytes()
+        free_bytes = shutil.disk_usage(self._paths.root).free
+        required_bytes = estimated_source_bytes * 2 + 16 * 1024 * 1024
+        if free_bytes < required_bytes:
+            raise BackupError(
+                "백업 작업 공간이 부족합니다. "
+                f"약 {_format_bytes(required_bytes)}가 필요하지만 "
+                f"{_format_bytes(free_bytes)}만 사용할 수 있습니다."
+            )
         created_at = datetime.now(UTC)
         stamp = created_at.astimezone().strftime("%Y%m%d-%H%M%S")
         safe_reason = reason if reason in {"manual", "automatic", "pre-restore", "pre-import"} else "manual"
@@ -278,6 +416,21 @@ class BackupManager:
             table_counts=table_counts,
             attachment_count=len(attachments),
         )
+
+    def _estimated_backup_source_bytes(self) -> int:
+        paths = (self._paths.database_file, self._paths.settings_file)
+        total = sum(path.stat().st_size for path in paths if path.is_file())
+        if self._paths.attachment_dir.is_dir():
+            total += sum(
+                path.stat().st_size
+                for path in self._paths.attachment_dir.rglob("*")
+                if path.is_file()
+                and not any(
+                    part.startswith(".")
+                    for part in path.relative_to(self._paths.attachment_dir).parts
+                )
+            )
+        return total
 
     def verify_backup(
         self,

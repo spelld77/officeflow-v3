@@ -1075,6 +1075,8 @@ class MainWindow(QMainWindow):
             backup_manager=self._backup_manager,
             query=self._build_query(offset=0, limit=None),
             migration_service=self._migration_service,
+            attachment_service=self._attachment_service,
+            task_service=self._task_service,
             parent=self,
         )
         dialog.quitRequested.connect(self._quit_application)

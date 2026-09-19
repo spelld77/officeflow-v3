@@ -90,9 +90,10 @@
 
 ### attachments
 
-- id, task_id, original_name, stored_name, relative_path, size_bytes, checksum, created_at, missing_at
+- id, task_id, original_name, stored_name, relative_path, size_bytes, checksum, created_at, missing_at, detached_at
 - DB에는 앱 데이터 디렉터리 기준 상대 경로만 저장한다.
 - 실제 파일 삭제와 연결 해제는 분리한다.
+- 연결 해제 시 `detached_at`을 기록해 일반 첨부 목록에서는 숨기되, 사용자가 복원하거나 영구 삭제할 때까지 업무 관계와 파일을 유지한다.
 - 신규 파일은 UUID 내부 이름과 SHA-256 체크섬을 사용하며 `앞 2자리/다음 2자리/파일명`으로 분산 저장한다.
 - 삭제 중 DB 처리가 실패하면 `.trash` 격리 파일을 원래 상대 경로로 복구한다.
 

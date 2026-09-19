@@ -296,7 +296,10 @@ class SqlAlchemyTaskRepository:
     def _attachment_exists() -> Any:
         return (
             select(AttachmentRecord.id)
-            .where(AttachmentRecord.task_id == TaskRecord.id)
+            .where(
+                AttachmentRecord.task_id == TaskRecord.id,
+                AttachmentRecord.detached_at.is_(None),
+            )
             .exists()
         )
 

@@ -24,6 +24,7 @@ class Attachment:
     checksum: str | None
     created_at: datetime
     missing_at: datetime | None = None
+    detached_at: datetime | None = None
 
     @property
     def id_required(self) -> int:
@@ -56,5 +57,16 @@ class Attachment:
         object.__setattr__(self, "original_name", original_name)
         object.__setattr__(self, "checksum", checksum)
 
+        for label, value in (
+            ("생성 시각", self.created_at),
+            ("누락 확인 시각", self.missing_at),
+            ("연결 해제 시각", self.detached_at),
+        ):
+            if value is not None and value.tzinfo is None:
+                raise AttachmentValidationError(f"첨부파일 {label}에는 시간대가 필요합니다.")
+
     def mark_missing(self, missing_at: datetime | None) -> Attachment:
         return replace(self, missing_at=missing_at)
+
+    def mark_detached(self, detached_at: datetime | None) -> Attachment:
+        return replace(self, detached_at=detached_at)

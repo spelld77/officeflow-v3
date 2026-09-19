@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -12,6 +15,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -20,14 +25,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.attachments import AttachmentOperationError, AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.migration import LegacyMigration
-from officeflow.application.tasks import TaskQuery
+from officeflow.application.tasks import TaskQuery, TaskService
+from officeflow.domain.attachment import Attachment
 from officeflow.infrastructure.backup import (
+    BackupError,
     BackupInfo,
     BackupManager,
     BackupManifest,
     DataUsageSnapshot,
+    OrphanAttachmentFile,
 )
 
 
@@ -56,6 +65,12 @@ class OperationWorker(QObject):
             self.finished.emit()
 
 
+@dataclass(frozen=True, slots=True)
+class AttachmentCleanupInventory:
+    detached: tuple[Attachment, ...]
+    orphaned: tuple[OrphanAttachmentFile, ...]
+
+
 class DataManagementDialog(QDialog):
     quitRequested = Signal()
 
@@ -66,6 +81,8 @@ class DataManagementDialog(QDialog):
         backup_manager: BackupManager,
         query: TaskQuery,
         migration_service: LegacyMigration | None = None,
+        attachment_service: AttachmentService | None = None,
+        task_service: TaskService | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -73,10 +90,13 @@ class DataManagementDialog(QDialog):
         self._backup_manager = backup_manager
         self._query = query
         self._migration_service = migration_service
+        self._attachment_service = attachment_service
+        self._task_service = task_service
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
         self._progress: QProgressDialog | None = None
         self._usage_loading = False
+        self._cleanup_loaded = False
         self._refresh_usage_after_finish = False
 
         self.setWindowTitle("데이터 관리")
@@ -99,7 +119,13 @@ class DataManagementDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("dataManagementTabs")
         self.tabs.addTab(self._build_usage_tab(), "사용량")
+        self._cleanup_tab_index: int | None = None
+        if self._attachment_service is not None:
+            self._cleanup_tab_index = self.tabs.addTab(
+                self._build_cleanup_tab(), "첨부 정리"
+            )
         self._tools_tab_index = self.tabs.addTab(self._build_tools_tab(), "내보내기 · 백업")
+        self.tabs.currentChanged.connect(self._tab_changed)
         root.addWidget(self.tabs, 1)
 
         self.status_label = QLabel("저장 공간 확인을 준비하고 있습니다.")
@@ -171,6 +197,189 @@ class DataManagementDialog(QDialog):
         layout.addWidget(largest_card)
         layout.addStretch()
         return tab
+
+    def _build_cleanup_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 14, 10, 10)
+        heading = QHBoxLayout()
+        title = QLabel("연결 해제된 첨부파일")
+        title.setStyleSheet("font-weight: 700;")
+        heading.addWidget(title)
+        heading.addStretch()
+        refresh_button = QPushButton("목록 새로 고침")
+        refresh_button.setObjectName("refreshAttachmentCleanupButton")
+        refresh_button.clicked.connect(self._refresh_cleanup)
+        heading.addWidget(refresh_button)
+        layout.addLayout(heading)
+        description = QLabel(
+            "업무에서 연결을 해제해도 파일은 자동 삭제되지 않습니다. "
+            "여기에서 복원하거나, 내용을 확인한 뒤에만 영구 삭제하세요."
+        )
+        description.setObjectName("mutedText")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.cleanup_list = QListWidget()
+        self.cleanup_list.setObjectName("attachmentCleanupList")
+        self.cleanup_list.currentItemChanged.connect(self._cleanup_selection_changed)
+        layout.addWidget(self.cleanup_list, 1)
+        self.cleanup_detail_label = QLabel(
+            "30일이 지나도 자동으로 삭제하지 않습니다. 삭제는 사용자가 직접 확인해야 합니다."
+        )
+        self.cleanup_detail_label.setObjectName("mutedText")
+        self.cleanup_detail_label.setWordWrap(True)
+        layout.addWidget(self.cleanup_detail_label)
+        actions = QHBoxLayout()
+        self.restore_attachment_button = QPushButton("원래 업무로 복원")
+        self.restore_attachment_button.clicked.connect(self._restore_cleanup_item)
+        self.restore_attachment_button.setEnabled(False)
+        actions.addWidget(self.restore_attachment_button)
+        self.delete_cleanup_button = QPushButton("영구 삭제")
+        self.delete_cleanup_button.clicked.connect(self._delete_cleanup_item)
+        self.delete_cleanup_button.setEnabled(False)
+        actions.addWidget(self.delete_cleanup_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+        return tab
+
+    def _refresh_cleanup(self) -> None:
+        if not hasattr(self, "cleanup_list") or self._attachment_service is None:
+            return
+        if self._thread is not None:
+            self.status_label.setText("다른 데이터 작업이 끝나면 첨부 정리 목록을 확인합니다.")
+            return
+        self._cleanup_loaded = False
+        self.cleanup_list.clear()
+        loading = QListWidgetItem("정리할 첨부파일을 확인하는 중입니다...")
+        loading.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.cleanup_list.addItem(loading)
+        self.restore_attachment_button.setEnabled(False)
+        self.delete_cleanup_button.setEnabled(False)
+        service = self._attachment_service
+        self._start(
+            "첨부파일 정리 대상을 확인하는 중입니다...",
+            lambda canceled: AttachmentCleanupInventory(
+                detached=service.detached_attachments(),
+                orphaned=self._backup_manager.list_orphan_attachment_files(
+                    cancel_requested=canceled
+                ),
+            ),
+            self._cleanup_message,
+            show_progress=False,
+        )
+
+    def _cleanup_message(self, result: object) -> str:
+        if not isinstance(result, AttachmentCleanupInventory):
+            return "첨부파일 정리 목록을 확인했습니다."
+        self.cleanup_list.clear()
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        for attachment in result.detached:
+            detached_at = attachment.detached_at
+            aged = detached_at is not None and detached_at <= cutoff
+            task_title = f"업무 #{attachment.task_id}"
+            if self._task_service is not None:
+                with suppress(LookupError):
+                    task_title = self._task_service.get_including_deleted(
+                        attachment.task_id
+                    ).title
+            label = (
+                f"{attachment.original_name} · {self._format_bytes(attachment.size_bytes)} "
+                f"· {task_title}"
+                + (" · 30일 경과" if aged else "")
+            )
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, ("detached", attachment.id_required))
+            self.cleanup_list.addItem(item)
+        for orphan in result.orphaned:
+            item = QListWidgetItem(
+                f"{orphan.name} · {self._format_bytes(orphan.size_bytes)} · 연결 정보 없음"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, ("orphan", orphan.relative_path))
+            item.setData(Qt.ItemDataRole.UserRole + 1, orphan)
+            self.cleanup_list.addItem(item)
+        if not self.cleanup_list.count():
+            item = QListWidgetItem("정리할 첨부파일이 없습니다.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.cleanup_list.addItem(item)
+        self.restore_attachment_button.setEnabled(False)
+        self.delete_cleanup_button.setEnabled(False)
+        self._cleanup_loaded = True
+        return (
+            "첨부파일 정리 목록을 확인했습니다. "
+            f"정리 대기 {len(result.detached):,}개, 연결 정보 없음 {len(result.orphaned):,}개"
+        )
+
+    def _tab_changed(self, index: int) -> None:
+        if index == self._cleanup_tab_index and not self._cleanup_loaded:
+            self._refresh_cleanup()
+
+    def _cleanup_selection_changed(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None,
+    ) -> None:
+        data = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+        enabled = isinstance(data, tuple) and len(data) == 2
+        kind = data[0] if isinstance(data, tuple) and len(data) == 2 else None
+        self.restore_attachment_button.setEnabled(kind == "detached")
+        self.delete_cleanup_button.setEnabled(enabled)
+        if kind == "orphan":
+            self.cleanup_detail_label.setText(
+                "이 파일은 예전 방식으로 연결이 해제되어 업무 정보가 없습니다. "
+                "복원할 수 없으며 영구 삭제만 가능합니다."
+            )
+        elif kind == "detached":
+            self.cleanup_detail_label.setText(
+                "원래 업무로 복원할 수 있습니다. 30일이 지나도 자동 삭제되지는 않습니다."
+            )
+
+    def _restore_cleanup_item(self) -> None:
+        item = self.cleanup_list.currentItem()
+        data = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(data, tuple) or data[0] != "detached":
+            return
+        try:
+            assert self._attachment_service is not None
+            self._attachment_service.restore(int(data[1]))
+        except (AttachmentOperationError, LookupError) as error:
+            QMessageBox.warning(self, "첨부파일을 복원하지 못했습니다.", str(error))
+            return
+        self.status_label.setText("첨부파일을 원래 업무로 복원했습니다.")
+        self._after_cleanup_change()
+
+    def _delete_cleanup_item(self) -> None:
+        item = self.cleanup_list.currentItem()
+        data = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(data, tuple) or len(data) != 2:
+            return
+        if (
+            QMessageBox.warning(
+                self,
+                "첨부파일 영구 삭제",
+                "선택한 파일을 실제 저장소에서 삭제합니다. 이 작업은 되돌릴 수 없습니다.\n"
+                "파일 내용을 확인했다면 계속할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            if data[0] == "detached":
+                assert self._attachment_service is not None
+                self._attachment_service.delete_file(int(data[1]))
+            else:
+                self._backup_manager.delete_orphan_attachment_file(str(data[1]))
+        except (AttachmentOperationError, BackupError, LookupError, OSError) as error:
+            QMessageBox.warning(self, "첨부파일을 삭제하지 못했습니다.", str(error))
+            return
+        self.status_label.setText("선택한 첨부파일을 영구 삭제했습니다.")
+        self._after_cleanup_change()
+
+    def _after_cleanup_change(self) -> None:
+        self._cleanup_loaded = False
+        self._refresh_usage_after_finish = True
+        self._refresh_cleanup()
 
     def _build_tools_tab(self) -> QWidget:
         tab = QWidget()
@@ -270,7 +479,8 @@ class DataManagementDialog(QDialog):
         self.usage_storage_label.setText(
             f"DB  {self._format_bytes(result.database_bytes)}\n"
             f"첨부파일  {self._format_bytes(result.stored_attachment_bytes)} "
-            f"({result.stored_attachment_count:,}개 저장 / {result.linked_attachment_count:,}개 등록)\n"
+            f"({result.stored_attachment_count:,}개 저장 / {result.linked_attachment_count:,}개 연결 / "
+            f"{result.detached_attachment_count:,}개 정리 대기)\n"
             f"백업  {self._format_bytes(result.backup_bytes)} ({result.backup_count:,}개)"
         )
         issues: list[str] = []
@@ -278,10 +488,27 @@ class DataManagementDialog(QDialog):
             issues.append(f"파일 누락 {result.missing_attachment_count:,}개")
         if result.orphan_attachment_count:
             issues.append(
-                "연결 해제 파일 "
+                "연결 정보 없는 파일 "
                 f"{result.orphan_attachment_count:,}개 "
                 f"({self._format_bytes(result.orphan_attachment_bytes)})"
             )
+        if result.detached_attachment_count:
+            issues.append(
+                "정리 대기 첨부 "
+                f"{result.detached_attachment_count:,}개 "
+                f"({self._format_bytes(result.detached_attachment_bytes)})"
+            )
+        if result.aged_detached_attachment_count:
+            issues.append(
+                f"30일 지난 정리 대기 첨부 {result.aged_detached_attachment_count:,}개"
+            )
+        if result.duplicate_attachment_count:
+            issues.append(
+                f"중복 내용 첨부 {result.duplicate_attachment_count:,}개 "
+                f"({self._format_bytes(result.duplicate_attachment_bytes)})"
+            )
+        if result.stored_attachment_bytes >= 5 * 1024 * 1024 * 1024:
+            issues.append("첨부파일 총량 5 GB 이상")
         if result.aged_trash_task_count:
             issues.append(f"30일 지난 휴지통 업무 {result.aged_trash_task_count:,}개")
         self.usage_issue_label.setText(
@@ -295,7 +522,8 @@ class DataManagementDialog(QDialog):
         self.usage_largest_label.setText(
             "\n".join(
                 f"{index}. {item.name} · {self._format_bytes(item.size_bytes)}"
-                + (" · 연결 해제" if item.orphaned else "")
+                + (" · 연결 정보 없음" if item.orphaned else "")
+                + (" · 정리 대기" if item.detached else "")
                 for index, item in enumerate(result.largest_files, start=1)
             )
             or "저장된 첨부파일이 없습니다."
@@ -429,6 +657,12 @@ class DataManagementDialog(QDialog):
         if self._refresh_usage_after_finish:
             self._refresh_usage_after_finish = False
             QTimer.singleShot(0, self._refresh_usage)
+        elif (
+            self._cleanup_tab_index is not None
+            and self.tabs.currentIndex() == self._cleanup_tab_index
+            and not self._cleanup_loaded
+        ):
+            QTimer.singleShot(0, self._refresh_cleanup)
 
     @staticmethod
     def _backup_message(result: object) -> str:

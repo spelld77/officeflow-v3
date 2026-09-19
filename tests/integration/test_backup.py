@@ -122,6 +122,8 @@ def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> No
     linked_path = paths.attachment_dir / "aa" / "linked.bin"
     linked_path.parent.mkdir()
     linked_path.write_bytes(b"linked")
+    detached_path = paths.attachment_dir / "aa" / "detached.bin"
+    detached_path.write_bytes(b"detached")
     with sessions.transaction() as session:
         session.add_all(
             (
@@ -134,6 +136,17 @@ def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> No
                     checksum=None,
                     created_at=now,
                     missing_at=None,
+                ),
+                AttachmentRecord(
+                    task_id=active.id,
+                    original_name="정리대기.bin",
+                    stored_name="detached.bin",
+                    relative_path="aa/detached.bin",
+                    size_bytes=8,
+                    checksum=None,
+                    created_at=now,
+                    missing_at=None,
+                    detached_at=now - timedelta(days=31),
                 ),
                 AttachmentRecord(
                     task_id=active.id,
@@ -161,7 +174,10 @@ def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> No
     assert usage.trash_task_count == 1
     assert usage.aged_trash_task_count == 1
     assert usage.linked_attachment_count == 2
-    assert usage.stored_attachment_count == 2
+    assert usage.detached_attachment_count == 1
+    assert usage.detached_attachment_bytes == 8
+    assert usage.aged_detached_attachment_count == 1
+    assert usage.stored_attachment_count == 3
     assert usage.missing_attachment_count == 1
     assert usage.orphan_attachment_count == 1
     assert usage.orphan_attachment_bytes == len(b"orphaned-data")
@@ -172,4 +188,11 @@ def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> No
     assert usage.total_bytes == (
         usage.database_bytes + usage.stored_attachment_bytes + usage.backup_bytes
     )
+
+    manager = BackupManager(paths)
+    orphans = manager.list_orphan_attachment_files()
+    assert [item.relative_path for item in orphans] == ["bb/orphan.bin"]
+    manager.delete_orphan_attachment_file(orphans[0].relative_path)
+    assert not orphan_path.exists()
+    assert detached_path.exists()
     engine.dispose()

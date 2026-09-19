@@ -13,6 +13,7 @@ from officeflow.application.attachments import (
     AttachmentOperationError,
     AttachmentRepository,
     AttachmentService,
+    DuplicateAttachmentError,
 )
 from officeflow.application.tasks import TaskDraft, TaskService
 from officeflow.domain.attachment import Attachment, AttachmentValidationError
@@ -28,10 +29,29 @@ class InMemoryAttachmentRepository(AttachmentRepository):
         self.fail_delete = False
 
     def list_attachments(self, task_id: int) -> tuple[Attachment, ...]:
-        return tuple(item for item in self.items.values() if item.task_id == task_id)
+        return tuple(
+            item
+            for item in self.items.values()
+            if item.task_id == task_id and item.detached_at is None
+        )
 
     def get_attachment(self, attachment_id: int) -> Attachment | None:
         return self.items.get(attachment_id)
+
+    def list_detached(self) -> tuple[Attachment, ...]:
+        return tuple(item for item in self.items.values() if item.detached_at is not None)
+
+    def find_active_by_checksum(self, task_id: int, checksum: str) -> Attachment | None:
+        return next(
+            (
+                item
+                for item in self.items.values()
+                if item.task_id == task_id
+                and item.checksum == checksum
+                and item.detached_at is None
+            ),
+            None,
+        )
 
     def add_attachment(self, attachment: Attachment) -> Attachment:
         if self.fail_add:
@@ -52,6 +72,13 @@ class InMemoryAttachmentRepository(AttachmentRepository):
 
     def set_checksum(self, attachment_id: int, checksum: str) -> Attachment:
         saved = replace(self.items[attachment_id], checksum=checksum)
+        self.items[attachment_id] = saved
+        return saved
+
+    def set_detached_at(
+        self, attachment_id: int, detached_at: datetime | None
+    ) -> Attachment:
+        saved = replace(self.items[attachment_id], detached_at=detached_at)
         self.items[attachment_id] = saved
         return saved
 
@@ -152,7 +179,7 @@ def test_database_delete_failure_restores_quarantined_file(tmp_path: Path) -> No
     assert storage.resolve(attachment.relative_path).read_text(encoding="utf-8") == "keep me"
 
 
-def test_unlink_keeps_file_while_delete_file_removes_it(tmp_path: Path) -> None:
+def test_unlink_can_be_restored_and_delete_file_removes_it(tmp_path: Path) -> None:
     task_service, service, repository, storage = make_attachment_service(tmp_path)
     task = task_service.create(TaskDraft(title="삭제 구분"))
     assert task.id is not None
@@ -161,8 +188,19 @@ def test_unlink_keeps_file_while_delete_file_removes_it(tmp_path: Path) -> None:
     first = service.attach(task.id, source)
     assert first.id is not None
 
-    retained = service.unlink(first.id)
+    detached_at = datetime(2026, 9, 19, tzinfo=UTC)
+    retained = service.unlink(first.id, now=detached_at)
     assert retained.exists()
+    assert repository.get_attachment(first.id).detached_at == detached_at
+    assert service.attachments_for_task(task.id) == ()
+    assert service.detached_attachments()[0].id == first.id
+
+    service.restore(first.id)
+    assert service.attachments_for_task(task.id)[0].id == first.id
+
+    service.unlink(first.id, now=detached_at)
+    service.delete_file(first.id)
+    assert not retained.exists()
     assert repository.get_attachment(first.id) is None
 
     source.write_text("second", encoding="utf-8")
@@ -172,6 +210,21 @@ def test_unlink_keeps_file_while_delete_file_removes_it(tmp_path: Path) -> None:
     service.delete_file(second.id)
     assert not managed_path.exists()
     assert repository.get_attachment(second.id) is None
+
+
+def test_duplicate_file_is_not_copied_twice_for_same_task(tmp_path: Path) -> None:
+    task_service, service, repository, storage = make_attachment_service(tmp_path)
+    task = task_service.create(TaskDraft(title="중복 방지"))
+    assert task.id is not None
+    source = tmp_path / "자료.txt"
+    source.write_text("same content", encoding="utf-8")
+    service.attach(task.id, source)
+
+    with pytest.raises(DuplicateAttachmentError, match="이미 이 업무에 첨부"):
+        service.attach(task.id, source)
+
+    assert len(repository.items) == 1
+    assert len([path for path in storage.root.rglob("*") if path.is_file()]) == 1
 
 
 def test_attachment_metadata_rejects_unsafe_relative_path() -> None:

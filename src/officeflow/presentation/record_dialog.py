@@ -581,8 +581,25 @@ class TaskRecordsDialog(QDialog):
             "",
             "모든 파일 (*.*)",
         )
-        if source:
-            self._start_attachment_import(Path(source))
+        if not source:
+            return
+        source_path = Path(source)
+        try:
+            size_bytes = source_path.stat().st_size
+        except OSError as error:
+            QMessageBox.warning(self, "파일을 첨부하지 못했습니다.", str(error))
+            return
+        if size_bytes >= 100 * 1024 * 1024:
+            answer = QMessageBox.question(
+                self,
+                "큰 첨부파일",
+                f"'{source_path.name}'은 {self._format_size(size_bytes)}입니다.\n"
+                "백업 크기와 다른 PC로 옮기는 시간이 크게 늘어날 수 있습니다. "
+                "그래도 첨부할까요?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._start_attachment_import(source_path)
 
     def _start_attachment_import(self, source: Path) -> None:
         if self._attachment_service is None or self._attachment_thread is not None:
@@ -709,7 +726,8 @@ class TaskRecordsDialog(QDialog):
         answer = QMessageBox.question(
             self,
             "첨부 연결 해제",
-            f"'{attachment.original_name}'의 업무 연결만 해제할까요?\n실제 파일은 관리 폴더에 남습니다.",
+            f"'{attachment.original_name}'을 정리 대기함으로 옮길까요?\n"
+            "파일은 삭제되지 않으며 데이터 관리에서 복원하거나 영구 삭제할 수 있습니다.",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -723,7 +741,7 @@ class TaskRecordsDialog(QDialog):
         QMessageBox.information(
             self,
             "연결 해제 완료",
-            f"파일은 삭제하지 않았습니다.\n보존 위치: {retained_path}",
+            f"파일은 삭제하지 않고 정리 대기함으로 옮겼습니다.\n보존 위치: {retained_path}",
         )
 
     def _delete_attachment(self) -> None:

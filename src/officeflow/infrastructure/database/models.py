@@ -142,7 +142,10 @@ class ChecklistItemRecord(Base):
 
 class AttachmentRecord(Base):
     __tablename__ = "attachments"
-    __table_args__ = (Index("ix_attachments_task_missing", "task_id", "missing_at"),)
+    __table_args__ = (
+        Index("ix_attachments_task_missing", "task_id", "missing_at"),
+        Index("ix_attachments_detached_created", "detached_at", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
@@ -153,6 +156,7 @@ class AttachmentRecord(Base):
     checksum: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
     missing_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    detached_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class WorkLogRecord(Base):

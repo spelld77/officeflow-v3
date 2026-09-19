@@ -23,6 +23,10 @@ class AttachmentMissingError(AttachmentOperationError):
     """Raised when an attachment's managed file is absent."""
 
 
+class DuplicateAttachmentError(AttachmentOperationError):
+    """Raised when the same file is already attached to the same task."""
+
+
 class AttachmentIntegrity(StrEnum):
     VERIFIED = "verified"
     MODIFIED = "modified"
@@ -56,6 +60,10 @@ class AttachmentRepository(Protocol):
 
     def get_attachment(self, attachment_id: int) -> Attachment | None: ...
 
+    def list_detached(self) -> tuple[Attachment, ...]: ...
+
+    def find_active_by_checksum(self, task_id: int, checksum: str) -> Attachment | None: ...
+
     def add_attachment(self, attachment: Attachment) -> Attachment: ...
 
     def set_missing_at(
@@ -63,6 +71,10 @@ class AttachmentRepository(Protocol):
     ) -> Attachment: ...
 
     def set_checksum(self, attachment_id: int, checksum: str) -> Attachment: ...
+
+    def set_detached_at(
+        self, attachment_id: int, detached_at: datetime | None
+    ) -> Attachment: ...
 
     def delete_attachment(self, attachment_id: int) -> None: ...
 
@@ -131,6 +143,12 @@ class AttachmentService:
             cancel_requested=cancel_requested,
         )
         try:
+            duplicate = self._repository.find_active_by_checksum(task_id, stored.checksum)
+            if duplicate is not None:
+                raise DuplicateAttachmentError(
+                    f"같은 내용의 파일이 이미 이 업무에 첨부되어 있습니다: "
+                    f"{duplicate.original_name}"
+                )
             attachment = Attachment(
                 id=None,
                 task_id=task_id,
@@ -198,11 +216,23 @@ class AttachmentService:
         )
         return AttachmentVerification(available, integrity, path, actual_checksum)
 
-    def unlink(self, attachment_id: int) -> Path:
+    def detached_attachments(self) -> tuple[Attachment, ...]:
+        return self._repository.list_detached()
+
+    def unlink(self, attachment_id: int, *, now: datetime | None = None) -> Path:
         attachment = self._get_required(attachment_id)
+        if attachment.detached_at is not None:
+            raise AttachmentOperationError("이미 정리 대기 중인 첨부파일입니다.")
         retained_path = self._storage.resolve(attachment.relative_path, require_exists=False)
-        self._repository.delete_attachment(attachment_id)
+        self._repository.set_detached_at(attachment_id, now or datetime.now(UTC))
         return retained_path
+
+    def restore(self, attachment_id: int) -> Attachment:
+        attachment = self._get_required(attachment_id)
+        if attachment.detached_at is None:
+            return attachment
+        self._task_service.get_including_deleted(attachment.task_id)
+        return self._repository.set_detached_at(attachment_id, None)
 
     def delete_file(self, attachment_id: int) -> None:
         attachment = self._get_required(attachment_id)

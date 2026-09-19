@@ -46,4 +46,11 @@ def test_attachment_repository_round_trip_and_task_filter(tmp_path: Path) -> Non
     assert [task.id for task in page.items] == [attached_task.id]
     assert page.items[0].has_attachments
     assert not task_service.get(plain_task.id).has_attachments
+
+    service.unlink(attachment.id_required, now=datetime(2026, 9, 19, tzinfo=UTC))
+    assert service.attachments_for_task(attached_task.id) == ()
+    assert service.detached_attachments()[0].id == attachment.id
+    assert not task_service.get(attached_task.id).has_attachments
+    service.restore(attachment.id_required)
+    assert task_service.get(attached_task.id).has_attachments
     engine.dispose()
