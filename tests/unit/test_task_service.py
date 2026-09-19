@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 from officeflow.application.tasks import (
+    CalendarRepositoryOverview,
     TaskDraft,
     TaskGroup,
     TaskPage,
@@ -133,6 +134,48 @@ class InMemoryTaskRepository(TaskRepository):
                 or (task.ends_at is None and task.starts_at >= starts_at)
             )
             and (not normalized or normalized in f"{task.title}\n{task.description}".casefold())
+        )
+
+    def calendar_overview(
+        self,
+        starts_at: datetime,
+        ends_at: datetime,
+        day_ranges: tuple[tuple[datetime, datetime], ...],
+        *,
+        search: str = "",
+        preview_limit: int = 60,
+    ) -> CalendarRepositoryOverview:
+        tasks = self.list_overlapping(starts_at, ends_at, search=search)
+        regular = tuple(task for task in tasks if task.recurrence_rule is None)
+        recurring = tuple(task for task in tasks if task.recurrence_rule is not None)
+        counts = tuple(
+            sum(
+                1
+                for task in regular
+                if task.starts_at is not None
+                and task.starts_at < day_end
+                and (
+                    (task.ends_at is not None and task.ends_at > day_start)
+                    or (task.ends_at is None and task.starts_at >= day_start)
+                )
+            )
+            for day_start, day_end in day_ranges
+        )
+        regular = tuple(
+            sorted(
+                regular,
+                key=lambda task: (
+                    not task.is_pinned,
+                    task.starts_at or datetime.max.replace(tzinfo=UTC),
+                    task.id or 0,
+                ),
+            )
+        )
+        return CalendarRepositoryOverview(
+            regular_previews=regular[:preview_limit],
+            regular_day_counts=counts,
+            regular_total=len(regular),
+            recurrence_templates=recurring,
         )
 
     def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None:
@@ -395,6 +438,58 @@ def test_calendar_range_rejects_empty_or_reversed_range() -> None:
         assert "종료일" in str(error)
     else:
         raise AssertionError("empty calendar ranges must be rejected")
+
+
+def test_calendar_overview_keeps_exact_counts_with_bounded_previews() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    local_midnight = datetime(2026, 9, 13, 15, 0, tzinfo=UTC)
+    service.create(
+        TaskDraft(
+            title="첫날 일정",
+            starts_at=local_midnight,
+            ends_at=local_midnight + timedelta(hours=1),
+        )
+    )
+    service.create(
+        TaskDraft(
+            title="이틀 일정",
+            all_day=True,
+            starts_at=local_midnight,
+            ends_at=local_midnight + timedelta(days=2),
+        )
+    )
+    service.create(
+        TaskDraft(
+            title="매일 반복",
+            starts_at=local_midnight,
+            ends_at=local_midnight + timedelta(hours=1),
+            recurrence_rule="FREQ=DAILY;INTERVAL=1;COUNT=2",
+        )
+    )
+
+    overview = service.calendar_overview(
+        date(2026, 9, 14),
+        date(2026, 9, 16),
+        preview_limit=2,
+        summary_threshold=10,
+    )
+
+    assert overview.total == 4
+    assert overview.count_for(date(2026, 9, 14)) == 3
+    assert overview.count_for(date(2026, 9, 15)) == 2
+    assert len(overview.preview_tasks) == 2
+    assert overview.summary_mode is False
+
+    summary = service.calendar_overview(
+        date(2026, 9, 14),
+        date(2026, 9, 16),
+        preview_limit=2,
+        summary_threshold=3,
+    )
+
+    assert summary.summary_mode is True
+    assert summary.preview_tasks == ()
 
 
 def test_completing_one_recurrence_keeps_future_occurrences() -> None:

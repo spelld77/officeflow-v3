@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from itertools import pairwise
 from typing import ClassVar
 from zoneinfo import ZoneInfo
@@ -293,6 +293,7 @@ class MainWindow(QMainWindow):
         self._task_content = self._build_content()
         self._calendar_page = CalendarPage(timezone=self._settings.timezone)
         self._calendar_page.monthChanged.connect(self._refresh_calendar)
+        self._calendar_page.dateSelected.connect(self._refresh_calendar_day)
         self._calendar_page.taskSelected.connect(self._on_calendar_task_selected)
         self._calendar_page.taskActivated.connect(self._open_calendar_task)
         self._calendar_page.taskContextRequested.connect(
@@ -703,16 +704,33 @@ class MainWindow(QMainWindow):
     def _refresh_calendar(self, _year: int | None = None, _month: int | None = None) -> None:
         try:
             start_date, end_date = self._calendar_page.visible_date_range
-            tasks = self._task_service.calendar_schedule(
+            overview = self._task_service.calendar_overview(
                 start_date,
                 end_date,
                 search=self._search.text(),
             )
-            self._calendar_page.set_tasks(tasks)
-            self.statusBar().showMessage(f"캘린더 일정 {len(tasks)}개", 1800)
+            self._calendar_page.set_overview(overview)
+            day_loaded = self._refresh_calendar_day(self._calendar_page.selected_date)
+            mode = " · 요약 표시" if overview.summary_mode else ""
+            if day_loaded:
+                self.statusBar().showMessage(f"캘린더 일정 {overview.total}개{mode}", 1800)
         except Exception as error:
             logger.exception("Failed to refresh calendar")
             self.statusBar().showMessage(f"캘린더를 불러오지 못했습니다: {error}", 5000)
+
+    def _refresh_calendar_day(self, selected_date: date) -> bool:
+        try:
+            tasks = self._task_service.calendar_schedule(
+                selected_date,
+                selected_date + timedelta(days=1),
+                search=self._search.text(),
+            )
+            self._calendar_page.set_day_tasks(tasks)
+            return True
+        except Exception as error:
+            logger.exception("Failed to refresh calendar day")
+            self.statusBar().showMessage(f"선택한 날짜를 불러오지 못했습니다: {error}", 5000)
+            return False
 
     def _build_query(
         self,

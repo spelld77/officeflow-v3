@@ -826,6 +826,54 @@ def test_calendar_overflow_opens_complete_day_list(qtbot: QtBot, task_service: T
     assert window._calendar_page.day_list.count() == 6
 
 
+def test_dense_calendar_loads_full_selected_day_on_demand(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    zone = ZoneInfo("Asia/Seoul")
+    today = datetime.now(zone).date()
+    tomorrow = today + timedelta(days=1)
+    today_start = datetime.combine(today, time.min, tzinfo=zone).astimezone(UTC)
+    tomorrow_start = datetime.combine(tomorrow, time.min, tzinfo=zone).astimezone(UTC)
+    task_service.create(
+        TaskDraft(
+            title="오늘 일정",
+            all_day=True,
+            starts_at=today_start,
+            ends_at=today_start + timedelta(days=1),
+        )
+    )
+    for index in range(121):
+        task_service.create(
+            TaskDraft(
+                title=f"내일 밀집 일정 {index:03d}",
+                all_day=True,
+                starts_at=tomorrow_start,
+                ends_at=tomorrow_start + timedelta(days=1),
+            )
+        )
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.resize(1280, 800)
+    window.show()
+    window._show_calendar()
+
+    assert window._calendar_page.summary_label.isVisible()
+    assert window._calendar_page.day_list.count() == 1
+    calendar = window._calendar_page.calendar
+    grid_start, _grid_end = calendar.visible_date_range
+    offset = (tomorrow - grid_start).days
+    row, column = divmod(offset, 7)
+    row_height = (calendar.height() - calendar.HEADER_HEIGHT) / 6
+    point = QPoint(
+        int((column + 0.5) * calendar.width() / 7),
+        int(calendar.HEADER_HEIGHT + (row + 0.4) * row_height),
+    )
+
+    qtbot.mouseClick(calendar, Qt.MouseButton.LeftButton, pos=point)
+
+    assert window._calendar_page.day_list.count() == 121
+
+
 def test_calendar_completes_only_selected_recurrence(
     qtbot: QtBot, task_service: TaskService
 ) -> None:

@@ -43,7 +43,7 @@ def test_five_thousand_task_window_loads_bounded_first_page(qtbot: QtBot, tmp_pa
     engine.dispose()
 
 
-def test_five_thousand_task_calendar_range_meets_budget(tmp_path: Path) -> None:
+def test_five_thousand_task_calendar_overview_is_bounded_and_meets_budget(tmp_path: Path) -> None:
     database_file = tmp_path / "calendar-benchmark.db"
     generate(database_file, 5_000)
     engine = create_database_engine(database_file)
@@ -51,9 +51,11 @@ def test_five_thousand_task_calendar_range_meets_budget(tmp_path: Path) -> None:
     start = date.today() - timedelta(days=14)
 
     started = perf_counter()
-    tasks = service.calendar_range(start, start + timedelta(days=42))
+    overview = service.calendar_overview(start, start + timedelta(days=42))
     elapsed_ms = (perf_counter() - started) * 1_000
 
-    assert len(tasks) > 0
+    assert overview.total > 0
+    assert len(overview.preview_tasks) <= service.CALENDAR_PREVIEW_LIMIT
+    assert len(overview.day_counts) == 42
     assert elapsed_ms < 200
     engine.dispose()

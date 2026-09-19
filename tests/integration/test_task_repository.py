@@ -207,6 +207,43 @@ def test_recurrence_occurrence_round_trip_does_not_complete_template(tmp_path: P
     engine.dispose()
 
 
+def test_calendar_overview_limits_rows_but_keeps_day_count(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    service = TaskService(SqlAlchemyTaskRepository(SessionFactory(engine)))
+    local_day_start = datetime(2026, 9, 16, 15, 0, tzinfo=UTC)
+    for index in range(130):
+        service.create(
+            TaskDraft(
+                title=f"밀집 일정 {index:03d}",
+                starts_at=local_day_start,
+                ends_at=local_day_start + timedelta(hours=1),
+            ),
+            now=local_day_start,
+        )
+
+    overview = service.calendar_overview(
+        local_day_start.date(),
+        (local_day_start + timedelta(days=3)).date(),
+    )
+
+    assert overview.total == 130
+    assert overview.count_for(datetime(2026, 9, 17, tzinfo=UTC).date()) == 130
+    assert overview.summary_mode is True
+    assert overview.preview_tasks == ()
+
+    filtered = service.calendar_overview(
+        local_day_start.date(),
+        (local_day_start + timedelta(days=3)).date(),
+        search="밀집 001",
+    )
+
+    assert filtered.total == 1
+    assert filtered.count_for(datetime(2026, 9, 17, tzinfo=UTC).date()) == 1
+    engine.dispose()
+
+
 def test_reminder_delivery_history_prevents_duplicate_after_repository_restart(
     tmp_path: Path,
 ) -> None:

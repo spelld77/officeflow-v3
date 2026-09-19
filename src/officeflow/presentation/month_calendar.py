@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from officeflow.application.tasks import ScheduledTask
+from officeflow.application.tasks import CalendarOverview, ScheduledTask
 from officeflow.domain.enums import TaskPriority, TaskStatus
 
 WEEKDAY_LABELS = ("일", "월", "화", "수", "목", "금", "토")
@@ -153,6 +153,8 @@ class MonthCalendarWidget(QWidget):
         self._month = today.month
         self._selected_date = today
         self._tasks: tuple[ScheduledTask, ...] = ()
+        self._day_counts: dict[date, int] = {}
+        self._summary_mode = False
         self._compact = False
         self._task_hits: list[tuple[QRectF, ScheduledTask]] = []
         self._more_hits: list[tuple[QRectF, date]] = []
@@ -187,6 +189,20 @@ class MonthCalendarWidget(QWidget):
 
     def set_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
         self._tasks = tasks
+        start, end = self.visible_date_range
+        self._day_counts = {
+            start + timedelta(days=offset): len(
+                tasks_for_date(tasks, start + timedelta(days=offset), self._timezone)
+            )
+            for offset in range((end - start).days)
+        }
+        self._summary_mode = False
+        self.update()
+
+    def set_overview(self, overview: CalendarOverview) -> None:
+        self._tasks = overview.preview_tasks
+        self._day_counts = dict(overview.day_counts)
+        self._summary_mode = overview.summary_mode
         self.update()
 
     def set_compact(self, compact: bool) -> None:
@@ -258,8 +274,12 @@ class MonthCalendarWidget(QWidget):
         lane_limit = 2 if self._compact else 3
         available_lanes = max(1, int((row_height - self.DATE_HEIGHT - 22) // self.BAR_HEIGHT))
         lane_limit = min(lane_limit, available_lanes)
-        segments = build_calendar_segments(self._tasks, grid_start, self._timezone)
-        visible_task_days: set[tuple[int | None, date]] = set()
+        segments = (
+            ()
+            if self._summary_mode
+            else build_calendar_segments(self._tasks, grid_start, self._timezone)
+        )
+        visible_task_days: set[tuple[int | None, datetime | None, date]] = set()
         for segment in segments:
             if segment.lane >= lane_limit:
                 continue
@@ -292,19 +312,29 @@ class MonthCalendarWidget(QWidget):
             self._task_hits.append((rect, segment.task))
             week_start = grid_start + timedelta(days=segment.week * 7)
             for column in range(segment.start_column, segment.end_column + 1):
-                visible_task_days.add((segment.task.id, week_start + timedelta(days=column)))
+                visible_task_days.add(
+                    (
+                        segment.task.id,
+                        segment.task.occurrence_start,
+                        week_start + timedelta(days=column),
+                    )
+                )
 
         for offset in range(42):
             day = grid_start + timedelta(days=offset)
-            hidden = sum(
+            visible = sum(
                 1
                 for task in tasks_for_date(self._tasks, day, self._timezone)
-                if (task.id, day) not in visible_task_days
+                if (task.id, task.occurrence_start, day) in visible_task_days
             )
+            hidden = max(0, self._day_counts.get(day, 0) - visible)
             if hidden == 0:
                 continue
             row, column = divmod(offset, 7)
-            label = f"+{hidden}개 더 보기" if column_width >= 130 else f"+{hidden}개"
+            if self._summary_mode:
+                label = f"{hidden}개 일정" if column_width >= 130 else f"{hidden}개"
+            else:
+                label = f"+{hidden}개 더 보기" if column_width >= 130 else f"+{hidden}개"
             label_width = min(
                 column_width - 8,
                 painter.fontMetrics().horizontalAdvance(label) + 12,
@@ -456,6 +486,7 @@ class MonthCalendarWidget(QWidget):
 
 class CalendarPage(QFrame):
     monthChanged = Signal(int, int)
+    dateSelected = Signal(object)
     taskSelected = Signal(object)
     taskActivated = Signal(object)
     taskContextRequested = Signal(object, object)
@@ -465,6 +496,7 @@ class CalendarPage(QFrame):
         super().__init__(parent)
         self._timezone = timezone
         self._tasks: tuple[ScheduledTask, ...] = ()
+        self._day_tasks: tuple[ScheduledTask, ...] = ()
         self._selected_task: ScheduledTask | None = None
         self.setObjectName("calendarCard")
 
@@ -487,6 +519,10 @@ class CalendarPage(QFrame):
         toolbar.addWidget(self.next_button)
         toolbar.addSpacing(6)
         toolbar.addWidget(self.today_button)
+        self.summary_label = QLabel("일정이 많아 개수로 표시")
+        self.summary_label.setObjectName("mutedText")
+        self.summary_label.hide()
+        toolbar.addWidget(self.summary_label)
         toolbar.addStretch()
         self.create_button = QPushButton("+ 일정")
         self.create_button.setObjectName("calendarCreate")
@@ -550,7 +586,19 @@ class CalendarPage(QFrame):
 
     def set_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
         self._tasks = tasks
+        self._day_tasks = tasks_for_date(tasks, self.selected_date, self._timezone)
         self.calendar.set_tasks(tasks)
+        self._refresh_day_list()
+
+    def set_overview(self, overview: CalendarOverview) -> None:
+        self._tasks = overview.preview_tasks
+        self._day_tasks = ()
+        self.calendar.set_overview(overview)
+        self.summary_label.setVisible(overview.summary_mode)
+        self._refresh_day_list()
+
+    def set_day_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
+        self._day_tasks = tasks
         self._refresh_day_list()
 
     def set_compact(self, compact: bool) -> None:
@@ -576,12 +624,15 @@ class CalendarPage(QFrame):
             return
         self.calendar.set_selected_date(selected)
         self._selected_task = None
+        self._day_tasks = ()
         self._refresh_day_list()
+        self.dateSelected.emit(selected)
 
     def _set_month_and_date(self, selected: date) -> None:
         self.calendar.set_month(selected.year, selected.month)
         self.calendar.set_selected_date(selected)
         self._selected_task = None
+        self._day_tasks = ()
         self._update_month_label()
         self._refresh_day_list()
         self.monthChanged.emit(selected.year, selected.month)
@@ -592,7 +643,7 @@ class CalendarPage(QFrame):
 
     def _refresh_day_list(self) -> None:
         selected_id = self._selected_task.id if self._selected_task else None
-        items = tasks_for_date(self._tasks, self.selected_date, self._timezone)
+        items = self._day_tasks
         self.day_list.clear()
         for task in items:
             item = QListWidgetItem(self._day_item_text(task))

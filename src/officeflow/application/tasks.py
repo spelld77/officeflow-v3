@@ -161,6 +161,29 @@ class ScheduledTask:
 
 
 @dataclass(frozen=True, slots=True)
+class CalendarRepositoryOverview:
+    """Bounded regular-task previews plus recurrence templates for a visible range."""
+
+    regular_previews: tuple[Task, ...]
+    regular_day_counts: tuple[int, ...]
+    regular_total: int
+    recurrence_templates: tuple[Task, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarOverview:
+    """Lightweight data used to paint a calendar month."""
+
+    preview_tasks: tuple[ScheduledTask, ...]
+    day_counts: tuple[tuple[date, int], ...]
+    total: int
+    summary_mode: bool
+
+    def count_for(self, day: date) -> int:
+        return next((count for item_day, count in self.day_counts if item_day == day), 0)
+
+
+@dataclass(frozen=True, slots=True)
 class TaskSummary:
     overdue: int
     in_progress: int
@@ -203,6 +226,16 @@ class TaskRepository(Protocol):
         search: str = "",
     ) -> tuple[Task, ...]: ...
 
+    def calendar_overview(
+        self,
+        starts_at: datetime,
+        ends_at: datetime,
+        day_ranges: tuple[tuple[datetime, datetime], ...],
+        *,
+        search: str = "",
+        preview_limit: int = 60,
+    ) -> CalendarRepositoryOverview: ...
+
     def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None: ...
 
     def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence: ...
@@ -216,6 +249,9 @@ class TaskRepository(Protocol):
 
 
 class TaskService:
+    CALENDAR_PREVIEW_LIMIT = 60
+    CALENDAR_SUMMARY_THRESHOLD = 120
+
     def __init__(self, repository: TaskRepository, *, timezone: str = "Asia/Seoul") -> None:
         self._repository = repository
         self._timezone = timezone
@@ -451,14 +487,122 @@ class TaskService:
         zone = ZoneInfo(self._timezone)
         range_start = datetime.combine(start_date, time.min, tzinfo=zone).astimezone(UTC)
         range_end = datetime.combine(end_date, time.min, tzinfo=zone).astimezone(UTC)
-        recurring_ids = tuple(
-            task.id for task in templates if task.recurrence_rule and task.id is not None
+        regular = tuple(
+            ScheduledTask(task, task.starts_at, task.ends_at)
+            for task in templates
+            if task.starts_at is not None and not task.recurrence_rule
         )
+        recurring = self._expand_recurring_templates(
+            tuple(task for task in templates if task.recurrence_rule),
+            range_start,
+            range_end,
+        )
+        return tuple(
+            sorted(
+                (*regular, *recurring),
+                key=lambda item: (
+                    item.starts_at,
+                    not item.task.is_pinned,
+                    item.task.title.casefold(),
+                    item.task.id or 0,
+                ),
+            )
+        )
+
+    def calendar_overview(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        search: str = "",
+        preview_limit: int = CALENDAR_PREVIEW_LIMIT,
+        summary_threshold: int = CALENDAR_SUMMARY_THRESHOLD,
+    ) -> CalendarOverview:
+        """Return exact day counts and bounded previews for a visible calendar range."""
+        if end_date <= start_date:
+            raise ValueError("캘린더 종료일은 시작일보다 늦어야 합니다.")
+        if preview_limit < 1:
+            raise ValueError("캘린더 미리보기 개수는 1개 이상이어야 합니다.")
+        if summary_threshold < 1:
+            raise ValueError("캘린더 요약 기준은 1개 이상이어야 합니다.")
+
+        zone = ZoneInfo(self._timezone)
+        days = tuple(
+            start_date + timedelta(days=offset)
+            for offset in range((end_date - start_date).days)
+        )
+        day_ranges = tuple(
+            (
+                datetime.combine(day, time.min, tzinfo=zone).astimezone(UTC),
+                datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone).astimezone(
+                    UTC
+                ),
+            )
+            for day in days
+        )
+        range_start = day_ranges[0][0]
+        range_end = day_ranges[-1][1]
+        source = self._repository.calendar_overview(
+            range_start,
+            range_end,
+            day_ranges,
+            search=search,
+            preview_limit=preview_limit,
+        )
+        counts = list(source.regular_day_counts)
+        recurring = self._expand_recurring_templates(
+            source.recurrence_templates,
+            range_start,
+            range_end,
+        )
+        for scheduled in recurring:
+            span = self._scheduled_local_span(scheduled, zone)
+            if span is None:
+                continue
+            first = max(span[0], start_date)
+            last = min(span[1], end_date - timedelta(days=1))
+            for offset in range((last - first).days + 1):
+                counts[(first + timedelta(days=offset) - start_date).days] += 1
+
+        total = source.regular_total + len(recurring)
+        summary_mode = total > summary_threshold
+        previews: tuple[ScheduledTask, ...] = ()
+        if not summary_mode:
+            regular = tuple(
+                ScheduledTask(task, task.starts_at, task.ends_at)
+                for task in source.regular_previews
+                if task.starts_at is not None
+            )
+            previews = tuple(
+                sorted(
+                    (*regular, *recurring),
+                    key=lambda item: (
+                        item.starts_at,
+                        not item.task.is_pinned,
+                        item.task.title.casefold(),
+                        item.task.id or 0,
+                    ),
+                )[:preview_limit]
+            )
+        return CalendarOverview(
+            preview_tasks=previews,
+            day_counts=tuple(zip(days, counts, strict=True)),
+            total=total,
+            summary_mode=summary_mode,
+        )
+
+    def _expand_recurring_templates(
+        self,
+        templates: tuple[Task, ...],
+        range_start: datetime,
+        range_end: datetime,
+    ) -> tuple[ScheduledTask, ...]:
+        recurring_ids = tuple(task.id for task in templates if task.id is not None)
         longest_duration = max(
             (
                 task.ends_at - task.starts_at
                 for task in templates
-                if task.recurrence_rule and task.starts_at and task.ends_at
+                if task.starts_at and task.ends_at
             ),
             default=timedelta(0),
         )
@@ -470,10 +614,7 @@ class TaskService:
         }
         scheduled: list[ScheduledTask] = []
         for task in templates:
-            if task.starts_at is None:
-                continue
-            if not task.recurrence_rule or task.id is None:
-                scheduled.append(ScheduledTask(task, task.starts_at, task.ends_at))
+            if task.id is None or task.starts_at is None or not task.recurrence_rule:
                 continue
             for occurrence_start, occurrence_end in expand_recurrence(
                 task.recurrence_rule,
@@ -501,17 +642,17 @@ class TaskService:
                         completed_at=occurrence.completed_at if occurrence else None,
                     )
                 )
-        return tuple(
-            sorted(
-                scheduled,
-                key=lambda item: (
-                    item.starts_at,
-                    not item.task.is_pinned,
-                    item.task.title.casefold(),
-                    item.task.id or 0,
-                ),
-            )
-        )
+        return tuple(scheduled)
+
+    @staticmethod
+    def _scheduled_local_span(
+        scheduled: ScheduledTask, zone: ZoneInfo
+    ) -> tuple[date, date] | None:
+        start_day = scheduled.starts_at.astimezone(zone).date()
+        if scheduled.ends_at is None:
+            return start_day, start_day
+        inclusive_end = scheduled.ends_at.astimezone(zone) - timedelta(microseconds=1)
+        return start_day, max(start_day, inclusive_end.date())
 
     def transition_occurrence(
         self,

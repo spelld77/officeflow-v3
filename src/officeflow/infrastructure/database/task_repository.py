@@ -3,9 +3,27 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, and_, case, func, literal_column, or_, select, text
+from sqlalchemy import (
+    Select,
+    and_,
+    case,
+    func,
+    literal,
+    literal_column,
+    or_,
+    select,
+    text,
+    union_all,
+)
 
-from officeflow.application.tasks import TaskGroup, TaskPage, TaskQuery, TaskSort, TaskView
+from officeflow.application.tasks import (
+    CalendarRepositoryOverview,
+    TaskGroup,
+    TaskPage,
+    TaskQuery,
+    TaskSort,
+    TaskView,
+)
 from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.recurrence import recurrence_until_utc
@@ -192,6 +210,98 @@ class SqlAlchemyTaskRepository:
                 self._to_domain(record, has_attachments=bool(has_attachments))
                 for record, has_attachments in session.execute(statement).all()
             )
+
+    def calendar_overview(
+        self,
+        starts_at: datetime,
+        ends_at: datetime,
+        day_ranges: tuple[tuple[datetime, datetime], ...],
+        *,
+        search: str = "",
+        preview_limit: int = 60,
+    ) -> CalendarRepositoryOverview:
+        if ends_at <= starts_at or not day_ranges:
+            raise ValueError("캘린더 조회 범위가 올바르지 않습니다.")
+        common: list[Any] = [
+            TaskRecord.deleted_at.is_(None),
+            TaskRecord.status != TaskStatus.ARCHIVED.value,
+            TaskRecord.starts_at.is_not(None),
+        ]
+        normalized = search.strip()
+        if normalized:
+            common.append(self._search_predicate(normalized))
+        regular = [
+            *common,
+            TaskRecord.recurrence_rule.is_(None),
+            TaskRecord.starts_at < ends_at,
+            or_(
+                TaskRecord.ends_at > starts_at,
+                and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at >= starts_at),
+            ),
+        ]
+        attachment_exists = self._attachment_exists()
+        preview_statement = (
+            select(TaskRecord, attachment_exists)
+            .where(*regular)
+            .order_by(
+                TaskRecord.is_pinned.desc(),
+                TaskRecord.starts_at.asc(),
+                TaskRecord.ends_at.asc(),
+                TaskRecord.id.asc(),
+            )
+            .limit(preview_limit)
+        )
+        count_statements = [
+            select(
+                literal(index).label("day_index"),
+                func.count(TaskRecord.id).label("total"),
+            ).where(
+                *common,
+                TaskRecord.recurrence_rule.is_(None),
+                TaskRecord.starts_at < day_end,
+                or_(
+                    TaskRecord.ends_at > day_start,
+                    and_(
+                        TaskRecord.ends_at.is_(None),
+                        TaskRecord.starts_at >= day_start,
+                    ),
+                ),
+            )
+            for index, (day_start, day_end) in enumerate(day_ranges)
+        ]
+        recurrence_statement = (
+            select(TaskRecord, attachment_exists)
+            .where(
+                *common,
+                TaskRecord.recurrence_rule.is_not(None),
+                TaskRecord.starts_at < ends_at,
+                or_(
+                    TaskRecord.recurrence_until.is_(None),
+                    TaskRecord.recurrence_until >= starts_at,
+                ),
+            )
+            .order_by(TaskRecord.starts_at, TaskRecord.id)
+        )
+        with self._sessions.transaction() as session:
+            regular_total = int(session.scalar(select(func.count(TaskRecord.id)).where(*regular)) or 0)
+            regular_previews = tuple(
+                self._to_domain(record, has_attachments=bool(has_attachments))
+                for record, has_attachments in session.execute(preview_statement).all()
+            )
+            count_rows = session.execute(union_all(*count_statements)).all()
+            recurrence_templates = tuple(
+                self._to_domain(record, has_attachments=bool(has_attachments))
+                for record, has_attachments in session.execute(recurrence_statement).all()
+            )
+        counts = [0] * len(day_ranges)
+        for day_index, total in count_rows:
+            counts[int(day_index)] = int(total)
+        return CalendarRepositoryOverview(
+            regular_previews=regular_previews,
+            regular_day_counts=tuple(counts),
+            regular_total=regular_total,
+            recurrence_templates=recurrence_templates,
+        )
 
     def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None:
         statement = select(TaskOccurrenceRecord).where(

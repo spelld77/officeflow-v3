@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from PySide6.QtCore import Qt
 from pytestqt.qtbot import QtBot
 
-from officeflow.application.tasks import ScheduledTask
+from officeflow.application.tasks import CalendarOverview, ScheduledTask
 from officeflow.domain.enums import TaskPriority
 from officeflow.domain.task import Task
 from officeflow.presentation.month_calendar import (
@@ -166,3 +166,25 @@ def test_calendar_day_list_marks_attachment_and_supports_context_menu(qtbot: QtB
         page._show_day_item_context_menu(item_rect.center())
 
     assert blocker.args[0] == scheduled
+
+
+def test_dense_calendar_uses_exact_count_summary(qtbot: QtBot) -> None:
+    page = CalendarPage(timezone="Asia/Seoul")
+    qtbot.addWidget(page)
+    page.calendar.set_month(2026, 9)
+    page.calendar.set_selected_date(date(2026, 9, 17))
+    page.set_overview(
+        CalendarOverview(
+            preview_tasks=(),
+            day_counts=((date(2026, 9, 17), 143),),
+            total=143,
+            summary_mode=True,
+        )
+    )
+    page.resize(720, 500)
+    page.show()
+    page.calendar.grab()
+
+    assert page.summary_label.isVisible()
+    assert page.calendar._task_hits == []
+    assert any(day == date(2026, 9, 17) for _rect, day in page.calendar._more_hits)
