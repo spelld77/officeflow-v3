@@ -69,6 +69,7 @@ from officeflow.presentation.task_list import (
     LoadMoreRow,
     TaskItemDelegate,
     TaskListModel,
+    format_snoozed_time,
     format_task_schedule,
 )
 from officeflow.presentation.theme import LIGHT_STYLESHEET
@@ -146,6 +147,7 @@ class MainWindow(QMainWindow):
         self._calendar_active = False
         self._selected_task_id: int | None = None
         self._selected_occurrence_start: datetime | None = None
+        self._active_snoozes: dict[tuple[int, datetime | None], datetime] = {}
         self._compact_navigation = False
         self._collapsed_groups = {
             group for group in TaskGroup if group.value in settings.collapsed_today_groups
@@ -689,6 +691,7 @@ class MainWindow(QMainWindow):
                 page = self._task_service.query(self._build_query(offset=0))
                 self._task_model.set_page(page, self._load_flat_page)
                 total = page.total
+            self._refresh_snoozed_indicators()
             self._task_list.setVisible(total > 0)
             self._empty_panel.setVisible(total == 0)
             self._empty_description.setText(
@@ -712,6 +715,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_calendar(self, _year: int | None = None, _month: int | None = None) -> None:
         try:
+            self._refresh_snoozed_indicators()
             start_date, end_date = self._calendar_page.visible_date_range
             overview = self._task_service.calendar_overview(
                 start_date,
@@ -1477,6 +1481,12 @@ class MainWindow(QMainWindow):
                     self._detail_schedule.setText(
                         f"{self._detail_schedule.text()}\n알림: {reminder_text}"
                     )
+            snoozed_until = self._snoozed_until_for_task(task)
+            if snoozed_until is not None:
+                self._detail_schedule.setText(
+                    f"{self._detail_schedule.text()}\n다시 알림: "
+                    f"{format_snoozed_time(snoozed_until, task.timezone, long=True)}"
+                )
         self._detail_description.setText(task.description or "설명이 없습니다.")
         self._edit_button.setEnabled(not deleted)
         self._detail_records_button.setEnabled(self._record_service is not None)
@@ -1567,6 +1577,7 @@ class MainWindow(QMainWindow):
             alerts = self._reminder_service.poll_due(
                 grace_minutes=self._settings.missed_reminder_grace_minutes
             )
+            self._refresh_snoozed_indicators()
         except Exception:
             logger.exception("알림을 확인하지 못했습니다.")
             self.statusBar().showMessage("알림 확인 중 문제가 발생했습니다.", 4000)
@@ -1594,6 +1605,43 @@ class MainWindow(QMainWindow):
         )
         self._reminder_dialog.finished.connect(lambda _result: self._clear_reminder_dialog())
         self._reminder_dialog.present()
+
+    def _refresh_snoozed_indicators(self) -> None:
+        reminders: dict[tuple[int, datetime | None], datetime] = {}
+        if self._reminder_service is not None:
+            for delivery in self._reminder_service.active_snoozes():
+                if delivery.snoozed_until is None:
+                    continue
+                key = (delivery.task_id, delivery.occurrence_start)
+                existing = reminders.get(key)
+                if existing is None or delivery.snoozed_until < existing:
+                    reminders[key] = delivery.snoozed_until
+        self._active_snoozes = reminders
+        self._task_model.set_snoozed_reminders(reminders)
+        self._calendar_page.set_snoozed_reminders(reminders)
+
+    def _snoozed_until_for_task(self, task: Task) -> datetime | None:
+        if task.id is None:
+            return None
+        occurrence_start = (
+            self._selected_occurrence_start
+            if task.recurrence_rule
+            else task.starts_at
+        )
+        exact = self._active_snoozes.get((task.id, occurrence_start))
+        if exact is not None:
+            return exact
+        without_occurrence = self._active_snoozes.get((task.id, None))
+        if without_occurrence is not None:
+            return without_occurrence
+        if task.recurrence_rule:
+            return None
+        candidates = (
+            due
+            for (task_id, _occurrence), due in self._active_snoozes.items()
+            if task_id == task.id
+        )
+        return min(candidates, default=None)
 
     def _show_system_reminder(self, alerts: tuple[ReminderAlert, ...]) -> None:
         if self._tray_icon is None or not self._tray_icon.isVisible():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from PySide6.QtCore import QModelIndex, Qt
@@ -124,3 +125,30 @@ def test_attached_task_tooltip_exposes_attachment_indicator() -> None:
     tooltip = model.data(model.index(0, 0), Qt.ItemDataRole.ToolTipRole)
 
     assert "첨부파일 있음" in str(tooltip)
+
+
+def test_snoozed_reminder_role_matches_only_the_recurrence_occurrence() -> None:
+    first = replace(make_task(1), id=7, recurrence_rule="FREQ=DAILY")
+    assert first.starts_at is not None
+    assert first.ends_at is not None
+    second = replace(
+        first,
+        starts_at=first.starts_at + timedelta(days=1),
+        ends_at=first.ends_at + timedelta(days=1),
+    )
+    first_due = NOW + timedelta(hours=1)
+    second_due = NOW + timedelta(days=1, hours=1)
+    model = TaskListModel()
+    model.set_tasks([first, second])
+    model.set_snoozed_reminders(
+        {
+            (7, first.starts_at): first_due,
+            (7, second.starts_at): second_due,
+        }
+    )
+
+    assert model.data(model.index(0, 0), model.SNOOZED_UNTIL_ROLE) == first_due
+    assert model.data(model.index(1, 0), model.SNOOZED_UNTIL_ROLE) == second_due
+    assert "다시 알림" in str(
+        model.data(model.index(0, 0), Qt.ItemDataRole.ToolTipRole)
+    )

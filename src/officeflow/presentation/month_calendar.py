@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from officeflow.application.tasks import CalendarOverview, ScheduledTask
 from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.presentation.task_list import format_snoozed_time
 
 WEEKDAY_LABELS = ("일", "월", "화", "수", "목", "금", "토")
 MONTH_LABELS = tuple(f"{month}월" for month in range(1, 13))
@@ -498,6 +500,7 @@ class CalendarPage(QFrame):
         self._tasks: tuple[ScheduledTask, ...] = ()
         self._day_tasks: tuple[ScheduledTask, ...] = ()
         self._selected_task: ScheduledTask | None = None
+        self._snoozed_until: dict[tuple[int, datetime | None], datetime] = {}
         self.setObjectName("calendarCard")
 
         self._layout = QVBoxLayout(self)
@@ -606,6 +609,12 @@ class CalendarPage(QFrame):
 
     def set_day_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
         self._day_tasks = tasks
+        self._refresh_day_list()
+
+    def set_snoozed_reminders(
+        self, reminders: Mapping[tuple[int, datetime | None], datetime]
+    ) -> None:
+        self._snoozed_until = dict(reminders)
         self._refresh_day_list()
 
     def set_compact(self, compact: bool) -> None:
@@ -728,7 +737,32 @@ class CalendarPage(QFrame):
         done = "✓ " if task.status is TaskStatus.COMPLETED else ""
         repeat = "반복 · " if task.occurrence_start is not None else ""
         attachment = " · 첨부" if task.has_attachments else ""
-        return f"{time_label}  ·  {repeat}{pin}{done}{task.title}{attachment}"
+        snoozed_until = self._snoozed_until_for_task(task)
+        snooze = (
+            f" · ⏰ 재알림 {format_snoozed_time(snoozed_until, self._timezone)}"
+            if snoozed_until is not None
+            else ""
+        )
+        return f"{time_label}  ·  {repeat}{pin}{done}{task.title}{attachment}{snooze}"
+
+    def _snoozed_until_for_task(self, task: ScheduledTask) -> datetime | None:
+        if task.id is None:
+            return None
+        occurrence_start = task.occurrence_start or task.starts_at
+        exact = self._snoozed_until.get((task.id, occurrence_start))
+        if exact is not None:
+            return exact
+        without_occurrence = self._snoozed_until.get((task.id, None))
+        if without_occurrence is not None:
+            return without_occurrence
+        if task.occurrence_start is not None:
+            return None
+        candidates = (
+            due
+            for (task_id, _occurrence), due in self._snoozed_until.items()
+            if task_id == task.id
+        )
+        return min(candidates, default=None)
 
 
 def _days_in_month(year: int, month: int) -> int:

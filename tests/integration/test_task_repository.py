@@ -270,12 +270,14 @@ def test_reminder_delivery_history_prevents_duplicate_after_repository_restart(
         10,
         now=start + timedelta(minutes=1),
     )
+    assert restarted.active_snoozes() == (snoozed,)
     refired = restarted.poll_due(now=start + timedelta(minutes=11))
 
     assert duplicate == ()
     assert snoozed.snoozed_until == start + timedelta(minutes=11)
     assert len(refired) == 1
     assert refired[0].delivery.id == first[0].delivery.id
+    assert restarted.active_snoozes() == ()
     engine.dispose()
 
 

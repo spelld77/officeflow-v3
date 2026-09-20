@@ -184,6 +184,22 @@ class InMemoryReminderRepository(ReminderRepository):
             and (target := self.get_reminder_target(delivery.reminder_id)) is not None
         )
 
+    def list_active_snoozed_deliveries(self) -> tuple[ReminderDelivery, ...]:
+        return tuple(
+            delivery
+            for delivery in sorted(
+                self.deliveries.values(),
+                key=lambda item: (item.snoozed_until or item.updated_at, item.id or 0),
+            )
+            if delivery.status is ReminderDeliveryStatus.SNOOZED
+            and delivery.snoozed_until is not None
+            and (reminder := self.reminders.get(delivery.reminder_id)) is not None
+            and reminder.enabled
+            and (task := self.tasks.tasks.get(delivery.task_id)) is not None
+            and task.deleted_at is None
+            and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+        )
+
 
 def build_services() -> tuple[TaskService, ReminderService, InMemoryReminderRepository]:
     task_repository = InMemoryTaskRepository()
@@ -338,10 +354,12 @@ def test_snoozed_reminder_refires_and_can_defer_task() -> None:
         now=datetime(2026, 9, 14, 1, 0, tzinfo=UTC),
     )
     assert snoozed.snoozed_until == datetime(2026, 9, 14, 1, 10, tzinfo=UTC)
+    assert reminder_service.active_snoozes() == (snoozed,)
     assert reminder_service.poll_due(now=datetime(2026, 9, 14, 1, 9, tzinfo=UTC)) == ()
     refired = reminder_service.poll_due(now=datetime(2026, 9, 14, 1, 10, tzinfo=UTC))
     assert len(refired) == 1
     assert refired[0].delivery.last_fired_at == datetime(2026, 9, 14, 1, 10, tzinfo=UTC)
+    assert reminder_service.active_snoozes() == ()
 
     reminder_service.defer(alert.delivery.id, now=datetime(2026, 9, 14, 1, 11, tzinfo=UTC))
 

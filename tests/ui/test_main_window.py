@@ -40,7 +40,7 @@ from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.presentation.main_window import MainWindow
-from officeflow.presentation.task_list import GroupHeader
+from officeflow.presentation.task_list import GroupHeader, TaskListModel
 from tests.unit.test_attachment_service import InMemoryAttachmentRepository
 from tests.unit.test_record_service import InMemoryRecordRepository
 from tests.unit.test_reminder_service import InMemoryReminderRepository
@@ -550,6 +550,19 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
     assert delivery.snoozed_until == delivery.updated_at + timedelta(minutes=35)
     local_due = delivery.snoozed_until.astimezone(ZoneInfo("Asia/Seoul"))
     assert f"{local_due:%m월 %d일 %H:%M}" in window.statusBar().currentMessage()
+    index = window._task_model.index_for_task(task.id)
+    assert index.isValid()
+    assert (
+        window._task_model.data(index, TaskListModel.SNOOZED_UNTIL_ROLE)
+        == delivery.snoozed_until
+    )
+    window._task_list.setCurrentIndex(index)
+    assert f"다시 알림: {local_due:%Y.%m.%d %H:%M}" in window._detail_schedule.text()
+    window._show_calendar()
+    assert any(
+        "재알림" in window._calendar_page.day_list.item(row).text()
+        for row in range(window._calendar_page.day_list.count())
+    )
 
 
 def test_reminder_actions_immediately_refresh_current_view(qtbot: QtBot) -> None:

@@ -54,6 +54,7 @@ class _GroupState:
 class TaskListModel(QAbstractListModel):
     TASK_ROLE = Qt.ItemDataRole.UserRole + 1
     ENTRY_ROLE = Qt.ItemDataRole.UserRole + 2
+    SNOOZED_UNTIL_ROLE = Qt.ItemDataRole.UserRole + 3
     PAGE_SIZE = 50
     GROUP_LABELS: ClassVar[dict[TaskGroup, str]] = {
         TaskGroup.OVERDUE: "처리 필요",
@@ -71,6 +72,7 @@ class TaskListModel(QAbstractListModel):
         self._groups: dict[TaskGroup, _GroupState] = {}
         self._group_loader: GroupPageLoader | None = None
         self._grouped = False
+        self._snoozed_until: dict[tuple[int, datetime | None], datetime] = {}
 
     def rowCount(
         self,
@@ -93,9 +95,17 @@ class TaskListModel(QAbstractListModel):
                 return entry.title
             if role == Qt.ItemDataRole.ToolTipRole:
                 attachment = "\n첨부파일 있음" if entry.has_attachments else ""
-                return f"{entry.description or entry.title}{attachment}"
+                snoozed_until = self.snoozed_until_for_task(entry)
+                snooze = (
+                    f"\n다시 알림: {format_snoozed_time(snoozed_until, entry.timezone, long=True)}"
+                    if snoozed_until is not None
+                    else ""
+                )
+                return f"{entry.description or entry.title}{attachment}{snooze}"
             if role == self.TASK_ROLE:
                 return entry
+            if role == self.SNOOZED_UNTIL_ROLE:
+                return self.snoozed_until_for_task(entry)
         elif isinstance(entry, GroupHeader) and role == Qt.ItemDataRole.DisplayRole:
             return f"{entry.label} ({entry.total})"
         elif isinstance(entry, LoadMoreRow) and role == Qt.ItemDataRole.DisplayRole:
@@ -104,6 +114,35 @@ class TaskListModel(QAbstractListModel):
 
     def set_tasks(self, tasks: list[Task]) -> None:
         self.set_page(TaskPage(tuple(tasks), len(tasks), 0, None))
+
+    def set_snoozed_reminders(
+        self, reminders: Mapping[tuple[int, datetime | None], datetime]
+    ) -> None:
+        self._snoozed_until = dict(reminders)
+        if self._rows:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._rows) - 1, 0),
+                [self.SNOOZED_UNTIL_ROLE, Qt.ItemDataRole.ToolTipRole],
+            )
+
+    def snoozed_until_for_task(self, task: Task) -> datetime | None:
+        if task.id is None:
+            return None
+        exact = self._snoozed_until.get((task.id, task.starts_at))
+        if exact is not None:
+            return exact
+        without_occurrence = self._snoozed_until.get((task.id, None))
+        if without_occurrence is not None:
+            return without_occurrence
+        if task.recurrence_rule:
+            return None
+        candidates = (
+            due
+            for (task_id, _occurrence_start), due in self._snoozed_until.items()
+            if task_id == task.id
+        )
+        return min(candidates, default=None)
 
     def set_page(self, page: TaskPage, loader: PageLoader | None = None) -> None:
         self.beginResetModel()
@@ -291,7 +330,13 @@ class TaskItemDelegate(QStyledItemDelegate):
         if not isinstance(entry, Task):
             super().paint(painter, option, index)
             return
-        self._paint_task(painter, option, entry)
+        snoozed_until = index.data(TaskListModel.SNOOZED_UNTIL_ROLE)
+        self._paint_task(
+            painter,
+            option,
+            entry,
+            snoozed_until if isinstance(snoozed_until, datetime) else None,
+        )
 
     def _paint_group_header(
         self, painter: QPainter, option: QStyleOptionViewItem, header: GroupHeader
@@ -326,7 +371,13 @@ class TaskItemDelegate(QStyledItemDelegate):
         )
         painter.restore()
 
-    def _paint_task(self, painter: QPainter, option: QStyleOptionViewItem, task: Task) -> None:
+    def _paint_task(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        task: Task,
+        snoozed_until: datetime | None,
+    ) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(option.rect.adjusted(4, 3, -4, -3))
@@ -392,11 +443,15 @@ class TaskItemDelegate(QStyledItemDelegate):
                 else "#172033"
             )
         )
-        title = (
-            f"{format_task_schedule_compact(task)}  ·  {task.title}"
-            if self._compact
-            else task.title
-        )
+        if self._compact:
+            snooze = (
+                f"  ·  ⏰ {format_snoozed_time(snoozed_until, task.timezone)}"
+                if snoozed_until is not None
+                else ""
+            )
+            title = f"{format_task_schedule_compact(task)}{snooze}  ·  {task.title}"
+        else:
+            title = task.title
         painter.drawText(
             title_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -411,10 +466,18 @@ class TaskItemDelegate(QStyledItemDelegate):
             meta_font.setPointSize(max(8, option.font.pointSize() - 1))
             painter.setFont(meta_font)
             painter.setPen(QColor("#68738A"))
+            meta = format_task_schedule(task)
+            if snoozed_until is not None:
+                meta += (
+                    "  ·  ⏰ 재알림 "
+                    + format_snoozed_time(snoozed_until, task.timezone)
+                )
             painter.drawText(
                 meta_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                format_task_schedule(task),
+                option.fontMetrics.elidedText(
+                    meta, Qt.TextElideMode.ElideRight, meta_rect.width()
+                ),
             )
 
         status_top = rect.top() + (7 if self._compact else 12)
@@ -519,3 +582,11 @@ def format_task_schedule_compact(task: Task) -> str:
     if task.all_day:
         return "종일" if start.date() == today else start.strftime("%m.%d 종일")
     return start.strftime("%H:%M" if start.date() == today else "%m.%d %H:%M")
+
+
+def format_snoozed_time(value: datetime, timezone: str, *, long: bool = False) -> str:
+    local = value.astimezone(ZoneInfo(timezone))
+    if long:
+        return local.strftime("%Y.%m.%d %H:%M")
+    today = datetime.now(ZoneInfo(timezone)).date()
+    return local.strftime("%H:%M" if local.date() == today else "%m.%d %H:%M")

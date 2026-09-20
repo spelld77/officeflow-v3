@@ -78,6 +78,8 @@ class ReminderRepository(Protocol):
         self, due_at: datetime
     ) -> tuple[tuple[ReminderDelivery, ReminderTarget], ...]: ...
 
+    def list_active_snoozed_deliveries(self) -> tuple[ReminderDelivery, ...]: ...
+
 
 class ReminderService:
     def __init__(self, repository: ReminderRepository, task_service: TaskService) -> None:
@@ -94,6 +96,10 @@ class ReminderService:
             )
             for reminder in self._repository.list_reminders(task_id)
         )
+
+    def active_snoozes(self) -> tuple[ReminderDelivery, ...]:
+        """Return pending snoozes that should remain visible to the user."""
+        return self._repository.list_active_snoozed_deliveries()
 
     def replace_rules(
         self,
