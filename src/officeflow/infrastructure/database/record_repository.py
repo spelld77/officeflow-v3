@@ -104,12 +104,17 @@ class SqlAlchemyRecordRepository:
         log_date: date | None = None,
         task_id: int | None = None,
         search: str = "",
+        occurrence_id: int | None = None,
+        occurrence_only: bool = False,
+        limit: int | None = None,
     ) -> tuple[WorkLog, ...]:
         statement = select(WorkLogRecord)
         if log_date is not None:
             statement = statement.where(WorkLogRecord.log_date == log_date)
         if task_id is not None:
             statement = statement.where(WorkLogRecord.task_id == task_id)
+        if occurrence_only:
+            statement = statement.where(WorkLogRecord.occurrence_id == occurrence_id)
         normalized = search.strip()
         if normalized:
             statement = statement.where(self._work_log_search_predicate(normalized))
@@ -118,6 +123,8 @@ class SqlAlchemyRecordRepository:
             WorkLogRecord.updated_at.desc(),
             WorkLogRecord.id.desc(),
         )
+        if limit is not None:
+            statement = statement.limit(limit)
         with self._sessions.transaction() as session:
             return tuple(self._to_work_log(record) for record in session.scalars(statement).all())
 
@@ -156,6 +163,43 @@ class SqlAlchemyRecordRepository:
                 self._to_work_log(record) for record in session.scalars(statement).all()
             )
         return WorkLogPage(items=items, total=total, offset=offset, limit=limit)
+
+    def has_duplicate_work_log(
+        self,
+        *,
+        task_id: int | None,
+        log_date: date,
+        content: str,
+        exclude_log_id: int | None = None,
+    ) -> bool:
+        statement = select(WorkLogRecord.id).where(
+            WorkLogRecord.log_date == log_date,
+            WorkLogRecord.content == content,
+            (
+                WorkLogRecord.task_id.is_(None)
+                if task_id is None
+                else WorkLogRecord.task_id == task_id
+            ),
+        )
+        if exclude_log_id is not None:
+            statement = statement.where(WorkLogRecord.id != exclude_log_id)
+        with self._sessions.transaction() as session:
+            return session.scalar(statement.limit(1)) is not None
+
+    def count_work_logs(self, task_ids: tuple[int, ...]) -> dict[int, int]:
+        if not task_ids:
+            return {}
+        statement = (
+            select(WorkLogRecord.task_id, func.count(WorkLogRecord.id))
+            .where(WorkLogRecord.task_id.in_(task_ids))
+            .group_by(WorkLogRecord.task_id)
+        )
+        with self._sessions.transaction() as session:
+            return {
+                int(task_id): int(count)
+                for task_id, count in session.execute(statement)
+                if task_id is not None
+            }
 
     @staticmethod
     def _work_log_search_predicate(search: str) -> Any:

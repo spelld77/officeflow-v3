@@ -537,9 +537,13 @@ class CalendarPage(QFrame):
         self.day_label = QLabel()
         self.day_label.setObjectName("calendarDayTitle")
         self.day_count = QLabel()
-        self.day_count.setObjectName("mutedText")
+        self.day_count.setObjectName("calendarDayCount")
         day_header.addWidget(self.day_label)
         day_header.addWidget(self.day_count)
+        self.day_more_hint = QLabel("↓ 목록을 스크롤해 전체 일정을 확인하세요")
+        self.day_more_hint.setObjectName("calendarDayMoreHint")
+        self.day_more_hint.hide()
+        day_header.addWidget(self.day_more_hint)
         day_header.addStretch()
         self.edit_button = QPushButton("선택 일정 수정")
         self.edit_button.setObjectName("calendarEdit")
@@ -551,6 +555,9 @@ class CalendarPage(QFrame):
         self.day_list.setObjectName("calendarDayList")
         self.day_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.day_list.setAlternatingRowColors(True)
+        self.day_list.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerItem
+        )
         self.day_list.setMaximumHeight(112)
         self.day_list.setMinimumHeight(70)
         self.day_list.setToolTip("일정을 더블 클릭하면 수정할 수 있습니다.")
@@ -654,7 +661,24 @@ class CalendarPage(QFrame):
             if task.id == selected_id:
                 self.day_list.setCurrentItem(item)
         self.day_label.setText(f"{self.selected_date.month}월 {self.selected_date.day}일")
-        self.day_count.setText(f"{len(items)}개 일정")
+        has_many = len(items) >= 3
+        self.day_count.setText(f"총 {len(items)}개 일정" if items else "일정 없음")
+        self.day_count.setProperty("hasMany", has_many)
+        self.day_count.style().unpolish(self.day_count)
+        self.day_count.style().polish(self.day_count)
+        self.day_more_hint.setVisible(has_many)
+        self.day_more_hint.setText(
+            f"↓ 스크롤해 총 {len(items)}개 일정을 모두 확인하세요"
+        )
+        self.day_list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+            if has_many
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.day_list.setAccessibleDescription(
+            f"선택한 날짜의 일정 {len(items)}개. "
+            + ("목록을 스크롤해 모두 확인하세요." if has_many else "")
+        )
         self.edit_button.setEnabled(self.day_list.currentItem() is not None)
 
     def _select_task(self, task: ScheduledTask) -> None:

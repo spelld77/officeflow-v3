@@ -50,6 +50,10 @@ class AppPaths:
         return self.root / "pending-restore.ofbackup"
 
     @property
+    def running_marker_file(self) -> Path:
+        return self.root / "officeflow.running"
+
+    @property
     def migration_report_dir(self) -> Path:
         return self.root / "migration-reports"
 

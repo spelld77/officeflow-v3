@@ -238,6 +238,8 @@ class TaskRepository(Protocol):
 
     def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None: ...
 
+    def get_occurrence_by_id(self, occurrence_id: int) -> TaskOccurrence | None: ...
+
     def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence: ...
 
     def list_occurrences(
@@ -323,12 +325,51 @@ class TaskService:
         task = self.get(task_id)
         return self._repository.update(task.transition_to(status, now=now or datetime.now(UTC)))
 
+    def complete(
+        self,
+        task_id: int,
+        *,
+        result_note: str | None = None,
+        now: datetime | None = None,
+    ) -> Task:
+        """Complete a regular task and persist its optional result in one write."""
+        current = now or datetime.now(UTC)
+        completed = self.get(task_id).transition_to(TaskStatus.COMPLETED, now=current)
+        if result_note is not None:
+            completed = completed.update_result_note(result_note, now=current)
+        return self._repository.update(completed)
+
     def result_note(self, task_id: int, occurrence_start: datetime | None = None) -> str:
         task = self.get_including_deleted(task_id)
         if occurrence_start is None:
             return task.result_note
         occurrence = self._repository.get_occurrence(task_id, occurrence_start)
         return occurrence.result_note if occurrence is not None else ""
+
+    def occurrence(
+        self,
+        task_id: int,
+        occurrence_start: datetime,
+    ) -> TaskOccurrence | None:
+        self.get_including_deleted(task_id)
+        return self._repository.get_occurrence(task_id, occurrence_start)
+
+    def occurrence_by_id(self, occurrence_id: int) -> TaskOccurrence | None:
+        occurrence = self._repository.get_occurrence_by_id(occurrence_id)
+        if occurrence is not None:
+            self.get_including_deleted(occurrence.task_id)
+        return occurrence
+
+    def ensure_occurrence(
+        self,
+        task_id: int,
+        occurrence_start: datetime,
+    ) -> TaskOccurrence:
+        task = self.get(task_id)
+        occurrence = self._validated_occurrence(task, occurrence_start)
+        if occurrence.id is not None:
+            return occurrence
+        return self._repository.save_occurrence(occurrence)
 
     def update_result_note(
         self,
@@ -344,26 +385,7 @@ class TaskService:
                 task.update_result_note(result_note, now=now or datetime.now(UTC))
             )
             return saved.result_note
-        if not task.recurrence_rule or task.starts_at is None:
-            raise ValueError("반복 업무의 발생 건만 개별 결과를 저장할 수 있습니다.")
-        expected = next_recurrence_start(
-            task.recurrence_rule,
-            template_start=task.starts_at,
-            timezone=task.timezone,
-            after=occurrence_start,
-            inclusive=True,
-        )
-        if expected != occurrence_start:
-            raise ValueError("반복 규칙에 포함되지 않은 발생 시각입니다.")
-        occurrence = self._repository.get_occurrence(task_id, occurrence_start)
-        if occurrence is None:
-            duration = task.ends_at - task.starts_at if task.ends_at is not None else None
-            occurrence = TaskOccurrence(
-                id=None,
-                task_id=task_id,
-                occurrence_start=occurrence_start,
-                occurrence_end=(occurrence_start + duration if duration is not None else None),
-            )
+        occurrence = self._validated_occurrence(task, occurrence_start)
         saved_occurrence = self._repository.save_occurrence(
             occurrence.update_result_note(result_note)
         )
@@ -383,6 +405,9 @@ class TaskService:
 
     def get_many_including_deleted(self, task_ids: tuple[int, ...]) -> dict[int, Task]:
         return self._repository.get_many(task_ids, include_deleted=True)
+
+    def get_many(self, task_ids: tuple[int, ...]) -> dict[int, Task]:
+        return self._repository.get_many(task_ids)
 
     def move_to_trash(self, task_id: int, *, now: datetime | None = None) -> Task:
         """Hide a task from active views while preserving its related data."""
@@ -664,7 +689,21 @@ class TaskService:
         result_note: str | None = None,
     ) -> TaskOccurrence:
         task = self.get(task_id)
-        if not task.recurrence_rule or task.starts_at is None:
+        occurrence = self._validated_occurrence(task, occurrence_start)
+        return self._repository.save_occurrence(
+            occurrence.transition(
+                status,
+                now=now or datetime.now(UTC),
+                result_note=result_note,
+            )
+        )
+
+    def _validated_occurrence(
+        self,
+        task: Task,
+        occurrence_start: datetime,
+    ) -> TaskOccurrence:
+        if task.id is None or not task.recurrence_rule or task.starts_at is None:
             raise ValueError("반복 업무의 발생 건만 개별 처리할 수 있습니다.")
         expected = next_recurrence_start(
             task.recurrence_rule,
@@ -675,21 +714,15 @@ class TaskService:
         )
         if expected != occurrence_start:
             raise ValueError("반복 규칙에 포함되지 않은 발생 시각입니다.")
-        occurrence = self._repository.get_occurrence(task_id, occurrence_start)
-        if occurrence is None:
-            duration = task.ends_at - task.starts_at if task.ends_at is not None else None
-            occurrence = TaskOccurrence(
-                id=None,
-                task_id=task_id,
-                occurrence_start=occurrence_start,
-                occurrence_end=(occurrence_start + duration if duration is not None else None),
-            )
-        return self._repository.save_occurrence(
-            occurrence.transition(
-                status,
-                now=now or datetime.now(UTC),
-                result_note=result_note,
-            )
+        occurrence = self._repository.get_occurrence(task.id, occurrence_start)
+        if occurrence is not None:
+            return occurrence
+        duration = task.ends_at - task.starts_at if task.ends_at is not None else None
+        return TaskOccurrence(
+            id=None,
+            task_id=task.id,
+            occurrence_start=occurrence_start,
+            occurrence_end=(occurrence_start + duration if duration is not None else None),
         )
 
     def next_occurrence(

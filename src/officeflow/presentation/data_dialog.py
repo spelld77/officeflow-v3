@@ -8,25 +8,29 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLayout,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from officeflow.application.attachments import AttachmentOperationError, AttachmentService
-from officeflow.application.exporting import ExportService
+from officeflow.application.exporting import CalendarExportResult, ExportService
 from officeflow.application.migration import LegacyMigration
 from officeflow.application.tasks import TaskQuery, TaskService
 from officeflow.domain.attachment import Attachment
@@ -38,6 +42,7 @@ from officeflow.infrastructure.backup import (
     DataUsageSnapshot,
     OrphanAttachmentFile,
 )
+from officeflow.presentation.calendar_export_dialog import CalendarExportDialog
 
 
 class OperationWorker(QObject):
@@ -83,6 +88,10 @@ class DataManagementDialog(QDialog):
         migration_service: LegacyMigration | None = None,
         attachment_service: AttachmentService | None = None,
         task_service: TaskService | None = None,
+        selected_task_ids: tuple[int, ...] = (),
+        automatic_backup_enabled: bool = True,
+        automatic_backup_interval_hours: int = 24,
+        automatic_backup_keep: int = 10,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -92,12 +101,17 @@ class DataManagementDialog(QDialog):
         self._migration_service = migration_service
         self._attachment_service = attachment_service
         self._task_service = task_service
+        self._selected_task_ids = selected_task_ids
+        self._automatic_backup_enabled = automatic_backup_enabled
+        self._automatic_backup_interval_hours = automatic_backup_interval_hours
+        self._automatic_backup_keep = automatic_backup_keep
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
         self._progress: QProgressDialog | None = None
         self._usage_loading = False
         self._cleanup_loaded = False
         self._refresh_usage_after_finish = False
+        self._tool_action_buttons: list[QPushButton] = []
 
         self.setWindowTitle("데이터 관리")
         self.setModal(True)
@@ -139,6 +153,7 @@ class DataManagementDialog(QDialog):
 
     def _build_usage_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setObjectName("dataManagementPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(10, 14, 10, 10)
         heading = QHBoxLayout()
@@ -184,9 +199,27 @@ class DataManagementDialog(QDialog):
         largest_card = QFrame()
         largest_card.setObjectName("contentCard")
         largest_layout = QVBoxLayout(largest_card)
-        largest_title = QLabel("용량이 큰 첨부파일")
-        largest_title.setStyleSheet("font-weight: 700;")
-        largest_layout.addWidget(largest_title)
+        largest_heading = QHBoxLayout()
+        self.usage_largest_title = QLabel("용량이 큰 첨부파일 (최대 5개)")
+        self.usage_largest_title.setStyleSheet("font-weight: 700;")
+        largest_heading.addWidget(self.usage_largest_title)
+        largest_heading.addStretch()
+        self.open_attachment_folder_button = QPushButton("첨부 저장 폴더 열기")
+        self.open_attachment_folder_button.setObjectName("openAttachmentFolderButton")
+        self.open_attachment_folder_button.setToolTip(
+            "내용 확인용입니다. 탐색기에서 파일을 이동·이름 변경·삭제하지 마세요."
+        )
+        self.open_attachment_folder_button.clicked.connect(
+            self._open_attachment_folder
+        )
+        largest_heading.addWidget(self.open_attachment_folder_button)
+        largest_layout.addLayout(largest_heading)
+        largest_note = QLabel(
+            "탐색기에서는 내부 파일명으로 보입니다. 파일 변경은 OfficeFlow에서 하세요."
+        )
+        largest_note.setObjectName("mutedText")
+        largest_note.setWordWrap(True)
+        largest_layout.addWidget(largest_note)
         self.usage_largest_label = QLabel("확인 중입니다.")
         self.usage_largest_label.setObjectName("dataUsageLargestFiles")
         self.usage_largest_label.setWordWrap(True)
@@ -198,8 +231,46 @@ class DataManagementDialog(QDialog):
         layout.addStretch()
         return tab
 
+    def _open_attachment_folder(self) -> None:
+        self._open_managed_directory(
+            self._backup_manager.attachment_directory,
+            title="첨부 저장 폴더",
+            success="첨부 저장 폴더를 열었습니다. 파일은 OfficeFlow에서 관리하세요.",
+        )
+
+    def _open_backup_folder(self) -> None:
+        self._open_managed_directory(
+            self._backup_manager.backup_directory,
+            title="백업 폴더",
+            success="백업 폴더를 열었습니다.",
+        )
+
+    def _open_managed_directory(
+        self,
+        directory: Path,
+        *,
+        title: str,
+        success: str,
+    ) -> None:
+        if not directory.is_dir():
+            QMessageBox.warning(
+                self,
+                f"{title}를 열 수 없습니다.",
+                f"{title}를 찾을 수 없습니다.",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+            QMessageBox.warning(
+                self,
+                f"{title}를 열 수 없습니다.",
+                "Windows 탐색기를 열지 못했습니다.",
+            )
+            return
+        self.status_label.setText(success)
+
     def _build_cleanup_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setObjectName("dataManagementPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(10, 14, 10, 10)
         heading = QHBoxLayout()
@@ -221,6 +292,9 @@ class DataManagementDialog(QDialog):
         layout.addWidget(description)
         self.cleanup_list = QListWidget()
         self.cleanup_list.setObjectName("attachmentCleanupList")
+        self.cleanup_list.setToolTip(
+            "업무에서 연결을 해제했거나 연결 정보가 없는 첨부파일입니다."
+        )
         self.cleanup_list.currentItemChanged.connect(self._cleanup_selection_changed)
         layout.addWidget(self.cleanup_list, 1)
         self.cleanup_detail_label = QLabel(
@@ -283,16 +357,25 @@ class DataManagementDialog(QDialog):
                         attachment.task_id
                     ).title
             label = (
-                f"{attachment.original_name} · {self._format_bytes(attachment.size_bytes)} "
+                f"복원 가능 · {attachment.original_name} "
+                f"· {self._format_bytes(attachment.size_bytes)} "
                 f"· {task_title}"
                 + (" · 30일 경과" if aged else "")
             )
             item = QListWidgetItem(label)
+            item.setToolTip(
+                f"원래 업무로 복원할 수 있습니다.\n"
+                f"파일: {attachment.original_name}\n업무: {task_title}"
+            )
             item.setData(Qt.ItemDataRole.UserRole, ("detached", attachment.id_required))
             self.cleanup_list.addItem(item)
         for orphan in result.orphaned:
             item = QListWidgetItem(
-                f"{orphan.name} · {self._format_bytes(orphan.size_bytes)} · 연결 정보 없음"
+                f"연결 정보 없음 · {orphan.name} "
+                f"· {self._format_bytes(orphan.size_bytes)}"
+            )
+            item.setToolTip(
+                "DB 연결 정보가 없어 OfficeFlow에서 원래 업무로 복원할 수 없습니다."
             )
             item.setData(Qt.ItemDataRole.UserRole, ("orphan", orphan.relative_path))
             item.setData(Qt.ItemDataRole.UserRole + 1, orphan)
@@ -325,12 +408,17 @@ class DataManagementDialog(QDialog):
         self.delete_cleanup_button.setEnabled(enabled)
         if kind == "orphan":
             self.cleanup_detail_label.setText(
-                "이 파일은 예전 방식으로 연결이 해제되어 업무 정보가 없습니다. "
-                "복원할 수 없으며 영구 삭제만 가능합니다."
+                "DB 연결 정보가 없어 어떤 업무의 파일인지 확인할 수 없습니다. "
+                "OfficeFlow에서 복원할 수 없으며 영구 삭제만 가능합니다."
             )
         elif kind == "detached":
             self.cleanup_detail_label.setText(
                 "원래 업무로 복원할 수 있습니다. 30일이 지나도 자동 삭제되지는 않습니다."
+            )
+        else:
+            self.cleanup_detail_label.setText(
+                "30일이 지나도 자동으로 삭제하지 않습니다. "
+                "삭제는 사용자가 직접 확인해야 합니다."
             )
 
     def _restore_cleanup_item(self) -> None:
@@ -383,14 +471,26 @@ class DataManagementDialog(QDialog):
 
     def _build_tools_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab.setObjectName("dataManagementPage")
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setObjectName("dataManagementScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        content = QWidget()
+        content.setObjectName("dataManagementPage")
+        layout = QVBoxLayout(content)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(10, 14, 10, 10)
         layout.setSpacing(10)
         layout.addWidget(
             self._section(
                 "내보내기",
-                "Excel은 현재 화면의 검색과 필터를 적용합니다. ICS는 모든 원본 일정과 반복 규칙을 포함합니다.",
-                (("현재 목록 Excel", self._export_excel), ("전체 일정 ICS", self._export_ics)),
+                "Excel은 현재 화면의 검색과 필터를 적용합니다. ICS는 현재 목록·선택 업무·기간 중에서 범위를 고를 수 있습니다.",
+                (("현재 목록 Excel", self._export_excel), ("일정 선택 ICS", self._export_ics)),
             )
         )
         if self._migration_service is not None:
@@ -401,15 +501,53 @@ class DataManagementDialog(QDialog):
                     (("2.6 데이터 가져오기", self._open_legacy_migration),),
                 )
             )
-        layout.addWidget(
-            self._section(
-                "백업 및 복원",
-                "DB·첨부파일·설정을 함께 검증합니다. 복원은 다음 실행 때 적용되며 현재 데이터는 먼저 자동 보관됩니다.",
-                (("지금 백업", self._create_backup), ("백업에서 복원", self._stage_restore)),
-            )
-        )
+        layout.addWidget(self._build_backup_section())
         layout.addStretch()
+        scroll.setWidget(content)
+        tab_layout.addWidget(scroll)
         return tab
+
+    def _build_backup_section(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName("contentCard")
+        layout = QVBoxLayout(card)
+        heading = QLabel("백업 및 복원")
+        heading.setStyleSheet("font-weight: 700;")
+        layout.addWidget(heading)
+        detail = QLabel(
+            "DB·첨부파일·설정을 함께 검증합니다. 수동 백업은 자동 백업 일정에 "
+            "영향을 주지 않으며 자동 삭제되지 않습니다."
+        )
+        detail.setObjectName("mutedText")
+        detail.setWordWrap(True)
+        layout.addWidget(detail)
+        self.backup_schedule_label = QLabel("자동 백업 시점을 확인하는 중입니다.")
+        self.backup_schedule_label.setObjectName("backupScheduleText")
+        self.backup_schedule_label.setWordWrap(True)
+        layout.addWidget(self.backup_schedule_label)
+        self.backup_inventory_label = QLabel("백업 파일 현황을 확인하는 중입니다.")
+        self.backup_inventory_label.setObjectName("mutedText")
+        self.backup_inventory_label.setWordWrap(True)
+        layout.addWidget(self.backup_inventory_label)
+
+        primary_actions = QHBoxLayout()
+        primary_actions.addWidget(self._tool_button("지금 백업", self._create_backup))
+        primary_actions.addWidget(
+            self._tool_button("백업에서 복원", self._stage_restore)
+        )
+        primary_actions.addStretch()
+        layout.addLayout(primary_actions)
+
+        management_actions = QHBoxLayout()
+        management_actions.addWidget(
+            self._tool_button("백업 폴더 열기", self._open_backup_folder)
+        )
+        management_actions.addWidget(
+            self._tool_button("오래된 수동 백업 정리", self._cleanup_manual_backups)
+        )
+        management_actions.addStretch()
+        layout.addLayout(management_actions)
+        return card
 
     def _open_legacy_migration(self) -> None:
         if self._migration_service is None:
@@ -438,12 +576,16 @@ class DataManagementDialog(QDialog):
         layout.addWidget(detail)
         row = QHBoxLayout()
         for label, callback in actions:
-            button = QPushButton(label)
-            button.clicked.connect(callback)
-            row.addWidget(button)
+            row.addWidget(self._tool_button(label, callback))
         row.addStretch()
         layout.addLayout(row)
         return card
+
+    def _tool_button(self, label: str, callback: Callable[[], None]) -> QPushButton:
+        button = QPushButton(label)
+        button.clicked.connect(callback)
+        self._tool_action_buttons.append(button)
+        return button
 
     def _refresh_usage(self) -> None:
         if self._thread is not None:
@@ -451,7 +593,7 @@ class DataManagementDialog(QDialog):
             return
         self._usage_loading = True
         self.usage_refresh_button.setEnabled(False)
-        self.tabs.setTabEnabled(self._tools_tab_index, False)
+        self._set_tool_actions_enabled(False)
         self.status_label.setText("저장 공간과 파일 연결 상태를 확인하는 중입니다...")
         self._start(
             "데이터 사용량을 확인하는 중입니다...",
@@ -483,6 +625,7 @@ class DataManagementDialog(QDialog):
             f"{result.detached_attachment_count:,}개 정리 대기)\n"
             f"백업  {self._format_bytes(result.backup_bytes)} ({result.backup_count:,}개)"
         )
+        self._update_backup_summary(result)
         issues: list[str] = []
         if result.missing_attachment_count:
             issues.append(f"파일 누락 {result.missing_attachment_count:,}개")
@@ -535,6 +678,40 @@ class DataManagementDialog(QDialog):
         )
         return "데이터 현황을 새로 확인했습니다."
 
+    def _update_backup_summary(self, result: DataUsageSnapshot) -> None:
+        other_count = max(
+            0,
+            result.backup_count
+            - result.manual_backup_count
+            - result.automatic_backup_count,
+        )
+        other_text = f" · 복원/가져오기 보호본 {other_count:,}개" if other_count else ""
+        self.backup_inventory_label.setText(
+            f"수동 {result.manual_backup_count:,}개 · "
+            f"자동 {result.automatic_backup_count:,}개"
+            f"(최대 {self._automatic_backup_keep:,}개 보관){other_text} · "
+            f"전체 {self._format_bytes(result.backup_bytes)}"
+        )
+        if not self._automatic_backup_enabled:
+            self.backup_schedule_label.setText("자동 백업이 꺼져 있습니다.")
+            return
+        latest = result.latest_automatic_backup_at
+        if latest is None:
+            self.backup_schedule_label.setText(
+                "최근 자동 백업이 없습니다. OfficeFlow 실행 중 다음 확인 시 백업합니다."
+            )
+            return
+        latest_local = latest.astimezone()
+        due_local = (
+            latest + timedelta(hours=self._automatic_backup_interval_hours)
+        ).astimezone()
+        due_prefix = "백업 예정" if due_local > datetime.now().astimezone() else "백업 기한 경과"
+        self.backup_schedule_label.setText(
+            f"최근 자동 백업 {latest_local:%Y-%m-%d %H:%M} · "
+            f"{due_prefix} {due_local:%Y-%m-%d %H:%M} 이후(15분 단위 확인)\n"
+            "해당 시각에 PC가 꺼져 있으면 다음 OfficeFlow 실행 후 자동 백업합니다."
+        )
+
     @staticmethod
     def _format_bytes(size_bytes: int) -> str:
         size = float(max(0, size_bytes))
@@ -560,8 +737,16 @@ class DataManagementDialog(QDialog):
         )
 
     def _export_ics(self) -> None:
+        options_dialog = CalendarExportDialog(
+            query=self._query,
+            selected_task_ids=self._selected_task_ids,
+            parent=self,
+        )
+        if options_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        options = options_dialog.options()
         name, _ = QFileDialog.getSaveFileName(
-            self, "전체 일정 내보내기", "OfficeFlow-일정.ics", "iCalendar (*.ics)"
+            self, "일정 내보내기", "OfficeFlow-일정.ics", "iCalendar (*.ics)"
         )
         if not name:
             return
@@ -569,9 +754,28 @@ class DataManagementDialog(QDialog):
         self._start(
             "일정 파일을 만드는 중입니다...",
             lambda canceled: self._export_service.export_calendar(
-                destination, cancel_requested=canceled
+                destination,
+                options=options,
+                cancel_requested=canceled,
             ),
-            lambda result: f"ICS 내보내기 완료: {result}",
+            self._calendar_export_message,
+        )
+
+    @staticmethod
+    def _calendar_export_message(result: object) -> str:
+        if not isinstance(result, CalendarExportResult):
+            return "ICS 내보내기를 완료했습니다."
+        exclusions: list[str] = []
+        if result.excluded_recurring_count:
+            exclusions.append(f"반복 일정 {result.excluded_recurring_count:,}개")
+        if result.excluded_completed_count:
+            exclusions.append(f"완료 업무 {result.excluded_completed_count:,}개")
+        if result.excluded_unscheduled_count:
+            exclusions.append(f"일정 없는 업무 {result.excluded_unscheduled_count:,}개")
+        suffix = f" · 제외: {', '.join(exclusions)}" if exclusions else ""
+        return (
+            f"ICS 내보내기 완료: 일정 {result.exported_count:,}개 · {result.path}"
+            f"{suffix}"
         )
 
     def _create_backup(self) -> None:
@@ -582,6 +786,56 @@ class DataManagementDialog(QDialog):
             ),
             self._backup_message,
         )
+
+    def _cleanup_manual_backups(self) -> None:
+        backups = self._backup_manager.list_manual_backups()
+        if len(backups) <= 1:
+            QMessageBox.information(
+                self,
+                "정리할 수동 백업이 없습니다.",
+                "수동 백업은 최소 한 개를 남깁니다.",
+            )
+            return
+        default_keep = min(5, len(backups) - 1)
+        keep, accepted = QInputDialog.getInt(
+            self,
+            "수동 백업 정리",
+            f"현재 수동 백업이 {len(backups):,}개 있습니다.\n최근 몇 개를 남길까요?",
+            default_keep,
+            1,
+            len(backups),
+            1,
+        )
+        if not accepted or keep >= len(backups):
+            return
+        removal = backups[keep:]
+        removal_bytes = sum(path.stat().st_size for path in removal if path.is_file())
+        if (
+            QMessageBox.warning(
+                self,
+                "오래된 수동 백업 삭제",
+                f"최근 수동 백업 {keep:,}개를 남기고 오래된 {len(removal):,}개"
+                f"({self._format_bytes(removal_bytes)})를 영구 삭제합니다.\n"
+                "삭제한 백업은 복구할 수 없습니다. 계속할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        manager = self._backup_manager
+        self._start(
+            "오래된 수동 백업을 정리하는 중입니다...",
+            lambda canceled: ()
+            if canceled()
+            else manager.prune_manual_backups(keep),
+            self._manual_backup_cleanup_message,
+        )
+
+    def _manual_backup_cleanup_message(self, result: object) -> str:
+        self._refresh_usage_after_finish = True
+        removed = result if isinstance(result, tuple) else ()
+        return f"오래된 수동 백업 {len(removed):,}개를 삭제했습니다."
 
     def _stage_restore(self) -> None:
         name, _ = QFileDialog.getOpenFileName(
@@ -658,7 +912,7 @@ class DataManagementDialog(QDialog):
         if self._usage_loading:
             self._usage_loading = False
             self.usage_refresh_button.setEnabled(True)
-            self.tabs.setTabEnabled(self._tools_tab_index, True)
+            self._set_tool_actions_enabled(True)
         if self._refresh_usage_after_finish:
             self._refresh_usage_after_finish = False
             QTimer.singleShot(0, self._refresh_usage)
@@ -668,6 +922,10 @@ class DataManagementDialog(QDialog):
             and not self._cleanup_loaded
         ):
             QTimer.singleShot(0, self._refresh_cleanup)
+
+    def _set_tool_actions_enabled(self, enabled: bool) -> None:
+        for button in self._tool_action_buttons:
+            button.setEnabled(enabled)
 
     @staticmethod
     def _backup_message(result: object) -> str:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-from officeflow.application.records import RecordService
+import pytest
+
+from officeflow.application.records import DuplicateWorkLogError, RecordService
 from officeflow.application.tasks import TaskDraft, TaskQuery, TaskService, TaskView
 from officeflow.infrastructure.database.migrate import upgrade_database
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
@@ -40,6 +42,13 @@ def test_record_repository_round_trip_and_task_search(tmp_path: Path) -> None:
     assert record_service.work_logs(log_date=date(2026, 9, 15)) == (work_log,)
     assert record_service.work_logs(search="매출지표") == (work_log,)
     assert record_service.work_logs(search="영업팀 자료") == (work_log,)
+    assert record_service.work_log_counts((task.id,)) == {task.id: 1}
+    with pytest.raises(DuplicateWorkLogError):
+        record_service.add_work_log(
+            task_id=task.id,
+            log_date=date(2026, 9, 15),
+            content="매출지표 검증",
+        )
     page = record_service.work_log_page(
         search="매출",
         date_from=date(2026, 9, 1),
@@ -66,4 +75,48 @@ def test_record_repository_round_trip_and_task_search(tmp_path: Path) -> None:
     record_service.delete_work_log(work_log.id)
     assert record_service.work_logs(task_id=task.id) == ()
     assert record_service.work_logs(search="매출지표") == ()
+    engine.dispose()
+
+
+def test_record_repository_filters_logs_for_exact_recurring_occurrence(
+    tmp_path: Path,
+) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    sessions = SessionFactory(engine)
+    task_service = TaskService(SqlAlchemyTaskRepository(sessions))
+    record_service = RecordService(SqlAlchemyRecordRepository(sessions), task_service)
+    first_start = datetime(2026, 9, 15, 1, 0, tzinfo=UTC)
+    second_start = datetime(2026, 9, 16, 1, 0, tzinfo=UTC)
+    task = task_service.create(
+        TaskDraft(
+            title="반복 현장 점검",
+            starts_at=first_start,
+            recurrence_rule="FREQ=DAILY;INTERVAL=1",
+        )
+    )
+    assert task.id is not None
+    first = record_service.add_work_log(
+        task_id=task.id,
+        occurrence_start=first_start,
+        log_date=date(2026, 9, 15),
+        content="첫 점검",
+    )
+    record_service.add_work_log(
+        task_id=task.id,
+        occurrence_start=second_start,
+        log_date=date(2026, 9, 16),
+        content="둘째 점검",
+    )
+
+    assert first.occurrence_id is not None
+    occurrence = task_service.occurrence_by_id(first.occurrence_id)
+    assert occurrence is not None
+    assert occurrence.occurrence_start == first_start
+    assert record_service.work_logs(
+        task_id=task.id,
+        occurrence_start=first_start,
+        occurrence_only=True,
+    ) == (first,)
     engine.dispose()

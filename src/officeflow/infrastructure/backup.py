@@ -106,6 +106,9 @@ class DataUsageSnapshot:
     orphan_attachment_bytes: int
     backup_count: int
     backup_bytes: int
+    manual_backup_count: int
+    automatic_backup_count: int
+    latest_automatic_backup_at: datetime | None
     database_bytes: int
     largest_files: tuple[LargeStoredFile, ...]
 
@@ -117,6 +120,16 @@ class DataUsageSnapshot:
 class BackupManager:
     def __init__(self, paths: AppPaths) -> None:
         self._paths = paths
+
+    @property
+    def attachment_directory(self) -> Path:
+        """Return the managed attachment directory for read-only user inspection."""
+        return self._paths.attachment_dir
+
+    @property
+    def backup_directory(self) -> Path:
+        """Return the directory containing verified OfficeFlow backup archives."""
+        return self._paths.backup_dir
 
     def inspect_data_usage(
         self,
@@ -230,10 +243,25 @@ class BackupManager:
 
         backups = tuple(self._paths.backup_dir.glob("*.ofbackup"))
         backup_sizes: list[int] = []
+        automatic_backups: list[Path] = []
+        manual_backups: list[Path] = []
         for path in backups:
             _raise_if_canceled(cancel_requested)
             if path.is_file():
                 backup_sizes.append(path.stat().st_size)
+                if path.name.startswith("officeflow-automatic-"):
+                    automatic_backups.append(path)
+                elif path.name.startswith("officeflow-manual-"):
+                    manual_backups.append(path)
+
+        latest_automatic_backup_at = (
+            datetime.fromtimestamp(
+                max(path.stat().st_mtime for path in automatic_backups),
+                tz=UTC,
+            )
+            if automatic_backups
+            else None
+        )
 
         database_bytes = sum(
             path.stat().st_size
@@ -274,6 +302,9 @@ class BackupManager:
             orphan_attachment_bytes=sum(stored[path][1] for path in orphan_paths),
             backup_count=len(backup_sizes),
             backup_bytes=sum(backup_sizes),
+            manual_backup_count=len(manual_backups),
+            automatic_backup_count=len(automatic_backups),
+            latest_automatic_backup_at=latest_automatic_backup_at,
             database_bytes=database_bytes,
             largest_files=tuple(largest),
         )
@@ -573,6 +604,26 @@ class BackupManager:
         )
         removed: list[Path] = []
         for path in backups[keep:]:
+            path.unlink()
+            removed.append(path)
+        return tuple(removed)
+
+    def list_manual_backups(self) -> tuple[Path, ...]:
+        """Return manual backups from newest to oldest."""
+        return tuple(
+            sorted(
+                self._paths.backup_dir.glob("officeflow-manual-*.ofbackup"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        )
+
+    def prune_manual_backups(self, keep: int) -> tuple[Path, ...]:
+        """Remove old manual backups while retaining the newest requested count."""
+        if keep < 1:
+            raise ValueError("수동 백업은 한 개 이상 보관해야 합니다.")
+        removed: list[Path] = []
+        for path in self.list_manual_backups()[keep:]:
             path.unlink()
             removed.append(path)
         return tuple(removed)

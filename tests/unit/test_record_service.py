@@ -5,7 +5,12 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from officeflow.application.records import RecordRepository, RecordService, WorkLogPage
+from officeflow.application.records import (
+    DuplicateWorkLogError,
+    RecordRepository,
+    RecordService,
+    WorkLogPage,
+)
 from officeflow.application.tasks import TaskDraft, TaskService
 from officeflow.domain.enums import TaskPriority
 from officeflow.domain.records import ChecklistItem, RecordValidationError, WorkLog
@@ -54,15 +59,19 @@ class InMemoryRecordRepository(RecordRepository):
         log_date: date | None = None,
         task_id: int | None = None,
         search: str = "",
+        occurrence_id: int | None = None,
+        occurrence_only: bool = False,
+        limit: int | None = None,
     ) -> tuple[WorkLog, ...]:
         normalized = search.strip().casefold()
-        return tuple(
+        items = tuple(
             sorted(
                 (
                     item
                     for item in self.work_log_items.values()
                     if (log_date is None or item.log_date == log_date)
                     and (task_id is None or item.task_id == task_id)
+                    and (not occurrence_only or item.occurrence_id == occurrence_id)
                     and (
                         not normalized
                         or normalized in f"{item.content}\n{item.result}".casefold()
@@ -72,6 +81,7 @@ class InMemoryRecordRepository(RecordRepository):
                 reverse=True,
             )
         )
+        return items[:limit] if limit is not None else items
 
     def query_work_logs(
         self,
@@ -94,6 +104,30 @@ class InMemoryRecordRepository(RecordRepository):
             offset=offset,
             limit=limit,
         )
+
+    def has_duplicate_work_log(
+        self,
+        *,
+        task_id: int | None,
+        log_date: date,
+        content: str,
+        exclude_log_id: int | None = None,
+    ) -> bool:
+        return any(
+            item.task_id == task_id
+            and item.log_date == log_date
+            and item.content == content
+            and item.id != exclude_log_id
+            for item in self.work_log_items.values()
+        )
+
+    def count_work_logs(self, task_ids: tuple[int, ...]) -> dict[int, int]:
+        return {
+            task_id: sum(
+                1 for item in self.work_log_items.values() if item.task_id == task_id
+            )
+            for task_id in task_ids
+        }
 
     def add_work_log(self, work_log: WorkLog) -> WorkLog:
         saved = replace(work_log, id=self.next_log_id)
@@ -205,6 +239,55 @@ def test_work_log_keeps_priority_snapshot_and_can_be_edited() -> None:
     assert service.work_logs(log_date=date(2026, 9, 16)) == (updated,)
 
 
+def test_duplicate_work_log_requires_explicit_confirmation() -> None:
+    task_service, service, _repository = make_services()
+    task = task_service.create(TaskDraft(title="중복 점검"))
+    assert task.id is not None
+    service.add_work_log(
+        task_id=task.id,
+        log_date=date(2026, 9, 15),
+        content="  동일한 처리 내용  ",
+    )
+
+    with pytest.raises(DuplicateWorkLogError):
+        service.add_work_log(
+            task_id=task.id,
+            log_date=date(2026, 9, 15),
+            content="동일한 처리 내용",
+        )
+
+    duplicate = service.add_work_log(
+        task_id=task.id,
+        log_date=date(2026, 9, 15),
+        content="동일한 처리 내용",
+        allow_duplicate=True,
+    )
+    assert duplicate.id is not None
+
+
+def test_work_log_count_is_returned_per_task() -> None:
+    task_service, service, _repository = make_services()
+    first = task_service.create(TaskDraft(title="첫 업무"))
+    second = task_service.create(TaskDraft(title="둘째 업무"))
+    assert first.id is not None and second.id is not None
+    for index in range(2):
+        service.add_work_log(
+            task_id=first.id,
+            log_date=date(2026, 9, 15 + index),
+            content=f"첫 업무 기록 {index}",
+        )
+    service.add_work_log(
+        task_id=second.id,
+        log_date=date(2026, 9, 15),
+        content="둘째 업무 기록",
+    )
+
+    assert service.work_log_counts((first.id, second.id)) == {
+        first.id: 2,
+        second.id: 1,
+    }
+
+
 def test_task_result_note_is_saved_without_changing_status() -> None:
     task_service, _service, _repository = make_services()
     task = task_service.create(TaskDraft(title="결과 기록"))
@@ -237,3 +320,52 @@ def test_recurring_result_note_is_kept_on_the_selected_occurrence() -> None:
     assert saved == "오늘 확인 완료"
     assert task_service.get(task.id).result_note == ""
     assert task_service.result_note(task.id, occurrence_start) == "오늘 확인 완료"
+
+
+def test_recurring_work_logs_are_linked_and_filtered_by_occurrence() -> None:
+    task_service, service, _repository = make_services()
+    first_start = datetime(2026, 9, 15, 1, 0, tzinfo=UTC)
+    second_start = datetime(2026, 9, 16, 1, 0, tzinfo=UTC)
+    task = task_service.create(
+        TaskDraft(
+            title="매일 점검",
+            starts_at=first_start,
+            recurrence_rule="FREQ=DAILY;INTERVAL=1",
+        )
+    )
+    assert task.id is not None
+
+    first = service.add_work_log(
+        task_id=task.id,
+        occurrence_start=first_start,
+        log_date=date(2026, 9, 15),
+        content="첫째 날 점검",
+    )
+    second = service.add_work_log(
+        task_id=task.id,
+        occurrence_start=second_start,
+        log_date=date(2026, 9, 16),
+        content="둘째 날 점검",
+    )
+
+    assert first.occurrence_id is not None
+    assert second.occurrence_id is not None
+    assert first.occurrence_id != second.occurrence_id
+    assert service.work_logs(
+        task_id=task.id,
+        occurrence_start=first_start,
+        occurrence_only=True,
+    ) == (first,)
+
+
+def test_completing_with_result_uses_one_repository_update() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    task = service.create(TaskDraft(title="결과와 함께 완료"))
+    assert task.id is not None
+
+    completed = service.complete(task.id, result_note="검수 완료")
+
+    assert repository.update_calls == 1
+    assert completed.status.value == "completed"
+    assert completed.result_note == "검수 완료"

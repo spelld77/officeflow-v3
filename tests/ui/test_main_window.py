@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -90,6 +90,31 @@ def test_main_window_has_phase_two_shell(qtbot: QtBot, task_service: TaskService
     assert window.findChild(type(window.centralWidget()), "appRoot") is not None
 
 
+def test_unclean_shutdown_warning_is_shown_on_startup(
+    qtbot: QtBot,
+    task_service: TaskService,
+    monkeypatch,
+) -> None:
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        previous_unclean_shutdown=True,
+    )
+    qtbot.addWidget(window)
+    window.show()
+
+    qtbot.waitUntil(lambda: bool(warnings), timeout=1_000)
+
+    assert warnings[0][0] == "이전 실행 비정상 종료"
+    assert "놓친 알림" in warnings[0][1]
+
+
 def test_wide_window_shows_three_panels(qtbot: QtBot, task_service: TaskService) -> None:
     window = MainWindow(AppSettings(), task_service)
     qtbot.addWidget(window)
@@ -139,6 +164,23 @@ def test_medium_window_exposes_records_without_detail_panel(qtbot: QtBot) -> Non
     assert window._work_log_button.isEnabled()
 
 
+def test_multiple_selected_tasks_are_available_for_calendar_export(qtbot: QtBot) -> None:
+    task_service = TaskService(InMemoryTaskRepository())
+    first = task_service.create(TaskDraft(title="첫 출장 일정"))
+    second = task_service.create(TaskDraft(title="둘째 출장 일정"))
+    assert first.id is not None and second.id is not None
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    first_index = window._task_model.index_for_task(first.id)
+    second_index = window._task_model.index_for_task(second.id)
+    selection = window._task_list.selectionModel()
+    selection.select(first_index, QItemSelectionModel.SelectionFlag.Select)
+    selection.select(second_index, QItemSelectionModel.SelectionFlag.Select)
+
+    assert set(window._selected_task_ids_for_export()) == {first.id, second.id}
+
+
 def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> None:
     task_repository = InMemoryTaskRepository()
     task_service = TaskService(task_repository)
@@ -151,7 +193,7 @@ def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> N
     window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
 
     menu = window._build_task_context_menu(task)
-    assert "결과 입력 후 완료…" in [action.text() for action in menu.actions()]
+    assert "완료 요약 입력 후 완료…" in [action.text() for action in menu.actions()]
     assert "바로 완료" in [action.text() for action in menu.actions()]
 
     class FakeCompleteDialog:
@@ -243,7 +285,7 @@ def test_trash_view_exposes_preserved_records_and_attachments(
 
     labels = [action.text() for action in window._build_task_context_menu(deleted).actions()]
 
-    assert "결과 · 기록 보기" in labels
+    assert "완료 요약 · 기록 보기" in labels
     assert "첨부파일 보기…" in labels
     assert window._detail_records_button.isEnabled()
     assert window._detail_attachment_button.isEnabled()
@@ -794,6 +836,41 @@ def test_calendar_stays_usable_at_minimum_window_size(
         window._calendar_page.calendar.geometry().bottom()
         < window._calendar_page.day_list.geometry().top()
     )
+
+
+def test_calendar_emphasizes_three_day_items_and_shows_scroll_cue(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    zone = ZoneInfo("Asia/Seoul")
+    today = datetime.now(zone).date()
+    start = datetime.combine(today, time.min, tzinfo=zone).astimezone(UTC)
+    for index in range(3):
+        task_service.create(
+            TaskDraft(
+                title=f"확인할 일정 {index + 1}",
+                all_day=True,
+                starts_at=start,
+                ends_at=start + timedelta(days=1),
+            )
+        )
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.resize(760, 560)
+    window.show()
+    window._show_calendar()
+    qtbot.wait(20)
+
+    page = window._calendar_page
+    assert page.day_list.count() == 3
+    assert page.day_count.text() == "총 3개 일정"
+    assert page.day_count.property("hasMany") is True
+    assert page.day_more_hint.isVisible()
+    assert "총 3개" in page.day_more_hint.text()
+    assert (
+        page.day_list.verticalScrollBarPolicy()
+        is Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    )
+    assert page.day_list.verticalScrollBar().isVisible()
 
 
 def test_calendar_overflow_opens_complete_day_list(qtbot: QtBot, task_service: TaskService) -> None:

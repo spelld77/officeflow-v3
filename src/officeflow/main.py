@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections.abc import Callable
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
@@ -15,6 +16,7 @@ from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import TaskService
 from officeflow.bootstrap.logging import configure_logging
 from officeflow.bootstrap.paths import AppPaths
+from officeflow.bootstrap.run_state import RunStateTracker
 from officeflow.bootstrap.single_instance import SingleInstanceCoordinator, instance_name
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from officeflow.infrastructure.backup import BackupError, BackupManager
@@ -41,6 +43,8 @@ def build_application(
     *,
     application: QApplication | None = None,
     desktop_integration: bool = False,
+    previous_unclean_shutdown: bool = False,
+    on_clean_shutdown: Callable[[], None] | None = None,
 ) -> tuple[QApplication, MainWindow]:
     paths = AppPaths.discover()
     paths.ensure_directories()
@@ -81,6 +85,13 @@ def build_application(
     app.setApplicationVersion(__version__)
     app.setOrganizationName("OfficeFlow")
 
+    def shutdown() -> None:
+        try:
+            engine.dispose()
+        finally:
+            if on_clean_shutdown is not None:
+                on_clean_shutdown()
+
     window = MainWindow(
         settings=settings,
         task_service=task_service,
@@ -91,8 +102,9 @@ def build_application(
         backup_manager=backup_manager,
         migration_service=migration_service,
         save_settings=settings_store.save,
-        on_shutdown=engine.dispose,
+        on_shutdown=shutdown,
         desktop_integration=desktop_integration,
+        previous_unclean_shutdown=previous_unclean_shutdown,
     )
     return app, window
 
@@ -121,10 +133,15 @@ def main() -> int:
     if not coordinator.acquire():
         return 0 if coordinator.send_message(command) else 1
 
+    run_state = RunStateTracker(paths.running_marker_file)
+    previous_unclean_shutdown = run_state.begin()
+
     app, window = build_application(
         arguments,
         application=app,
         desktop_integration=True,
+        previous_unclean_shutdown=previous_unclean_shutdown,
+        on_clean_shutdown=run_state.mark_clean,
     )
     coordinator.messageReceived.connect(window.handle_external_command)
     app.aboutToQuit.connect(window.shutdown)

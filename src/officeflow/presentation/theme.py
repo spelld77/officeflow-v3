@@ -134,6 +134,21 @@ QPushButton[nav="true"][compact="true"] {
     font-size: 16px;
     font-weight: 700;
 }
+#calendarDayCount {
+    color: #68738A;
+    padding: 3px 8px;
+}
+#calendarDayCount[hasMany="true"] {
+    color: #1F55C3;
+    background: #E3ECFF;
+    border: 1px solid #AFC5F5;
+    border-radius: 9px;
+    font-weight: 700;
+}
+#calendarDayMoreHint {
+    color: #B45309;
+    font-weight: 600;
+}
 #calendarPrevious, #calendarNext {
     min-width: 34px;
     max-width: 34px;
@@ -154,22 +169,38 @@ QListWidget#calendarDayList, QListWidget#reminderList {
     padding: 3px;
 }
 QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrowserList,
-QListWidget#attachmentList {
+QListWidget#attachmentList, QListWidget#attachmentCleanupList {
+    color: #172033;
     background: #FFFFFF;
+    selection-color: #172033;
+    selection-background-color: #DFE9FF;
     border: 1px solid #DCE2EC;
     border-radius: 8px;
     outline: none;
     padding: 4px;
 }
 QListWidget#checklistList::item, QListWidget#taskWorkLogList::item,
-QListWidget#workLogBrowserList::item, QListWidget#attachmentList::item {
+QListWidget#workLogBrowserList::item, QListWidget#attachmentList::item,
+QListWidget#attachmentCleanupList::item {
     border-radius: 5px;
     padding: 8px 10px;
 }
 QListWidget#checklistList::item:selected, QListWidget#taskWorkLogList::item:selected,
-QListWidget#workLogBrowserList::item:selected, QListWidget#attachmentList::item:selected {
+QListWidget#workLogBrowserList::item:selected, QListWidget#attachmentList::item:selected,
+QListWidget#attachmentCleanupList::item:selected {
     color: #172033;
     background: #DFE9FF;
+}
+QListWidget#attachmentCleanupList::item:disabled {
+    color: #68738A;
+}
+QWidget#dataManagementPage {
+    color: #172033;
+    background: #FFFFFF;
+}
+QScrollArea#dataManagementScroll, QScrollArea#dataManagementScroll QWidget#qt_scrollarea_viewport {
+    background: #FFFFFF;
+    border: none;
 }
 QTabWidget::pane {
     background: #FFFFFF;
@@ -196,6 +227,29 @@ QListWidget#calendarDayList::item, QListWidget#reminderList::item {
 QListWidget#calendarDayList::item:selected, QListWidget#reminderList::item:selected {
     color: #172033;
     background: #DFE9FF;
+}
+QListWidget#calendarDayList QScrollBar:vertical {
+    width: 13px;
+    background: #EDF1F7;
+    border: none;
+    border-radius: 6px;
+    margin: 2px;
+}
+QListWidget#calendarDayList QScrollBar::handle:vertical {
+    min-height: 28px;
+    background: #7FA3EF;
+    border-radius: 5px;
+}
+QListWidget#calendarDayList QScrollBar::handle:vertical:hover {
+    background: #4F7FDF;
+}
+QListWidget#calendarDayList QScrollBar::add-line:vertical,
+QListWidget#calendarDayList QScrollBar::sub-line:vertical,
+QListWidget#calendarDayList QScrollBar::add-page:vertical,
+QListWidget#calendarDayList QScrollBar::sub-page:vertical {
+    background: transparent;
+    border: none;
+    height: 0;
 }
 #mutedText {
     color: #68738A;

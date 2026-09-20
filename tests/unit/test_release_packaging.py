@@ -52,4 +52,8 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert help_path.is_file()
     content = help_path.read_text(encoding="utf-8")
     assert "OfficeFlow 2.6 데이터 가져오기" in content
+    assert "놓친 알림 확인 범위란?" in content
+    assert "오래된 수동 백업 정리" in content
+    assert "ICS 내보내기는 현재 목록, 선택 업무 또는 기간" in content
+    assert "3개 이상이면 스크롤 안내" in content
     assert "%LOCALAPPDATA%\\OfficeFlow" in content

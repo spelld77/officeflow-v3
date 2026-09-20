@@ -69,7 +69,11 @@ class SettingsDialog(QDialog):
         self.grace_minutes_spin.setValue(
             settings.missed_reminder_grace_minutes
         )
-        form.addRow("놓친 알림 복구", self.grace_minutes_spin)
+        self.grace_minutes_spin.setToolTip(
+            "프로그램 종료·절전 중 알림 시각이 지났을 때, 현재부터 얼마나 이전의 "
+            "알림까지 다시 보여줄지 정합니다."
+        )
+        form.addRow("놓친 알림 확인 범위", self.grace_minutes_spin)
 
         self.automatic_backup_check = QCheckBox("정해진 주기마다 자동 백업")
         self.automatic_backup_check.setObjectName("automaticBackupEnabled")
@@ -95,12 +99,15 @@ class SettingsDialog(QDialog):
         self.backup_keep_spin.setEnabled(settings.automatic_backup_enabled)
         root.addLayout(form)
 
-        hint = QLabel(
+        self.settings_hint = QLabel(
+            "놓친 알림은 프로그램 종료·절전 중 예정 시각을 지난 알림입니다. "
+            "설정 범위 안의 미처리 알림만 한 번 다시 보여주며, 범위보다 오래된 "
+            "알림은 자동으로 띄우지 않습니다.\n"
             "전역 단축키는 Ctrl/Alt/Shift/Win과 영문·숫자·F1~F24 조합을 지원합니다."
         )
-        hint.setObjectName("mutedText")
-        hint.setWordWrap(True)
-        root.addWidget(hint)
+        self.settings_hint.setObjectName("mutedText")
+        self.settings_hint.setWordWrap(True)
+        root.addWidget(self.settings_hint)
 
         self.error_label = QLabel()
         self.error_label.setObjectName("formError")

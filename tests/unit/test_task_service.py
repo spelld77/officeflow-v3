@@ -26,6 +26,7 @@ class InMemoryTaskRepository(TaskRepository):
         self.queries: list[TaskQuery] = []
         self.next_id = 1
         self.next_occurrence_id = 1
+        self.update_calls = 0
 
     def add(self, task: Task) -> Task:
         saved = Task(
@@ -54,6 +55,7 @@ class InMemoryTaskRepository(TaskRepository):
 
     def update(self, task: Task) -> Task:
         assert task.id is not None
+        self.update_calls += 1
         self.tasks[task.id] = task
         return task
 
@@ -180,6 +182,16 @@ class InMemoryTaskRepository(TaskRepository):
 
     def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None:
         return self.occurrences.get((task_id, occurrence_start))
+
+    def get_occurrence_by_id(self, occurrence_id: int) -> TaskOccurrence | None:
+        return next(
+            (
+                occurrence
+                for occurrence in self.occurrences.values()
+                if occurrence.id == occurrence_id
+            ),
+            None,
+        )
 
     def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence:
         saved = replace(occurrence, id=occurrence.id or self.next_occurrence_id)

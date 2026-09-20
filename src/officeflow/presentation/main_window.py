@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QFrame,
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
         on_shutdown: Callable[[], None] | None = None,
         desktop_integration: bool = False,
         startup_manager: WindowsStartupManager | None = None,
+        previous_unclean_shutdown: bool = False,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -136,6 +138,7 @@ class MainWindow(QMainWindow):
         self._force_quit = False
         self._desktop_integration = desktop_integration
         self._startup_manager = startup_manager or WindowsStartupManager()
+        self._previous_unclean_shutdown = previous_unclean_shutdown
         self._tray_icon: QSystemTrayIcon | None = None
         self._global_hotkey: WindowsGlobalHotkey | None = None
         self._tray_hint_shown = False
@@ -213,6 +216,9 @@ class MainWindow(QMainWindow):
         if self._reminder_service is not None:
             self._reminder_timer.start()
             QTimer.singleShot(0, self._check_reminders)
+        if self._previous_unclean_shutdown:
+            logger.warning("이전 OfficeFlow 실행이 정상적으로 종료되지 않았습니다.")
+            QTimer.singleShot(250, self._show_unclean_shutdown_warning)
         if self._desktop_integration:
             self._setup_desktop_integration()
         if self._backup_manager is not None and settings.automatic_backup_enabled:
@@ -381,6 +387,9 @@ class MainWindow(QMainWindow):
         self._task_list = QListView()
         self._task_list.setObjectName("taskList")
         self._task_list.setModel(self._task_model)
+        self._task_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self._task_delegate = TaskItemDelegate(self._task_list)
         self._task_list.setItemDelegate(self._task_delegate)
         self._task_delegate.quickCompleteRequested.connect(self._quick_complete_task)
@@ -537,7 +546,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._detail_description)
         layout.addStretch()
 
-        self._detail_records_button = QPushButton("체크리스트 · 결과 · 업무일지")
+        self._detail_records_button = QPushButton("체크리스트 · 완료 요약 · 업무일지")
         self._detail_records_button.setObjectName("detailRecordsButton")
         self._detail_records_button.clicked.connect(self._open_selected_records)
         self._detail_records_button.setEnabled(False)
@@ -914,7 +923,7 @@ class MainWindow(QMainWindow):
                 attachments = menu.addAction("첨부파일 보기…")
                 attachments.triggered.connect(self._open_selected_attachments)
             if self._record_service is not None:
-                records = menu.addAction("결과 · 기록 보기")
+                records = menu.addAction("완료 요약 · 기록 보기")
                 records.triggered.connect(self._open_selected_records)
             if menu.actions():
                 menu.addSeparator()
@@ -924,10 +933,10 @@ class MainWindow(QMainWindow):
         if task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}:
             complete_now = menu.addAction("바로 완료")
             complete_now.triggered.connect(self._quick_complete_selected)
-            complete_with_result = menu.addAction("결과 입력 후 완료…")
+            complete_with_result = menu.addAction("완료 요약 입력 후 완료…")
             complete_with_result.triggered.connect(self._complete_selected_with_result)
         elif task.status is TaskStatus.COMPLETED:
-            edit_result = menu.addAction("결과 입력 · 수정…")
+            edit_result = menu.addAction("완료 요약 입력 · 수정…")
             edit_result.triggered.connect(self._open_selected_result)
             if self._selected_occurrence_start is None:
                 reactivate = menu.addAction("다시 진행")
@@ -941,7 +950,7 @@ class MainWindow(QMainWindow):
             attachments = menu.addAction("첨부파일 보기 · 관리…")
             attachments.triggered.connect(self._open_selected_attachments)
         if self._record_service is not None:
-            records = menu.addAction("결과 · 기록 열기")
+            records = menu.addAction("완료 요약 · 기록 열기")
             records.triggered.connect(self._open_selected_records)
         edit = menu.addAction("업무 수정")
         edit.triggered.connect(self._open_selected_task)
@@ -1095,11 +1104,28 @@ class MainWindow(QMainWindow):
             migration_service=self._migration_service,
             attachment_service=self._attachment_service,
             task_service=self._task_service,
+            selected_task_ids=self._selected_task_ids_for_export(),
+            automatic_backup_enabled=self._settings.automatic_backup_enabled,
+            automatic_backup_interval_hours=(
+                self._settings.automatic_backup_interval_hours
+            ),
+            automatic_backup_keep=self._settings.automatic_backup_keep,
             parent=self,
         )
         dialog.quitRequested.connect(self._quit_application)
         dialog.setStyleSheet(LIGHT_STYLESHEET)
         dialog.exec()
+
+    def _selected_task_ids_for_export(self) -> tuple[int, ...]:
+        selected_ids: list[int] = []
+        selection_model = self._task_list.selectionModel()
+        for index in selection_model.selectedIndexes():
+            task = self._task_model.task_at(index)
+            if task is not None and task.id is not None and task.id not in selected_ids:
+                selected_ids.append(task.id)
+        if not selected_ids and self._selected_task_id is not None:
+            selected_ids.append(self._selected_task_id)
+        return tuple(selected_ids)
 
     def _open_help(self) -> None:
         if not open_user_help():
@@ -1511,18 +1537,28 @@ class MainWindow(QMainWindow):
                     self._selected_task_id = None
                     self._update_detail(None)
             else:
-                self._task_service.transition(self._selected_task_id, status)
-                if result_note is not None:
-                    self._task_service.update_result_note(
+                if status is TaskStatus.COMPLETED:
+                    self._task_service.complete(
                         self._selected_task_id,
-                        result_note,
+                        result_note=result_note,
                     )
+                else:
+                    self._task_service.transition(self._selected_task_id, status)
         except (TaskValidationError, LookupError, ValueError) as error:
             self._show_error("상태를 변경하지 못했습니다.", error)
             return False
         self._refresh_tasks()
         self.statusBar().showMessage("업무 상태를 변경했습니다.", 2500)
         return True
+
+    def _show_unclean_shutdown_warning(self) -> None:
+        QMessageBox.warning(
+            self,
+            "이전 실행 비정상 종료",
+            "이전 OfficeFlow 실행이 정상적으로 종료되지 않았습니다.\n\n"
+            "저장된 데이터는 그대로 유지됩니다. 놓친 알림은 설정된 복구 범위 안에서 "
+            "다시 확인하고 있으니 알림 창과 오늘 업무를 확인해 주세요.",
+        )
 
     def _check_reminders(self) -> None:
         if self._reminder_service is None:

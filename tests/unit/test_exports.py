@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 
-from officeflow.application.exporting import ExportService
+from officeflow.application.exporting import (
+    CalendarExportOptions,
+    CalendarExportScope,
+    ExportService,
+)
 from officeflow.application.tasks import TaskPage, TaskQuery
-from officeflow.domain.enums import TaskPriority
+from officeflow.domain.enums import TaskPriority, TaskStatus
 from officeflow.domain.task import Task
 from officeflow.infrastructure.exports.calendar import ICalendarTaskExporter
 from officeflow.infrastructure.exports.excel import ExcelTaskExporter
@@ -158,3 +162,130 @@ def test_export_service_removes_page_limit_and_calendar_omits_unscheduled(tmp_pa
     assert task_service.queries[0].limit is None
     assert excel.tasks == (scheduled, unscheduled)
     assert calendar.tasks == (scheduled,)
+
+
+def test_calendar_export_options_filter_recurrence_completion_and_unscheduled(
+    tmp_path,
+) -> None:
+    start = datetime(2026, 9, 15, tzinfo=UTC)
+    active = _task(
+        task_id=1,
+        title="출장 회의",
+        all_day=False,
+        starts_at=start,
+        ends_at=start + timedelta(hours=1),
+    )
+    recurring = replace(
+        active,
+        id=2,
+        title="매주 회의",
+        recurrence_rule="FREQ=WEEKLY;INTERVAL=1;BYDAY=TU",
+    )
+    completed = replace(
+        active,
+        id=3,
+        title="완료 일정",
+        status=TaskStatus.COMPLETED,
+        completed_at=start,
+    )
+    unscheduled = replace(active, id=4, title="일정 없음", starts_at=None, ends_at=None)
+
+    class TaskServiceStub:
+        def query(self, query: TaskQuery) -> TaskPage:
+            return TaskPage(
+                (active, recurring, completed, unscheduled),
+                4,
+                query.offset,
+                query.limit,
+            )
+
+        def get_many(self, task_ids: tuple[int, ...]) -> dict[int, Task]:
+            tasks = {task.id: task for task in (active, recurring, completed) if task.id}
+            return {task_id: tasks[task_id] for task_id in task_ids if task_id in tasks}
+
+    class ExporterStub:
+        def __init__(self) -> None:
+            self.tasks: tuple[Task, ...] = ()
+
+        def export(self, tasks, destination, *, cancel_requested=None):
+            self.tasks = tasks
+            return destination
+
+    calendar = ExporterStub()
+    service = ExportService(  # type: ignore[arg-type]
+        TaskServiceStub(),
+        ExporterStub(),
+        calendar,
+    )
+    options = CalendarExportOptions(
+        scope=CalendarExportScope.CURRENT_LIST,
+        query=TaskQuery(),
+        include_recurring=False,
+        include_completed=False,
+    )
+
+    result = service.export_calendar(tmp_path / "trip.ics", options=options)
+
+    assert calendar.tasks == (active,)
+    assert result.exported_count == 1
+    assert result.excluded_recurring_count == 1
+    assert result.excluded_completed_count == 1
+    assert result.excluded_unscheduled_count == 1
+
+
+def test_calendar_export_supports_selected_tasks_and_inclusive_date_range(tmp_path) -> None:
+    start = datetime(2026, 9, 15, tzinfo=UTC)
+    first = _task(
+        task_id=1,
+        title="선택 일정",
+        all_day=True,
+        starts_at=start,
+        ends_at=start + timedelta(days=2),
+    )
+    second = replace(first, id=2, title="다른 일정")
+
+    class TaskServiceStub:
+        def __init__(self) -> None:
+            self.range: tuple[date, date] | None = None
+
+        def get_many(self, task_ids: tuple[int, ...]) -> dict[int, Task]:
+            tasks = {1: first, 2: second}
+            return {task_id: tasks[task_id] for task_id in task_ids if task_id in tasks}
+
+        def calendar_range(self, date_from: date, date_to: date) -> tuple[Task, ...]:
+            self.range = (date_from, date_to)
+            return (first, second)
+
+    class ExporterStub:
+        def __init__(self) -> None:
+            self.tasks: tuple[Task, ...] = ()
+
+        def export(self, tasks, destination, *, cancel_requested=None):
+            self.tasks = tasks
+            return destination
+
+    task_service = TaskServiceStub()
+    calendar = ExporterStub()
+    service = ExportService(  # type: ignore[arg-type]
+        task_service,
+        ExporterStub(),
+        calendar,
+    )
+    service.export_calendar(
+        tmp_path / "selected.ics",
+        options=CalendarExportOptions(
+            scope=CalendarExportScope.SELECTED_TASKS,
+            selected_task_ids=(2,),
+        ),
+    )
+    assert calendar.tasks == (second,)
+
+    service.export_calendar(
+        tmp_path / "range.ics",
+        options=CalendarExportOptions(
+            scope=CalendarExportScope.DATE_RANGE,
+            date_from=date(2026, 9, 15),
+            date_to=date(2026, 9, 20),
+        ),
+    )
+    assert task_service.range == (date(2026, 9, 15), date(2026, 9, 21))

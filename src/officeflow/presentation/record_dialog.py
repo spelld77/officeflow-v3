@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Event
@@ -7,7 +8,7 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QDate, QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -36,7 +37,7 @@ from officeflow.application.attachments import (
     AttachmentOperationError,
     AttachmentService,
 )
-from officeflow.application.records import RecordService
+from officeflow.application.records import DuplicateWorkLogError, RecordService
 from officeflow.application.tasks import TaskService
 from officeflow.domain.attachment import Attachment
 from officeflow.domain.records import ChecklistItem, RecordValidationError, WorkLog
@@ -45,6 +46,17 @@ from officeflow.domain.task import Task
 
 def _qdate(value: date) -> QDate:
     return QDate(value.year, value.month, value.day)
+
+
+@dataclass(slots=True)
+class _RecordGroup:
+    key: tuple[str, int]
+    task: Task | None = None
+    completed: Task | None = None
+    occurrence_start: datetime | None = None
+    logs: list[WorkLog] = field(default_factory=list)
+    match_locations: set[str] = field(default_factory=set)
+    work_log_count: int = 0
 
 
 class AttachmentImportWorker(QObject):
@@ -97,13 +109,15 @@ class CompleteTaskDialog(QDialog):
         title.setObjectName("pageTitle")
         title.setWordWrap(True)
         root.addWidget(title)
-        help_label = QLabel("결과를 바로 남기고 완료할 수 있습니다. 결과 입력은 선택 사항입니다.")
+        help_label = QLabel(
+            "완료 요약을 바로 남기고 완료할 수 있습니다. 요약 입력은 선택 사항입니다."
+        )
         help_label.setObjectName("mutedText")
         help_label.setWordWrap(True)
         root.addWidget(help_label)
         self.result_edit = QTextEdit()
         self.result_edit.setObjectName("completionResultEdit")
-        self.result_edit.setPlaceholderText("완료 결과, 결정 사항 또는 다음 할 일 (선택)")
+        self.result_edit.setPlaceholderText("완료 요약, 결정 사항 또는 인계 내용 (선택)")
         self.result_edit.setPlainText(result_note)
         self.result_edit.setTabChangesFocus(True)
         root.addWidget(self.result_edit, 1)
@@ -154,6 +168,7 @@ class TaskRecordsDialog(QDialog):
         self._attachment_thread: QThread | None = None
         self._attachment_worker: AttachmentImportWorker | None = None
         self._attachment_progress: QProgressDialog | None = None
+        self._close_when_attachment_finishes = False
 
         self.setWindowTitle(f"업무 기록 · {task.title}")
         self.setModal(True)
@@ -176,7 +191,7 @@ class TaskRecordsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("taskRecordsTabs")
         self.tabs.addTab(self._build_checklist_tab(), "체크리스트")
-        self.tabs.addTab(self._build_result_tab(), "결과 메모")
+        self.tabs.addTab(self._build_result_tab(), "완료 요약")
         self.tabs.addTab(self._build_work_log_tab(), "업무일지")
         if attachment_service is not None:
             self.tabs.addTab(self._build_attachment_tab(), "첨부파일")
@@ -271,16 +286,16 @@ class TaskRecordsDialog(QDialog):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(10, 14, 10, 10)
-        help_label = QLabel("업무를 마친 결과, 결정 사항이나 다음 행동을 남겨 두세요.")
+        help_label = QLabel("업무를 마친 뒤 남길 핵심 결과와 결정 사항을 요약하세요.")
         help_label.setObjectName("mutedText")
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
         self.result_edit = QTextEdit()
         self.result_edit.setObjectName("resultNoteEdit")
-        self.result_edit.setPlaceholderText("결과 메모")
+        self.result_edit.setPlaceholderText("완료 요약")
         self.result_edit.setTabChangesFocus(True)
         layout.addWidget(self.result_edit, 1)
-        save_button = QPushButton("결과 메모 저장")
+        save_button = QPushButton("완료 요약 저장")
         save_button.setObjectName("saveResultButton")
         save_button.setProperty("primaryAction", True)
         save_button.clicked.connect(self._save_result)
@@ -305,10 +320,10 @@ class TaskRecordsDialog(QDialog):
         form.addRow("진행 내용 *", self.log_content_edit)
         self.log_result_edit = QTextEdit()
         self.log_result_edit.setObjectName("workLogResult")
-        self.log_result_edit.setPlaceholderText("성과, 이슈 또는 다음 할 일")
+        self.log_result_edit.setPlaceholderText("진행 결과, 이슈 또는 다음 단계")
         self.log_result_edit.setMaximumHeight(75)
         self.log_result_edit.setTabChangesFocus(True)
-        form.addRow("결과", self.log_result_edit)
+        form.addRow("진행 결과 / 다음 단계", self.log_result_edit)
         layout.addLayout(form)
 
         edit_actions = QHBoxLayout()
@@ -476,13 +491,17 @@ class TaskRecordsDialog(QDialog):
                 occurrence_start=self._occurrence_start,
             )
         except (LookupError, ValueError) as error:
-            QMessageBox.warning(self, "결과 메모를 저장하지 못했습니다.", str(error))
+            QMessageBox.warning(self, "완료 요약을 저장하지 못했습니다.", str(error))
             return
         self.changed.emit()
-        QMessageBox.information(self, "저장 완료", "결과 메모를 저장했습니다.")
+        QMessageBox.information(self, "저장 완료", "완료 요약을 저장했습니다.")
 
     def _refresh_work_logs(self) -> None:
-        logs = self._record_service.work_logs(task_id=self._task_id)
+        logs = self._record_service.work_logs(
+            task_id=self._task_id,
+            occurrence_start=self._occurrence_start,
+            occurrence_only=self._occurrence_start is not None,
+        )
         self._work_logs_by_id = {log.id: log for log in logs if log.id is not None}
         self.work_log_list.clear()
         for log in logs:
@@ -517,14 +536,21 @@ class TaskRecordsDialog(QDialog):
         self.save_log_button.setText("기록 추가")
         self.log_content_edit.setFocus()
 
-    def _save_work_log(self) -> None:
+    def _save_work_log(
+        self,
+        _checked: bool = False,
+        *,
+        allow_duplicate: bool = False,
+    ) -> None:
         try:
             if self._selected_log_id is None:
                 self._record_service.add_work_log(
                     task_id=self._task_id,
+                    occurrence_start=self._occurrence_start,
                     log_date=cast(date, self.log_date_edit.date().toPython()),
                     content=self.log_content_edit.toPlainText(),
                     result=self.log_result_edit.toPlainText(),
+                    allow_duplicate=allow_duplicate,
                 )
             else:
                 self._record_service.update_work_log(
@@ -532,7 +558,17 @@ class TaskRecordsDialog(QDialog):
                     log_date=cast(date, self.log_date_edit.date().toPython()),
                     content=self.log_content_edit.toPlainText(),
                     result=self.log_result_edit.toPlainText(),
+                    allow_duplicate=allow_duplicate,
                 )
+        except DuplicateWorkLogError as error:
+            answer = QMessageBox.question(
+                self,
+                "중복 업무일지",
+                f"{error}\n그래도 새 기록으로 저장하시겠습니까?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._save_work_log(allow_duplicate=True)
+            return
         except (RecordValidationError, LookupError) as error:
             QMessageBox.warning(self, "업무일지를 저장하지 못했습니다.", str(error))
             return
@@ -633,6 +669,31 @@ class TaskRecordsDialog(QDialog):
         progress.show()
         thread.start()
 
+    def reject(self) -> None:
+        if self._defer_close_for_attachment_import():
+            return
+        super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._defer_close_for_attachment_import():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _defer_close_for_attachment_import(self) -> bool:
+        thread = self._attachment_thread
+        if thread is None or not thread.isRunning():
+            return False
+        self._close_when_attachment_finishes = True
+        if self._attachment_worker is not None:
+            self._attachment_worker.cancel()
+        if self._attachment_progress is not None:
+            self._attachment_progress.setLabelText(
+                "첨부파일 복사를 취소하고 안전하게 마무리하고 있습니다."
+            )
+            self._attachment_progress.setCancelButton(None)
+        return True
+
     @Slot(object)
     def _attachment_imported(self, _attachment: object) -> None:
         self._refresh_attachments()
@@ -657,6 +718,12 @@ class TaskRecordsDialog(QDialog):
         self._attachment_progress = None
         if thread is not None:
             thread.deleteLater()
+        if self._close_when_attachment_finishes:
+            self._close_when_attachment_finishes = False
+            QTimer.singleShot(0, self._finish_deferred_close)
+
+    def _finish_deferred_close(self) -> None:
+        QDialog.reject(self)
 
     def _attachment_selected(
         self,
@@ -801,14 +868,12 @@ class WorkLogBrowserDialog(QDialog):
         self._task_service = task_service
         self._record_service = record_service
         self._attachment_service = attachment_service
-        self._logs_by_id: dict[int, WorkLog] = {}
-        self._completed_by_key: dict[tuple[int, str], Task] = {}
+        self._groups_by_key: dict[tuple[str, int], _RecordGroup] = {}
         self._selected_task_context: tuple[int, datetime | None] | None = None
         self._loaded_completed: list[Task] = []
         self._loaded_logs: list[WorkLog] = []
         self._completed_offset = 0
         self._log_offset = 0
-        self._search_total = 0
         self.setWindowTitle("날짜별 업무일지")
         self.resize(680, 560)
         self.setMinimumSize(500, 440)
@@ -820,7 +885,9 @@ class WorkLogBrowserDialog(QDialog):
         root.addWidget(title)
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("workLogSearch")
-        self.search_edit.setPlaceholderText("과거 업무 검색: 제목, 설명, 결과, 업무일지 내용")
+        self.search_edit.setPlaceholderText(
+            "과거 업무 검색: 제목, 설명, 완료 요약, 업무일지 내용"
+        )
         self.search_edit.setClearButtonEnabled(True)
         root.addWidget(self.search_edit)
         self._search_timer = QTimer(self)
@@ -866,22 +933,28 @@ class WorkLogBrowserDialog(QDialog):
         controls.addWidget(self.next_button)
         root.addWidget(self.day_controls_widget)
 
+        self.result_count_label = QLabel()
+        self.result_count_label.setObjectName("workLogResultCount")
+        self.result_count_label.setProperty("muted", True)
+        root.addWidget(self.result_count_label)
+
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("workLogBrowserList")
         self.list_widget.currentItemChanged.connect(self._show_selected)
         self.list_widget.itemDoubleClicked.connect(lambda _item: self._open_selected_records())
         root.addWidget(self.list_widget, 1)
-        self.load_more_button = QPushButton("검색 결과 더 보기")
+        self.load_more_button = QPushButton("업무 더 보기")
         self.load_more_button.setObjectName("workLogLoadMoreButton")
         self.load_more_button.clicked.connect(self._load_more_search)
         self.load_more_button.hide()
         root.addWidget(self.load_more_button, alignment=Qt.AlignmentFlag.AlignCenter)
-        self.detail = QLabel("날짜를 선택하면 기록을 확인할 수 있습니다.")
+        self.detail = QTextEdit()
         self.detail.setObjectName("workLogBrowserDetail")
-        self.detail.setWordWrap(True)
-        self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail.setReadOnly(True)
+        self.detail.setMaximumHeight(220)
+        self.detail.setPlainText("날짜를 선택하면 기록을 확인할 수 있습니다.")
         root.addWidget(self.detail)
-        self.open_records_button = QPushButton("결과 · 기록 열기")
+        self.open_records_button = QPushButton("완료 요약 · 기록 열기")
         self.open_records_button.setObjectName("workLogOpenRecordsButton")
         self.open_records_button.setEnabled(False)
         self.open_records_button.clicked.connect(self._open_selected_records)
@@ -938,7 +1011,8 @@ class WorkLogBrowserDialog(QDialog):
         if date_from is not None and date_to is not None and date_from > date_to:
             self.load_more_button.hide()
             self.list_widget.clear()
-            self.detail.setText("검색 시작일은 종료일보다 늦을 수 없습니다.")
+            self.result_count_label.setText("검색 결과 0개 업무")
+            self.detail.setPlainText("검색 시작일은 종료일보다 늦을 수 없습니다.")
             return
         completed_page = self._task_service.completed_search_page(
             search=search,
@@ -958,7 +1032,6 @@ class WorkLogBrowserDialog(QDialog):
         self._loaded_logs.extend(log_page.items)
         self._completed_offset += len(completed_page.items)
         self._log_offset += len(log_page.items)
-        self._search_total = completed_page.total + log_page.total
         self._render_entries(
             self._loaded_completed,
             self._loaded_logs,
@@ -967,9 +1040,12 @@ class WorkLogBrowserDialog(QDialog):
         has_more = completed_page.has_more or log_page.has_more
         self.load_more_button.setVisible(has_more)
         self.load_more_button.setText(
-            f"더 보기 ({len(self._loaded_completed) + len(self._loaded_logs):,} / "
-            f"{self._search_total:,})"
+            f"업무 더 보기 (현재 {len(self._groups_by_key):,}개)"
         )
+        if has_more:
+            self.result_count_label.setText(
+                f"검색 결과 현재 {len(self._groups_by_key):,}개 업무 · 더 있음"
+            )
 
     def _render_entries(
         self,
@@ -978,50 +1054,190 @@ class WorkLogBrowserDialog(QDialog):
         *,
         searching: bool,
     ) -> None:
-        self._logs_by_id = {log.id: log for log in logs if log.id is not None}
-        self._completed_by_key.clear()
+        task_ids = {
+            task.id for task in completed if task.id is not None
+        } | {
+            log.task_id for log in logs if log.task_id is not None
+        }
+        tasks_by_id = self._task_service.get_many_including_deleted(tuple(task_ids))
+        groups: dict[tuple[str, int], _RecordGroup] = {}
+        for completed_task in completed:
+            if completed_task.id is None:
+                continue
+            key = ("task", completed_task.id)
+            group = groups.setdefault(
+                key,
+                _RecordGroup(
+                    key=key,
+                    task=tasks_by_id.get(completed_task.id, completed_task),
+                ),
+            )
+            group.completed = completed_task
+            if completed_task.recurrence_rule:
+                group.occurrence_start = completed_task.starts_at
+        for log in logs:
+            if log.task_id is None:
+                if log.id is None:
+                    continue
+                key = ("log", log.id)
+            else:
+                key = ("task", log.task_id)
+            group = groups.setdefault(
+                key,
+                _RecordGroup(
+                    key=key,
+                    task=(
+                        tasks_by_id.get(log.task_id)
+                        if log.task_id is not None
+                        else None
+                    ),
+                ),
+            )
+            group.logs.append(log)
+
+        search = self.search_edit.text().strip()
+        for group in groups.values():
+            group.match_locations = self._match_locations(group, search)
+
+        task_group_ids = tuple(
+            key[1] for key in groups if key[0] == "task"
+        )
+        work_log_counts = self._record_service.work_log_counts(task_group_ids)
+        ordered_groups = sorted(
+            groups.values(),
+            key=self._group_sort_key,
+            reverse=True,
+        )
+        self._groups_by_key = groups
         self._selected_task_context = None
         self.open_records_button.setEnabled(False)
         self.list_widget.clear()
-        for task in completed:
-            if task.id is None:
-                continue
-            occurrence_start = task.starts_at if task.recurrence_rule else None
-            occurrence_key = occurrence_start.isoformat() if occurrence_start is not None else ""
-            key = (task.id, occurrence_key)
-            self._completed_by_key[key] = task
-            result_note = self._task_service.result_note(task.id, occurrence_start)
-            result_state = "결과 있음" if result_note else "결과 미입력"
-            completed_date = (
-                task.completed_at.astimezone(ZoneInfo(task.timezone)).date().isoformat()
-                if task.completed_at is not None
-                else "날짜 미상"
-            )
-            prefix = f"[완료 {completed_date}]" if searching else "[완료]"
-            item = QListWidgetItem(f"{prefix} {task.title}  ·  {result_state}")
-            item.setData(Qt.ItemDataRole.UserRole, ("task", *key))
+        for group in ordered_groups:
+            title = group.task.title if group.task is not None else "연결되지 않은 기록"
+            states: list[str] = []
+            if group.completed is not None:
+                states.append("완료")
+            if group.key[0] == "task":
+                count = work_log_counts.get(group.key[1], 0)
+            else:
+                count = len(group.logs)
+            group.work_log_count = count
+            states.append(f"업무일지 {count:,}건")
+            if searching and group.match_locations:
+                states.append(
+                    "검색 위치: " + "·".join(sorted(group.match_locations))
+                )
+            item = QListWidgetItem(f"{title}  ·  {'  ·  '.join(states)}")
+            item.setData(Qt.ItemDataRole.UserRole, ("group", *group.key))
             self.list_widget.addItem(item)
-        task_ids = tuple({log.task_id for log in logs if log.task_id is not None})
-        tasks_by_id = self._task_service.get_many_including_deleted(task_ids)
-        for log in logs:
-            task_title = "연결되지 않은 기록"
-            if log.task_id is not None:
-                log_task = tasks_by_id.get(log.task_id)
-                task_title = log_task.title if log_task is not None else "삭제된 업무"
-            preview = " ".join(log.content.splitlines())
-            prefix = f"[일지 {log.log_date.isoformat()}]" if searching else "[일지]"
-            item = QListWidgetItem(f"{prefix} {task_title}  ·  {preview}")
-            item.setData(Qt.ItemDataRole.UserRole, ("log", log.id))
-            self.list_widget.addItem(item)
-        self.detail.setText(
+        self.result_count_label.setText(
+            f"검색 결과 {len(groups):,}개 업무"
+            if searching
+            else f"이 날짜의 기록 {len(groups):,}개 업무"
+        )
+        self.detail.setPlainText(
             (
-                "검색 결과가 없습니다. 제목, 설명, 결과 또는 업무일지 내용으로 검색해 보세요."
+                "검색 결과가 없습니다. 제목, 설명, 완료 요약 또는 업무일지 내용으로 검색해 보세요."
                 if searching
                 else "이 날짜에 완료한 업무나 작성한 업무일지가 없습니다."
             )
-            if not completed and not logs
-            else "완료 업무 또는 업무일지를 선택하면 내용을 확인할 수 있습니다."
+            if not groups
+            else "업무를 선택하면 완료 요약, 업무일지와 첨부파일을 함께 확인할 수 있습니다."
         )
+
+    def _match_locations(self, group: _RecordGroup, search: str) -> set[str]:
+        terms = tuple(term.casefold() for term in search.split() if term)
+        if not terms:
+            return set()
+
+        def contains_term(value: str) -> bool:
+            normalized = value.casefold()
+            return any(term in normalized for term in terms)
+
+        locations: set[str] = set()
+        task = group.task
+        if task is not None:
+            if contains_term(task.title):
+                locations.add("제목")
+            if contains_term(task.description):
+                locations.add("설명")
+            occurrence_start = group.occurrence_start
+            if task.id is not None:
+                summary = self._task_service.result_note(task.id, occurrence_start)
+                if contains_term(summary):
+                    locations.add("완료 요약")
+        for log in group.logs:
+            if contains_term(log.content):
+                locations.add("업무일지")
+            if contains_term(log.result):
+                locations.add("진행 결과")
+        return locations
+
+    @staticmethod
+    def _group_sort_key(group: _RecordGroup) -> tuple[int, str]:
+        dates = [log.log_date.toordinal() for log in group.logs]
+        if group.completed is not None and group.completed.completed_at is not None:
+            zone = ZoneInfo(group.completed.timezone)
+            dates.append(group.completed.completed_at.astimezone(zone).date().toordinal())
+        title = group.task.title.casefold() if group.task is not None else ""
+        return max(dates, default=0), title
+
+    def _show_group_detail(self, group: _RecordGroup) -> None:
+        task = group.task
+        if task is None or task.id is None:
+            logs = group.logs
+            self._selected_task_context = None
+            title = "연결되지 않은 기록"
+            summary = ""
+            status = "업무 연결 없음"
+            attachment_text = "첨부파일 0개"
+            work_log_count = len(logs)
+        else:
+            occurrence_start = group.occurrence_start
+            if occurrence_start is None:
+                for log in sorted(
+                    group.logs,
+                    key=lambda item: (item.log_date, item.updated_at),
+                    reverse=True,
+                ):
+                    if log.occurrence_id is None:
+                        continue
+                    occurrence = self._task_service.occurrence_by_id(log.occurrence_id)
+                    if occurrence is not None and occurrence.task_id == task.id:
+                        occurrence_start = occurrence.occurrence_start
+                        break
+            self._selected_task_context = (task.id, occurrence_start)
+            title = task.title
+            summary = self._task_service.result_note(task.id, occurrence_start)
+            status = "완료" if group.completed is not None else "업무 기록"
+            logs = list(self._record_service.work_logs(task_id=task.id, limit=20))
+            work_log_count = group.work_log_count
+            if self._attachment_service is not None:
+                attachments = self._attachment_service.attachments_for_task(task.id)
+                attachment_text = f"첨부파일 {len(attachments):,}개"
+            else:
+                attachment_text = "첨부파일 있음" if task.has_attachments else "첨부파일 0개"
+
+        lines = [f"{title} · {status}"]
+        if group.match_locations:
+            lines.extend(
+                ("", "검색 위치: " + " · ".join(sorted(group.match_locations)))
+            )
+        lines.extend(("", "완료 요약", summary or "입력된 완료 요약이 없습니다."))
+        log_heading = f"업무일지 {work_log_count:,}건"
+        if work_log_count > len(logs):
+            log_heading += f" · 최근 {len(logs):,}건 표시"
+        lines.extend(("", log_heading))
+        if not logs:
+            lines.append("작성된 업무일지가 없습니다.")
+        for log in logs:
+            content = " ".join(log.content.splitlines())
+            lines.append(f"- {log.log_date:%Y-%m-%d}  {content}")
+            if log.result:
+                result = " ".join(log.result.splitlines())
+                lines.append(f"  진행 결과 / 다음 단계: {result}")
+        lines.extend(("", attachment_text))
+        self.detail.setPlainText("\n".join(lines))
 
     def _show_selected(
         self,
@@ -1031,30 +1247,13 @@ class WorkLogBrowserDialog(QDialog):
         if current is None:
             return
         data = current.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(data, tuple) or not data:
+        if not isinstance(data, tuple) or len(data) != 3 or data[0] != "group":
             return
-        if data[0] == "task" and len(data) == 3:
-            task_id = int(data[1])
-            occurrence_start = datetime.fromisoformat(data[2]) if data[2] else None
-            task = self._completed_by_key.get((task_id, str(data[2])))
-            if task is None:
-                return
-            result_note = self._task_service.result_note(task_id, occurrence_start)
-            result = result_note or "아직 입력하지 않았습니다."
-            self.detail.setText(f"완료 업무\n{task.title}\n\n결과\n{result}")
-            self._selected_task_context = (task_id, occurrence_start)
-            self.open_records_button.setEnabled(True)
+        key = (str(data[1]), int(data[2]))
+        group = self._groups_by_key.get(key)
+        if group is None:
             return
-        if data[0] != "log" or len(data) != 2:
-            return
-        work_log = self._logs_by_id.get(data[1])
-        if work_log is None:
-            return
-        result = f"\n\n결과\n{work_log.result}" if work_log.result else ""
-        self.detail.setText(f"진행 내용\n{work_log.content}{result}")
-        self._selected_task_context = (
-            (work_log.task_id, None) if work_log.task_id is not None else None
-        )
+        self._show_group_detail(group)
         self.open_records_button.setEnabled(self._selected_task_context is not None)
 
     def _open_selected_records(self) -> None:

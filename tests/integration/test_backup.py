@@ -105,6 +105,26 @@ def test_automatic_backup_retention_removes_only_old_automatic_files(tmp_path) -
     assert automatic[1].exists() and automatic[2].exists()
 
 
+def test_manual_backup_retention_removes_only_old_manual_files(tmp_path) -> None:
+    paths = AppPaths(tmp_path / "officeflow")
+    paths.ensure_directories()
+    _database(paths.database_file, ("one",))
+    manager = BackupManager(paths)
+    manual = [manager.create_backup(reason="manual").path for _ in range(3)]
+    automatic = manager.create_backup(reason="automatic").path
+    for index, path in enumerate(manual):
+        os.utime(path, (100 + index, 100 + index))
+
+    assert manager.list_manual_backups() == tuple(reversed(manual))
+
+    removed = manager.prune_manual_backups(2)
+
+    assert removed == (manual[0],)
+    assert automatic.exists()
+    assert not manual[0].exists()
+    assert manual[1].exists() and manual[2].exists()
+
+
 def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> None:
     paths = AppPaths(tmp_path / "officeflow")
     paths.ensure_directories()
@@ -196,6 +216,9 @@ def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> No
     assert usage.orphan_attachment_bytes == len(b"orphaned-data")
     assert usage.backup_count == 2
     assert usage.backup_bytes == len(b"backup-onebackup-two")
+    assert usage.manual_backup_count == 0
+    assert usage.automatic_backup_count == 0
+    assert usage.latest_automatic_backup_at is None
     assert usage.database_bytes > 0
     assert usage.largest_files[0].orphaned is True
     assert usage.total_bytes == (

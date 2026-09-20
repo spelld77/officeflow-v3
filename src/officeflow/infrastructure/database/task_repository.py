@@ -312,6 +312,11 @@ class SqlAlchemyTaskRepository:
             record = session.scalar(statement)
             return self._occurrence_to_domain(record) if record is not None else None
 
+    def get_occurrence_by_id(self, occurrence_id: int) -> TaskOccurrence | None:
+        with self._sessions.transaction() as session:
+            record = session.get(TaskOccurrenceRecord, occurrence_id)
+            return self._occurrence_to_domain(record) if record is not None else None
+
     def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence:
         statement = select(TaskOccurrenceRecord).where(
             TaskOccurrenceRecord.task_id == occurrence.task_id,

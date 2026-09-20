@@ -17,6 +17,9 @@ def test_settings_dialog_normalizes_desktop_options(qtbot: QtBot) -> None:
     dialog.backup_interval_spin.setValue(12)
     dialog.backup_keep_spin.setValue(7)
 
+    assert "프로그램 종료·절전" in dialog.grace_minutes_spin.toolTip()
+    assert "범위보다 오래된 알림" in dialog.settings_hint.text()
+
     dialog._validate_and_accept()
     settings = dialog.settings()
 
