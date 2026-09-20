@@ -511,6 +511,11 @@ class DataManagementDialog(QDialog):
             issues.append("첨부파일 총량 5 GB 이상")
         if result.aged_trash_task_count:
             issues.append(f"30일 지난 휴지통 업무 {result.aged_trash_task_count:,}개")
+        if result.reminder_cleanup_candidate_count:
+            issues.append(
+                "180일 지난 처리 완료 알림 "
+                f"{result.reminder_cleanup_candidate_count:,}개"
+            )
         self.usage_issue_label.setText(
             "확인 필요  " + " · ".join(issues)
             if issues

@@ -57,6 +57,9 @@ class SqlAlchemyReminderRepository:
                     session.delete(record)
                 else:
                     record.enabled = rule.enabled
+                    record.next_fire_at = None
+                    record.next_occurrence_start = None
+                    record.schedule_initialized = False
             for rule in requested.values():
                 session.add(
                     ReminderRecord(
@@ -66,6 +69,9 @@ class SqlAlchemyReminderRepository:
                         absolute_at=rule.absolute_at,
                         enabled=rule.enabled,
                         last_fired_key=None,
+                        next_fire_at=None,
+                        next_occurrence_start=None,
+                        schedule_initialized=False,
                     )
                 )
         return self.list_reminders(task_id)
@@ -89,6 +95,69 @@ class SqlAlchemyReminderRepository:
                 )
                 for reminder, task in session.execute(statement).all()
             )
+
+    def list_due_reminder_targets(
+        self, due_at: datetime, *, limit: int = 200
+    ) -> tuple[ReminderTarget, ...]:
+        statement = (
+            select(ReminderRecord, TaskRecord)
+            .join(TaskRecord, TaskRecord.id == ReminderRecord.task_id)
+            .where(
+                ReminderRecord.enabled.is_(True),
+                ReminderRecord.next_fire_at.is_not(None),
+                ReminderRecord.next_fire_at <= due_at,
+                TaskRecord.deleted_at.is_(None),
+                TaskRecord.status.in_((TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)),
+            )
+            .order_by(ReminderRecord.next_fire_at, ReminderRecord.id)
+            .limit(limit)
+        )
+        with self._sessions.transaction() as session:
+            return tuple(
+                ReminderTarget(
+                    reminder=self._to_reminder(reminder),
+                    task=SqlAlchemyTaskRepository._to_domain(task),
+                )
+                for reminder, task in session.execute(statement).all()
+            )
+
+    def list_unscheduled_reminder_targets(
+        self, *, limit: int = 100
+    ) -> tuple[ReminderTarget, ...]:
+        statement = (
+            select(ReminderRecord, TaskRecord)
+            .join(TaskRecord, TaskRecord.id == ReminderRecord.task_id)
+            .where(
+                ReminderRecord.enabled.is_(True),
+                ReminderRecord.schedule_initialized.is_(False),
+                TaskRecord.deleted_at.is_(None),
+                TaskRecord.status.in_((TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)),
+            )
+            .order_by(ReminderRecord.id)
+            .limit(limit)
+        )
+        with self._sessions.transaction() as session:
+            return tuple(
+                ReminderTarget(
+                    reminder=self._to_reminder(reminder),
+                    task=SqlAlchemyTaskRepository._to_domain(task),
+                )
+                for reminder, task in session.execute(statement).all()
+            )
+
+    def save_reminder_schedule(
+        self,
+        reminder_id: int,
+        next_fire_at: datetime | None,
+        next_occurrence_start: datetime | None,
+    ) -> None:
+        with self._sessions.transaction() as session:
+            record = session.get(ReminderRecord, reminder_id)
+            if record is None:
+                raise LookupError(f"알림 규칙 {reminder_id}을(를) 찾을 수 없습니다.")
+            record.next_fire_at = next_fire_at
+            record.next_occurrence_start = next_occurrence_start
+            record.schedule_initialized = True
 
     def get_reminder_target(self, reminder_id: int) -> ReminderTarget | None:
         statement = (
@@ -197,6 +266,9 @@ class SqlAlchemyReminderRepository:
             absolute_at=record.absolute_at,
             enabled=record.enabled,
             last_fired_key=record.last_fired_key,
+            next_fire_at=record.next_fire_at,
+            next_occurrence_start=record.next_occurrence_start,
+            schedule_initialized=record.schedule_initialized,
         )
 
     @staticmethod

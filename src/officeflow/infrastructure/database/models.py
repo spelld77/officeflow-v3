@@ -89,6 +89,8 @@ class ReminderRecord(Base):
     __tablename__ = "reminders"
     __table_args__ = (
         CheckConstraint("relation IN ('start','end','absolute')", name="valid_relation"),
+        Index("ix_reminders_next_fire", "enabled", "next_fire_at"),
+        Index("ix_reminders_schedule_pending", "enabled", "schedule_initialized"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -98,6 +100,9 @@ class ReminderRecord(Base):
     absolute_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     last_fired_key: Mapped[str | None] = mapped_column(String(200))
+    next_fire_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    next_occurrence_start: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    schedule_initialized: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ReminderDeliveryRecord(Base):
@@ -109,6 +114,7 @@ class ReminderDeliveryRecord(Base):
         ),
         Index("ix_reminder_deliveries_due", "status", "snoozed_until"),
         Index("ix_reminder_deliveries_schedule", "scheduled_at", "status"),
+        Index("ix_reminder_deliveries_cleanup", "status", "acknowledged_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -91,6 +91,7 @@ class DataUsageSnapshot:
     archived_task_count: int
     trash_task_count: int
     aged_trash_task_count: int
+    reminder_cleanup_candidate_count: int
     linked_attachment_count: int
     linked_attachment_bytes: int
     detached_attachment_count: int
@@ -133,6 +134,12 @@ class BackupManager:
             .replace(tzinfo=None)
             .strftime("%Y-%m-%d %H:%M:%S.%f")
         )
+        reminder_cutoff = (
+            (current - timedelta(days=180))
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+            .strftime("%Y-%m-%d %H:%M:%S.%f")
+        )
         try:
             with closing(sqlite3.connect(self._paths.database_file)) as connection:
                 connection.execute("PRAGMA busy_timeout=5000")
@@ -155,6 +162,17 @@ class BackupManager:
                     FROM attachments
                     """
                 ).fetchall()
+                reminder_cleanup_candidate_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM reminder_deliveries
+                        WHERE status IN ('acknowledged','completed','deferred')
+                          AND acknowledged_at <= ?
+                        """,
+                        (reminder_cutoff,),
+                    ).fetchone()[0]
+                )
         except sqlite3.Error as error:
             raise BackupError(f"데이터 사용량을 확인하지 못했습니다: {error}") from error
         if task_row is None:
@@ -233,6 +251,7 @@ class BackupManager:
             archived_task_count=int(task_row[3]),
             trash_task_count=int(task_row[4]),
             aged_trash_task_count=int(task_row[5]),
+            reminder_cleanup_candidate_count=reminder_cleanup_candidate_count,
             linked_attachment_count=len(linked),
             linked_attachment_bytes=sum(size for _name, size, _checksum in linked.values()),
             detached_attachment_count=len(detached),

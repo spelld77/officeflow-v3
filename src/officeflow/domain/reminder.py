@@ -46,8 +46,13 @@ class Reminder:
     absolute_at: datetime | None
     enabled: bool
     last_fired_key: str | None = None
+    next_fire_at: datetime | None = None
+    next_occurrence_start: datetime | None = None
+    schedule_initialized: bool = False
 
     def __post_init__(self) -> None:
+        _require_aware(self.next_fire_at, "다음 알림 시각")
+        _require_aware(self.next_occurrence_start, "다음 반복 발생 시각")
         ReminderRuleInput(
             relation=self.relation,
             offset_minutes=self.offset_minutes,

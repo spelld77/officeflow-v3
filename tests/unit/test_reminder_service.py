@@ -34,6 +34,8 @@ class InMemoryReminderRepository(ReminderRepository):
         self.deliveries: dict[int, ReminderDelivery] = {}
         self.next_reminder_id = 1
         self.next_delivery_id = 1
+        self.enabled_scan_count = 0
+        self.due_query_count = 0
 
     def list_reminders(self, task_id: int) -> tuple[Reminder, ...]:
         return tuple(rule for rule in self.reminders.values() if rule.task_id == task_id)
@@ -56,7 +58,13 @@ class InMemoryReminderRepository(ReminderRepository):
                 )
                 self.next_reminder_id += 1
             else:
-                reminder = replace(reminder, enabled=rule.enabled)
+                reminder = replace(
+                    reminder,
+                    enabled=rule.enabled,
+                    next_fire_at=None,
+                    next_occurrence_start=None,
+                    schedule_initialized=False,
+                )
             assert reminder.id is not None
             keep[reminder.id] = reminder
         removed = {
@@ -73,12 +81,62 @@ class InMemoryReminderRepository(ReminderRepository):
         return self.list_reminders(task_id)
 
     def list_enabled_reminder_targets(self) -> tuple[ReminderTarget, ...]:
+        self.enabled_scan_count += 1
         return tuple(
             ReminderTarget(reminder, self.tasks.tasks[reminder.task_id])
             for reminder in self.reminders.values()
             if reminder.enabled
             and self.tasks.tasks[reminder.task_id].status
             in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+        )
+
+    def list_due_reminder_targets(
+        self, due_at: datetime, *, limit: int = 200
+    ) -> tuple[ReminderTarget, ...]:
+        self.due_query_count += 1
+        targets = (
+            ReminderTarget(reminder, task)
+            for reminder in self.reminders.values()
+            if reminder.enabled
+            and reminder.next_fire_at is not None
+            and reminder.next_fire_at <= due_at
+            and (task := self.tasks.tasks[reminder.task_id]).deleted_at is None
+            and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+        )
+        return tuple(
+            sorted(
+                targets,
+                key=lambda target: (
+                    target.reminder.next_fire_at or datetime.max.replace(tzinfo=UTC),
+                    target.reminder.id or 0,
+                ),
+            )[:limit]
+        )
+
+    def list_unscheduled_reminder_targets(
+        self, *, limit: int = 100
+    ) -> tuple[ReminderTarget, ...]:
+        return tuple(
+            ReminderTarget(reminder, task)
+            for reminder in self.reminders.values()
+            if reminder.enabled
+            and not reminder.schedule_initialized
+            and (task := self.tasks.tasks[reminder.task_id]).deleted_at is None
+            and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+        )[:limit]
+
+    def save_reminder_schedule(
+        self,
+        reminder_id: int,
+        next_fire_at: datetime | None,
+        next_occurrence_start: datetime | None,
+    ) -> None:
+        reminder = self.reminders[reminder_id]
+        self.reminders[reminder_id] = replace(
+            reminder,
+            next_fire_at=next_fire_at,
+            next_occurrence_start=next_occurrence_start,
+            schedule_initialized=True,
         )
 
     def get_reminder_target(self, reminder_id: int) -> ReminderTarget | None:
@@ -170,6 +228,32 @@ def test_start_and_end_reminders_fire_once_at_their_due_times() -> None:
     assert [alert.reminder.relation for alert in first] == [ReminderRelation.START]
     assert duplicate == ()
     assert [alert.reminder.relation for alert in second] == [ReminderRelation.END]
+
+
+def test_poll_uses_cached_due_schedule_instead_of_scanning_every_rule() -> None:
+    task_service, reminder_service, repository = build_services()
+    due_at = datetime(2026, 9, 14, 1, 0, tzinfo=UTC)
+    due_task = task_service.create(TaskDraft(title="지금 알림", starts_at=due_at))
+    future_task = task_service.create(
+        TaskDraft(title="나중 알림", starts_at=due_at + timedelta(days=30))
+    )
+    assert due_task.id is not None and future_task.id is not None
+    for task in (due_task, future_task):
+        assert task.id is not None
+        reminder_service.replace_rules(
+            task.id,
+            (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+        )
+
+    alerts = reminder_service.poll_due(now=due_at)
+
+    assert [alert.task.title for alert in alerts] == ["지금 알림"]
+    assert repository.enabled_scan_count == 0
+    assert repository.due_query_count == 1
+    schedules = {item.task_id: item for item in repository.reminders.values()}
+    assert schedules[due_task.id].schedule_initialized is True
+    assert schedules[due_task.id].next_fire_at is None
+    assert schedules[future_task.id].next_fire_at == due_at + timedelta(days=30)
 
 
 def test_recent_missed_reminder_is_recovered_only_once() -> None:
@@ -309,6 +393,8 @@ def test_completing_recurring_alert_keeps_template_active() -> None:
     )
     alert = reminder_service.poll_due(now=datetime(2026, 9, 14, 1, 0, tzinfo=UTC))[0]
     assert alert.delivery.id is not None
+    cached_rule = next(iter(repository.reminders.values()))
+    assert cached_rule.next_fire_at == datetime(2026, 9, 15, 1, 0, tzinfo=UTC)
 
     reminder_service.complete(
         alert.delivery.id,

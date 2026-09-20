@@ -15,7 +15,7 @@ from officeflow.application.tasks import (
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.database.migrate import upgrade_database
-from officeflow.infrastructure.database.models import AttachmentRecord
+from officeflow.infrastructure.database.models import AttachmentRecord, ReminderRecord
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
@@ -276,6 +276,48 @@ def test_reminder_delivery_history_prevents_duplicate_after_repository_restart(
     assert snoozed.snoozed_until == start + timedelta(minutes=11)
     assert len(refired) == 1
     assert refired[0].delivery.id == first[0].delivery.id
+    engine.dispose()
+
+
+def test_task_schedule_change_invalidates_and_rebuilds_reminder_cache(
+    tmp_path: Path,
+) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    sessions = SessionFactory(engine)
+    task_service = TaskService(SqlAlchemyTaskRepository(sessions))
+    reminder_service = ReminderService(SqlAlchemyReminderRepository(sessions), task_service)
+    first_due = datetime(2026, 9, 20, 1, 0, tzinfo=UTC)
+    task = task_service.create(TaskDraft(title="일정 변경", starts_at=first_due))
+    assert task.id is not None
+    reminder = reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )[0]
+    assert reminder.id is not None
+    with sessions.transaction() as session:
+        cached = session.get(ReminderRecord, reminder.id)
+        assert cached is not None
+        assert cached.schedule_initialized is True
+        assert cached.next_fire_at == first_due
+
+    changed_due = first_due + timedelta(hours=2)
+    task_service.update(
+        task.id,
+        TaskDraft(title=task.title, starts_at=changed_due),
+        now=first_due - timedelta(hours=1),
+    )
+    with sessions.transaction() as session:
+        invalidated = session.get(ReminderRecord, reminder.id)
+        assert invalidated is not None
+        assert invalidated.schedule_initialized is False
+        assert invalidated.next_fire_at is None
+
+    alerts = reminder_service.poll_due(now=changed_due)
+
+    assert len(alerts) == 1
+    assert alerts[0].delivery.scheduled_at == changed_due
     engine.dispose()
 
 

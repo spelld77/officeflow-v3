@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from typing import ClassVar
 from zoneinfo import ZoneInfo
@@ -1341,7 +1341,11 @@ class MainWindow(QMainWindow):
         self._selected_occurrence_start = None
         if self._reminder_service is not None and saved.id is not None:
             try:
-                self._reminder_service.replace_rules(saved.id, editor.draft().reminder_rules)
+                self._reminder_service.replace_rules(
+                    saved.id,
+                    editor.draft().reminder_rules,
+                    now=datetime.now(UTC),
+                )
             except Exception as error:
                 self._show_error("알림 규칙을 저장하지 못했습니다.", error)
                 return

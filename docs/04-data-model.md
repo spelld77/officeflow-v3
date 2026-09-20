@@ -67,6 +67,9 @@
 | absolute_at | 절대 알림 시각 |
 | enabled | 활성 여부 |
 | last_fired_key | 마지막 발송 중복 방지 키 |
+| next_fire_at | 다음에 확인할 실제 알림 시각 |
+| next_occurrence_start | 반복 일정의 다음 원래 발생 시각 |
+| schedule_initialized | 다음 시각 계산 완료 여부. 다음 일정이 없어도 true일 수 있음 |
 
 ### reminder_deliveries
 
@@ -124,9 +127,11 @@
 - `task_occurrences(task_id, occurrence_start)` unique
 - `work_logs(log_date, task_id)`
 - `attachments(task_id)`
-- `reminders(enabled, absolute_at)`
+- `reminders(enabled, next_fire_at)`
+- `reminders(enabled, schedule_initialized)`
 - `reminder_deliveries(status, snoozed_until)`
 - `reminder_deliveries(scheduled_at, status)`
+- `reminder_deliveries(status, acknowledged_at)`
 
 추가 복합 인덱스는 Phase 3A의 5,000건 그룹·필터·검색 측정 결과를 기준으로 확정했다.
 
@@ -149,6 +154,8 @@
 - 앱 시작·절전 복귀 시 기본 120분 범위의 놓친 알림만 복구한다.
 - 완료·건너뛰기·취소된 반복 발생 건의 알림은 표시하지 않는다.
 - 다시 알림은 새 발송 이력을 만들지 않고 기존 이력을 재사용한다.
+- 폴링 후 반복 규칙은 다음 한 건만 계산해 저장하며, 단일 알림은 처리 후 다음 시각을 NULL로
+  두되 `schedule_initialized`로 미계산 상태와 구분한다.
 
 ## 6. 상태 전이
 

@@ -28,6 +28,8 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     delivery_indexes = {
         index["name"] for index in inspector.get_indexes("reminder_deliveries")
     }
+    reminder_indexes = {index["name"] for index in inspector.get_indexes("reminders")}
+    reminder_columns = {column["name"] for column in inspector.get_columns("reminders")}
     checklist_indexes = {index["name"] for index in inspector.get_indexes("checklist_items")}
     work_log_indexes = {index["name"] for index in inspector.get_indexes("work_logs")}
     attachment_indexes = {index["name"] for index in inspector.get_indexes("attachments")}
@@ -66,7 +68,14 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     assert {
         "ix_reminder_deliveries_due",
         "ix_reminder_deliveries_schedule",
+        "ix_reminder_deliveries_cleanup",
     } <= delivery_indexes
+    assert {"ix_reminders_next_fire", "ix_reminders_schedule_pending"} <= reminder_indexes
+    assert {
+        "next_fire_at",
+        "next_occurrence_start",
+        "schedule_initialized",
+    } <= reminder_columns
     assert "ix_checklist_items_task_position" in checklist_indexes
     assert "ix_work_logs_date_updated" in work_log_indexes
     assert {"ix_attachments_task_missing", "ix_attachments_detached_created"} <= attachment_indexes
@@ -78,8 +87,9 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "work_log_search_insert",
         "work_log_search_update",
         "work_log_search_delete",
+        "reminder_schedule_task_changed",
     } <= triggers
-    assert revision == "0008_full_text_search"
+    assert revision == "0009_reminder_schedule_cache"
 
 
 def test_initial_migration_is_idempotent(tmp_path: Path) -> None:
@@ -162,6 +172,49 @@ def test_existing_database_receives_attachment_cleanup_state(tmp_path: Path) -> 
     assert "ix_attachments_detached_created" in {
         index["name"] for index in inspector.get_indexes("attachments")
     }
+    migrated_engine.dispose()
+
+
+def test_existing_database_receives_reminder_schedule_cache(tmp_path: Path) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TRIGGER reminder_schedule_task_changed")
+        connection.exec_driver_sql("DROP INDEX ix_reminders_next_fire")
+        connection.exec_driver_sql("DROP INDEX ix_reminders_schedule_pending")
+        connection.exec_driver_sql("DROP INDEX ix_reminder_deliveries_cleanup")
+        connection.exec_driver_sql("ALTER TABLE reminders DROP COLUMN schedule_initialized")
+        connection.exec_driver_sql("ALTER TABLE reminders DROP COLUMN next_occurrence_start")
+        connection.exec_driver_sql("ALTER TABLE reminders DROP COLUMN next_fire_at")
+        connection.exec_driver_sql(
+            "UPDATE alembic_version SET version_num = '0008_full_text_search'"
+        )
+    engine.dispose()
+
+    upgrade_database(database_file)
+    migrated_engine = create_database_engine(database_file)
+    inspector = inspect(migrated_engine)
+    with migrated_engine.connect() as connection:
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            )
+        }
+
+    assert {
+        "next_fire_at",
+        "next_occurrence_start",
+        "schedule_initialized",
+    } <= {column["name"] for column in inspector.get_columns("reminders")}
+    assert {"ix_reminders_next_fire", "ix_reminders_schedule_pending"} <= {
+        index["name"] for index in inspector.get_indexes("reminders")
+    }
+    assert "ix_reminder_deliveries_cleanup" in {
+        index["name"] for index in inspector.get_indexes("reminder_deliveries")
+    }
+    assert "reminder_schedule_task_changed" in triggers
     migrated_engine.dispose()
 
 

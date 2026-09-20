@@ -8,12 +8,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import TaskDraft, TaskService
 from officeflow.bootstrap.paths import AppPaths
-from officeflow.domain.enums import TaskStatus
+from officeflow.domain.enums import ReminderRelation, TaskStatus
+from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.backup import BackupError, BackupManager
 from officeflow.infrastructure.database.migrate import upgrade_database
 from officeflow.infrastructure.database.models import AttachmentRecord
+from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 
@@ -118,6 +121,15 @@ def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> No
     deleted = task_service.create(TaskDraft(title="오래된 삭제 업무"), now=now)
     assert active.id is not None and deleted.id is not None
     task_service.move_to_trash(deleted.id, now=now - timedelta(days=31))
+    reminder_service = ReminderService(SqlAlchemyReminderRepository(sessions), task_service)
+    old_due = now - timedelta(days=181)
+    reminder_service.replace_rules(
+        active.id,
+        (ReminderRuleInput(ReminderRelation.ABSOLUTE, absolute_at=old_due),),
+    )
+    old_alert = reminder_service.poll_due(now=old_due)[0]
+    assert old_alert.delivery.id is not None
+    reminder_service.acknowledge(old_alert.delivery.id, now=old_due)
 
     linked_path = paths.attachment_dir / "aa" / "linked.bin"
     linked_path.parent.mkdir()
@@ -173,6 +185,7 @@ def test_data_usage_reports_records_files_and_cleanup_candidates(tmp_path) -> No
     assert usage.completed_task_count == 1
     assert usage.trash_task_count == 1
     assert usage.aged_trash_task_count == 1
+    assert usage.reminder_cleanup_candidate_count == 1
     assert usage.linked_attachment_count == 2
     assert usage.detached_attachment_count == 1
     assert usage.detached_attachment_bytes == 8

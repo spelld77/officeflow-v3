@@ -13,7 +13,7 @@ from officeflow.domain.enums import (
     TaskStatus,
 )
 from officeflow.domain.occurrence import TaskOccurrence
-from officeflow.domain.recurrence import expand_recurrence
+from officeflow.domain.recurrence import next_recurrence_start
 from officeflow.domain.reminder import Reminder, ReminderDelivery, ReminderRuleInput
 from officeflow.domain.task import Task
 
@@ -44,6 +44,21 @@ class ReminderRepository(Protocol):
     ) -> tuple[Reminder, ...]: ...
 
     def list_enabled_reminder_targets(self) -> tuple[ReminderTarget, ...]: ...
+
+    def list_due_reminder_targets(
+        self, due_at: datetime, *, limit: int = 200
+    ) -> tuple[ReminderTarget, ...]: ...
+
+    def list_unscheduled_reminder_targets(
+        self, *, limit: int = 100
+    ) -> tuple[ReminderTarget, ...]: ...
+
+    def save_reminder_schedule(
+        self,
+        reminder_id: int,
+        next_fire_at: datetime | None,
+        next_occurrence_start: datetime | None,
+    ) -> None: ...
 
     def get_reminder_target(self, reminder_id: int) -> ReminderTarget | None: ...
 
@@ -84,6 +99,8 @@ class ReminderService:
         self,
         task_id: int,
         rules: tuple[ReminderRuleInput, ...],
+        *,
+        now: datetime | None = None,
     ) -> tuple[Reminder, ...]:
         task = self._task_service.get(task_id)
         for rule in rules:
@@ -94,7 +111,29 @@ class ReminderService:
         identities = [rule.identity for rule in rules]
         if len(identities) != len(set(identities)):
             raise ValueError("동일한 알림 규칙을 중복으로 저장할 수 없습니다.")
-        return self._repository.replace_reminders(task_id, rules)
+        reminders = self._repository.replace_reminders(task_id, rules)
+        for reminder in reminders:
+            if reminder.id is None:
+                continue
+            candidate = None
+            if reminder.enabled:
+                target = ReminderTarget(reminder=reminder, task=task)
+                schedule_from = (
+                    now - timedelta(minutes=120)
+                    if now is not None
+                    else self._initial_schedule_anchor(target)
+                )
+                candidate = self._next_candidate(
+                    target,
+                    after=schedule_from,
+                    inclusive=True,
+                )
+            self._repository.save_reminder_schedule(
+                reminder.id,
+                candidate[1] if candidate is not None else None,
+                candidate[0] if candidate is not None else None,
+            )
+        return self._repository.list_reminders(task_id)
 
     def poll_due(
         self,
@@ -127,45 +166,81 @@ class ReminderService:
                 )
             )
 
-        for target in self._repository.list_enabled_reminder_targets():
-            for occurrence_start, scheduled_at in self._candidate_times(
-                target,
-                window_start=window_start,
-                window_end=current,
-            ):
-                if occurrence_start is not None and self._occurrence_is_closed(
-                    target.task.id, occurrence_start
-                ):
+        while True:
+            unscheduled = self._repository.list_unscheduled_reminder_targets(limit=100)
+            for target in unscheduled:
+                reminder_id = target.reminder.id
+                if reminder_id is None:
                     continue
+                candidate = self._next_candidate(
+                    target,
+                    after=window_start,
+                    inclusive=True,
+                )
+                self._repository.save_reminder_schedule(
+                    reminder_id,
+                    candidate[1] if candidate is not None else None,
+                    candidate[0] if candidate is not None else None,
+                )
+            if len(unscheduled) < 100:
+                break
+
+        while True:
+            due_targets = self._repository.list_due_reminder_targets(current, limit=200)
+            for target in due_targets:
                 reminder_id = target.reminder.id
                 task_id = target.task.id
                 if reminder_id is None or task_id is None:
                     continue
-                delivery = ReminderDelivery.fired(
-                    reminder_id=reminder_id,
-                    task_id=task_id,
-                    occurrence_start=occurrence_start,
-                    scheduled_at=scheduled_at,
-                    fire_key=self.fire_key(
-                        reminder_id=reminder_id,
-                        task_id=task_id,
-                        occurrence_start=occurrence_start,
-                        scheduled_at=scheduled_at,
-                    ),
-                    now=current,
-                )
-                claimed = self._repository.claim_reminder_delivery(delivery)
-                if claimed is None:
-                    continue
-                alerts.append(
-                    ReminderAlert(
-                        delivery=claimed,
-                        reminder=target.reminder,
-                        task=target.task,
-                        recovered=scheduled_at
-                        < current - timedelta(seconds=recovery_threshold_seconds),
+                occurrence_start = target.reminder.next_occurrence_start
+                scheduled_at = target.reminder.next_fire_at
+                while scheduled_at is not None and scheduled_at <= current:
+                    if scheduled_at >= window_start and not (
+                        occurrence_start is not None
+                        and self._occurrence_is_closed(task_id, occurrence_start)
+                    ):
+                        delivery = ReminderDelivery.fired(
+                            reminder_id=reminder_id,
+                            task_id=task_id,
+                            occurrence_start=occurrence_start,
+                            scheduled_at=scheduled_at,
+                            fire_key=self.fire_key(
+                                reminder_id=reminder_id,
+                                task_id=task_id,
+                                occurrence_start=occurrence_start,
+                                scheduled_at=scheduled_at,
+                            ),
+                            now=current,
+                        )
+                        claimed = self._repository.claim_reminder_delivery(delivery)
+                        if claimed is not None:
+                            alerts.append(
+                                ReminderAlert(
+                                    delivery=claimed,
+                                    reminder=target.reminder,
+                                    task=target.task,
+                                    recovered=scheduled_at
+                                    < current
+                                    - timedelta(seconds=recovery_threshold_seconds),
+                                )
+                            )
+                    candidate = self._next_candidate(
+                        target,
+                        after=scheduled_at,
+                        inclusive=False,
                     )
+                    if candidate is None:
+                        occurrence_start = None
+                        scheduled_at = None
+                    else:
+                        occurrence_start, scheduled_at = candidate
+                self._repository.save_reminder_schedule(
+                    reminder_id,
+                    scheduled_at,
+                    occurrence_start,
                 )
+            if len(due_targets) < 200:
+                break
         return tuple(sorted(alerts, key=lambda alert: alert.delivery.scheduled_at))
 
     def snooze(
@@ -223,62 +298,73 @@ class ReminderService:
         scheduled = scheduled_at.astimezone(UTC).isoformat()
         return f"task:{task_id}|occurrence:{occurrence}|reminder:{reminder_id}|at:{scheduled}"
 
-    def _candidate_times(
+    def _next_candidate(
         self,
         target: ReminderTarget,
         *,
-        window_start: datetime,
-        window_end: datetime,
-    ) -> tuple[tuple[datetime | None, datetime], ...]:
+        after: datetime,
+        inclusive: bool,
+    ) -> tuple[datetime | None, datetime] | None:
         reminder = target.reminder
         task = target.task
         if reminder.relation is ReminderRelation.ABSOLUTE:
-            if reminder.absolute_at is not None and window_start <= reminder.absolute_at <= window_end:
-                return ((None, reminder.absolute_at),)
-            return ()
+            if reminder.absolute_at is None:
+                return None
+            if reminder.absolute_at > after or (
+                inclusive and reminder.absolute_at == after
+            ):
+                return None, reminder.absolute_at
+            return None
 
         offset_minutes = reminder.offset_minutes or 0
         offset = timedelta(minutes=offset_minutes)
         base = task.starts_at if reminder.relation is ReminderRelation.START else task.ends_at
         if base is None:
-            return ()
+            return None
         if not task.recurrence_rule or task.starts_at is None:
             scheduled_at = self._relative_due(task, base, offset_minutes)
-            return ((task.starts_at, scheduled_at),) if window_start <= scheduled_at <= window_end else ()
+            if scheduled_at > after or (inclusive and scheduled_at == after):
+                return task.starts_at, scheduled_at
+            return None
 
         duration = task.ends_at - task.starts_at if task.ends_at is not None else timedelta(0)
         relation_delta = duration if reminder.relation is ReminderRelation.END else timedelta(0)
         daylight_saving_margin = timedelta(hours=2)
-        occurrence_window_start = (
-            window_start - offset - relation_delta - daylight_saving_margin
-        )
-        occurrence_window_end = (
-            window_end
-            - offset
-            - relation_delta
-            + daylight_saving_margin
-            + timedelta(microseconds=1)
-        )
-        candidates: list[tuple[datetime | None, datetime]] = []
-        for occurrence_start, occurrence_end in expand_recurrence(
+        occurrence_cursor = after - offset - relation_delta - daylight_saving_margin
+        occurrence_start = next_recurrence_start(
             task.recurrence_rule,
             template_start=task.starts_at,
-            template_end=task.ends_at,
             timezone=task.timezone,
-            range_start=occurrence_window_start,
-            range_end=occurrence_window_end,
-        ):
+            after=occurrence_cursor,
+            inclusive=True,
+        )
+        while occurrence_start is not None:
+            occurrence_end = occurrence_start + duration if task.ends_at is not None else None
             occurrence_base = (
                 occurrence_start
                 if reminder.relation is ReminderRelation.START
                 else occurrence_end
             )
             if occurrence_base is None:
-                continue
+                return None
             scheduled_at = self._relative_due(task, occurrence_base, offset_minutes)
-            if window_start <= scheduled_at <= window_end:
-                candidates.append((occurrence_start, scheduled_at))
-        return tuple(candidates)
+            if scheduled_at > after or (inclusive and scheduled_at == after):
+                return occurrence_start, scheduled_at
+            occurrence_start = next_recurrence_start(
+                task.recurrence_rule,
+                template_start=task.starts_at,
+                timezone=task.timezone,
+                after=occurrence_start,
+                inclusive=False,
+            )
+        return None
+
+    @staticmethod
+    def _initial_schedule_anchor(target: ReminderTarget) -> datetime:
+        base = target.reminder.absolute_at or target.task.starts_at or target.task.ends_at
+        if base is None:
+            return datetime.now(UTC)
+        return base - timedelta(days=31)
 
     @staticmethod
     def _relative_due(task: Task, base: datetime, offset_minutes: int) -> datetime:
