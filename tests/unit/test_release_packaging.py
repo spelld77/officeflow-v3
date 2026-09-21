@@ -14,10 +14,10 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.0"
+    assert __version__ == "3.0.1"
     assert project["project"]["version"] == __version__
-    assert "FileVersion', '3.0.0'" in version_info
-    assert '#define AppVersion "3.0.0"' in installer
+    assert "FileVersion', '3.0.1'" in version_info
+    assert '#define AppVersion "3.0.1"' in installer
 
 
 def test_installer_is_per_user_upgrade_safe_and_preserves_data() -> None:
@@ -38,6 +38,7 @@ def test_release_build_verifies_package_and_installer_lifecycle() -> None:
     assert "--smoke-test" in build_script
     assert "verify-installer.ps1" in build_script
     assert "SHA256SUMS.txt" in build_script
+    assert "build-python-package.ps1" in build_script
     assert "database\\migrations" in build_script
     assert 'Filter "icu*.dll"' in build_script
     assert verify_script.count("--smoke-test") == 2
@@ -56,4 +57,6 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert "오래된 수동 백업 정리" in content
     assert "ICS 내보내기는 현재 목록, 선택 업무 또는 기간" in content
     assert "3개 이상이면 스크롤 안내" in content
+    assert "Python 실행 모드" in content
+    assert "setup-officeflow-python.cmd" in content
     assert "%LOCALAPPDATA%\\OfficeFlow" in content

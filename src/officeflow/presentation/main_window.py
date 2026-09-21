@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         TaskView.ALL: ("전체 업무", "일정이 없는 업무를 포함한 전체 목록입니다."),
         TaskView.TRASH: (
             "휴지통",
-            "삭제한 업무를 보관합니다. 첨부파일과 기록도 함께 유지됩니다.",
+            "삭제한 업무를 보관합니다. 복원하거나 확인 후 영구 삭제할 수 있습니다.",
         ),
     }
 
@@ -583,6 +583,16 @@ class MainWindow(QMainWindow):
         self._trash_button.clicked.connect(self._trash_or_restore_selected)
         self._trash_button.setEnabled(False)
         layout.addWidget(self._trash_button)
+        self._permanent_delete_button = QPushButton("영구 삭제…")
+        self._permanent_delete_button.setObjectName("dangerButton")
+        self._permanent_delete_button.setToolTip(
+            "휴지통의 업무와 관련 데이터를 복구할 수 없도록 삭제합니다."
+        )
+        self._permanent_delete_button.clicked.connect(
+            self._delete_selected_permanently
+        )
+        self._permanent_delete_button.hide()
+        layout.addWidget(self._permanent_delete_button)
         return panel
 
     def _configure_input_tab_order(self) -> None:
@@ -933,6 +943,9 @@ class MainWindow(QMainWindow):
                 menu.addSeparator()
             restore = menu.addAction("휴지통에서 복원")
             restore.triggered.connect(self._restore_selected_from_trash)
+            menu.addSeparator()
+            delete = menu.addAction("영구 삭제…")
+            delete.triggered.connect(self._delete_selected_permanently)
             return menu
         if task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}:
             complete_now = menu.addAction("바로 완료")
@@ -1260,6 +1273,74 @@ class MainWindow(QMainWindow):
         self._refresh_tasks()
         self.statusBar().showMessage(f"'{title}' 업무를 복원했습니다.", 4000)
 
+    def _delete_selected_permanently(self) -> None:
+        if self._selected_task_id is None:
+            return
+        try:
+            task = self._task_service.get_including_deleted(self._selected_task_id)
+        except LookupError as error:
+            self._show_error("업무를 영구 삭제하지 못했습니다.", error)
+            return
+        if task.deleted_at is None:
+            self._show_error(
+                "업무를 영구 삭제하지 못했습니다.",
+                ValueError("영구 삭제는 휴지통에 있는 업무만 가능합니다."),
+            )
+            return
+
+        detail = (
+            f"'{task.title}' 업무를 영구 삭제할까요?\n\n"
+            "이 작업은 되돌릴 수 없습니다. 체크리스트, 알림과 첨부파일도 함께 "
+            "삭제됩니다. 업무일지는 날짜별 기록으로 남지만 이 업무와의 연결은 "
+            "해제됩니다."
+        )
+        if task.recurrence_rule:
+            detail += "\n반복 일정 전체와 개별 처리 상태도 삭제됩니다."
+        answer = QMessageBox.question(
+            self,
+            "업무 영구 삭제",
+            detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            attachment_paths = self._task_service.delete_permanently(
+                self._selected_task_id
+            )
+        except (LookupError, ValueError) as error:
+            self._show_error("업무를 영구 삭제하지 못했습니다.", error)
+            return
+
+        failed_paths = attachment_paths
+        if attachment_paths and self._attachment_service is not None:
+            failed_paths = self._attachment_service.remove_files_after_task_delete(
+                attachment_paths
+            )
+
+        self._selected_task_id = None
+        self._selected_occurrence_start = None
+        self._update_detail(None)
+        self._refresh_tasks()
+        if failed_paths:
+            logger.warning(
+                "영구 삭제 후 첨부파일 %d개를 정리하지 못했습니다: %s",
+                len(failed_paths),
+                failed_paths,
+            )
+            QMessageBox.warning(
+                self,
+                "업무는 삭제했지만 첨부파일 정리가 필요합니다.",
+                f"업무는 영구 삭제했습니다. 첨부파일 {len(failed_paths):,}개는 "
+                "지우지 못했으므로 데이터 → 첨부 정리에서 확인해 주세요.",
+            )
+            return
+        self.statusBar().showMessage(
+            f"'{task.title}' 업무를 영구 삭제했습니다.", 4000
+        )
+
     def _open_selected_records(
         self,
         *,
@@ -1431,8 +1512,10 @@ class MainWindow(QMainWindow):
                 self._detail_records_button,
                 self._detail_attachment_button,
                 self._trash_button,
+                self._permanent_delete_button,
             ):
                 button.setEnabled(False)
+            self._permanent_delete_button.hide()
             self._open_selected_button.hide()
             self._open_selected_records_button.hide()
             self._open_selected_attachment_button.hide()
@@ -1501,6 +1584,8 @@ class MainWindow(QMainWindow):
         self._archive_button.setEnabled(not deleted and task.status is not TaskStatus.ARCHIVED)
         self._trash_button.setText("복원" if deleted else "휴지통으로 이동")
         self._trash_button.setEnabled(True)
+        self._permanent_delete_button.setVisible(deleted)
+        self._permanent_delete_button.setEnabled(deleted)
         if self._selected_occurrence_start is not None:
             self._pending_button.setText("건너뛰기")
             self._pending_button.setEnabled(task.status is not TaskStatus.COMPLETED)

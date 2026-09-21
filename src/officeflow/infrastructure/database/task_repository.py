@@ -121,6 +121,22 @@ class SqlAlchemyTaskRepository:
             record.updated_at = restored_at
         return self.get_required(task_id)
 
+    def delete_permanently(self, task_id: int) -> tuple[str, ...]:
+        with self._sessions.transaction() as session:
+            record = session.get(TaskRecord, task_id)
+            if record is None or record.deleted_at is None:
+                raise LookupError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
+            attachment_paths = tuple(
+                session.scalars(
+                    select(AttachmentRecord.relative_path).where(
+                        AttachmentRecord.task_id == task_id
+                    )
+                ).all()
+            )
+            session.delete(record)
+            session.flush()
+        return attachment_paths
+
     def get_required(self, task_id: int) -> Task:
         task = self.get(task_id)
         if task is None:

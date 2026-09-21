@@ -331,6 +331,17 @@ QPushButton[primaryAction="true"]:hover {
 QPushButton#primaryButton:hover {
     background: #245CCC;
 }
+QPushButton#dangerButton {
+    color: #B42318;
+    background: #FFF4F2;
+    border-color: #F3B7B1;
+    font-weight: 600;
+}
+QPushButton#dangerButton:hover {
+    color: #FFFFFF;
+    background: #C4322B;
+    border-color: #C4322B;
+}
 #filterBar QComboBox {
     padding: 6px 8px;
 }

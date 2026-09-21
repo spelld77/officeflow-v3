@@ -1,0 +1,19 @@
+# Runtime-only dependencies for the supported Python 3.12 Windows mode.
+# Development, test, and PyInstaller packages are intentionally excluded.
+alembic==1.20.0
+et_xmlfile==2.0.0
+greenlet==3.5.5
+Mako==1.4.1
+MarkupSafe==3.0.3
+openpyxl==3.1.5
+platformdirs==4.11.8
+PySide6==6.11.2
+PySide6_Addons==6.11.2
+PySide6_Essentials==6.11.2
+python-dateutil==2.9.0.post0
+setuptools==84.0.0
+shiboken6==6.11.2
+six==1.17.0
+SQLAlchemy==2.0.52
+typing_extensions==4.16.0
+tzdata==2026.3

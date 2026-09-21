@@ -7,12 +7,12 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 ## 현재 상태
 
 - 단계: Phase 8 완료
-- 버전: OfficeFlow 3.0.0
+- 버전: OfficeFlow 3.0.1
 - 구현 상태: 설치·업그레이드·제거 검증을 마친 Windows 데스크톱 앱
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
 - 데이터 저장소: SQLite
-- 배포 형태: 단일 사용자용 설치 프로그램
+- 배포 형태: 단일 사용자용 설치 프로그램 또는 Python 3.12 실행 모드
 
 ## 제품 원칙
 
@@ -49,16 +49,28 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [Phase 7 완료 보고서](docs/phase-reports/phase-7.md)
 - [사용자 안내](docs/09-user-guide.md)
 - [3.0.0 릴리스 체크리스트](docs/10-release-checklist.md)
+- [Python 실행 모드](docs/11-python-runtime.md)
+- [3.0.1 릴리스 체크리스트](docs/12-release-checklist.md)
 - [Phase 8 완료 보고서](docs/phase-reports/phase-8.md)
 
 ## 설치
 
-`dist/installer/OfficeFlow-3.0.0-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
+`dist/installer/OfficeFlow-3.0.1-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
 기본적으로 현재 사용자에게 설치된다. 기존 버전 위에 설치하면 업무 DB와 첨부파일을
 유지한 채 프로그램 파일만 갱신한다.
 
 설치본에는 앱 안에서 열 수 있는 한국어 도움말이 포함된다. 프로그램을 제거해도
 `%LOCALAPPDATA%\OfficeFlow`의 사용자 데이터는 자동 삭제하지 않는다.
+
+## Python 실행 모드
+
+서명되지 않은 PyInstaller 실행 파일을 제한하지만 Python 실행은 허용된 PC에서는 별도의
+Python 모드를 사용할 수 있다. Python 3.12 64비트가 설치된 상태에서 최초 한 번
+`setup-officeflow-python.cmd`를 실행하고, 이후 `run-officeflow-python.cmd`를 더블클릭한다.
+
+실사용 Python 모드는 설치형과 동일한 `%LOCALAPPDATA%\OfficeFlow` 데이터를 사용한다.
+개발용 `run-officeflow-dev.cmd`는 격리된 `.local-data`를 사용하므로 혼동하지 않는다.
+자세한 내용은 [Python 실행 안내](docs/11-python-runtime.md)를 참고한다.
 
 ## 내보내기와 백업
 

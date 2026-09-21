@@ -209,6 +209,8 @@ class TaskRepository(Protocol):
 
     def restore(self, task_id: int, *, restored_at: datetime) -> Task: ...
 
+    def delete_permanently(self, task_id: int) -> tuple[str, ...]: ...
+
     def query(
         self,
         query: TaskQuery,
@@ -422,6 +424,14 @@ class TaskService:
             task_id,
             restored_at=now or datetime.now(UTC),
         )
+
+    def delete_permanently(self, task_id: int) -> tuple[str, ...]:
+        """Delete a trashed task and return managed attachment paths to clean up."""
+        if self._repository.get_deleted(task_id) is None:
+            raise TaskNotFoundError(
+                f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다."
+            )
+        return self._repository.delete_permanently(task_id)
 
     def query(self, query: TaskQuery, *, now: datetime | None = None) -> TaskPage:
         current, day_start, day_end = self._time_context(now)

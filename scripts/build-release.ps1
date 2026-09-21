@@ -114,6 +114,8 @@ if (-not $SkipInstaller) {
     }
 }
 
+& (Join-Path $projectRoot "scripts\build-python-package.ps1")
+
 $releaseFiles = Get-ChildItem -LiteralPath $distRoot -File -Recurse |
     Where-Object { $_.Name -notin @("SHA256SUMS.txt", "release-manifest.json") }
 $checksums = foreach ($file in $releaseFiles) {

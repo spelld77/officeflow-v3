@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OfficeFlow 3 사용자 안내</title>
+  <title>OfficeFlow 3.0.1 사용자 안내</title>
   <style>
     :root { color-scheme: light; --blue:#2f6fed; --ink:#172033; --muted:#64748b; --line:#dbe3ef; --bg:#f5f7fb; }
     * { box-sizing: border-box; }
@@ -22,12 +22,12 @@
 </head>
 <body><main>
   <header>
-    <h1>OfficeFlow 3 사용자 안내</h1>
+    <h1>OfficeFlow 3.0.1 사용자 안내</h1>
     <p class="lead">업무가 많아도 빠르게 찾고, 하루 일정부터 여러 날·반복 일정까지 한곳에서 관리합니다.</p>
     <nav>
       <a href="#start">시작하기</a><a href="#tasks">업무와 일정</a><a href="#records">기록과 첨부</a>
       <a href="#reminders">알림</a><a href="#find">검색과 캘린더</a><a href="#migration">2.6 가져오기</a>
-      <a href="#backup">백업</a><a href="#trouble">문제 해결</a>
+      <a href="#backup">백업</a><a href="#python">Python 실행</a><a href="#trouble">문제 해결</a>
     </nav>
   </header>
 
@@ -45,6 +45,7 @@
       <li><b>반복 일정:</b> 매일·매주·매월 규칙과 종료일을 지정할 수 있습니다.</li>
       <li><b>발생별 처리:</b> 반복 일정 한 건을 완료하거나 건너뛰어도 다음 일정은 유지됩니다.</li></ul>
     <p>오늘 화면은 <b>처리 필요</b>, <b>오늘 할 일</b>, 접힌 <b>완료한 업무</b>로 구분됩니다. 업무 왼쪽의 원을 누르면 바로 완료하며 10초 안에 실행 취소할 수 있습니다. 결과를 함께 남기려면 업무의 <b>⋯</b> 또는 오른쪽 버튼 메뉴에서 <b>완료 요약 입력 후 완료</b>를 선택합니다.</p>
+    <p>업무를 지우면 먼저 <b>휴지통</b>으로 이동해 기록과 첨부파일을 유지합니다. 휴지통에서는 업무를 복원하거나 오른쪽 버튼 메뉴·상세 화면의 <b>영구 삭제</b>로 완전히 지울 수 있습니다. 영구 삭제는 되돌릴 수 없으며 체크리스트·알림·첨부파일과 반복 일정 처리 상태도 함께 삭제됩니다. 업무일지는 날짜별 기록으로 남지만 삭제한 업무와의 연결은 해제됩니다.</p>
     <p>새 업무는 시작 날짜·시각과 시작 알림 중심으로 표시합니다. 종료 시각·반복·종료 알림은 <b>추가 설정 보기</b>에서 필요한 경우에만 지정합니다.</p>
     <p class="note">입력 화면에서는 Tab으로 다음 항목, Shift+Tab으로 이전 항목으로 이동할 수 있습니다.</p>
   </section>
@@ -95,7 +96,17 @@
       <li>복원은 다음 실행 전에 적용되며, 적용 직전 현재 데이터도 보호용 백업으로 남깁니다.</li></ul>
   </section>
 
-  <section id="trouble"><h2>8. 문제 해결</h2>
+  <section id="python"><h2>8. Python 실행 모드</h2>
+    <p>회사 보안 정책이 서명되지 않은 실행 파일을 제한하지만 Python 실행은 허용하는 경우 <code>OfficeFlow-Python-3.0.1.zip</code>을 별도 폴더에 압축 해제해 사용할 수 있습니다.</p>
+    <ol><li>Python 3.12 64비트를 설치합니다. 다른 Python 버전이 함께 있어도 괜찮습니다.</li>
+      <li>최초 한 번 <code>setup-officeflow-python.cmd</code>를 실행해 전용 <code>.venv</code>와 라이브러리를 준비합니다.</li>
+      <li>이후에는 <code>run-officeflow-python.cmd</code>로 실행합니다.</li>
+      <li>실행에 문제가 있으면 <code>diagnose-officeflow-python.cmd</code>로 환경을 점검합니다.</li></ol>
+    <p>Python 실행 모드도 설치형과 동일한 <code>%LOCALAPPDATA%\OfficeFlow</code>의 DB·첨부·설정을 사용합니다. 설치형과 Python형을 동시에 실행하지 말고 전환 전에는 트레이에서 완전히 종료하십시오.</p>
+    <p class="note">Python 배포 폴더를 옮겼다면 설정 스크립트를 다시 실행하고 Windows 자동 시작 설정을 껐다가 켜십시오.</p>
+  </section>
+
+  <section id="trouble"><h2>9. 문제 해결</h2>
     <table><thead><tr><th>증상</th><th>확인할 내용</th></tr></thead><tbody>
       <tr><td>창이 보이지 않음</td><td>작업 표시줄 알림 영역의 OfficeFlow 아이콘을 두 번 누릅니다.</td></tr>
       <tr><td>전역 단축키가 동작하지 않음</td><td>다른 프로그램이 같은 키를 사용 중인지 확인하고 설정에서 다른 조합을 지정합니다.</td></tr>
@@ -103,6 +114,7 @@
       <tr><td>알림을 놓침</td><td>설정의 놓친 알림 확인 범위와 Windows 자동 실행 여부를 확인합니다. 범위보다 오래된 알림은 자동으로 다시 띄우지 않습니다.</td></tr>
       <tr><td>복원 후 내용이 바뀌지 않음</td><td>트레이를 포함해 OfficeFlow를 완전히 종료한 뒤 다시 실행합니다.</td></tr>
       <tr><td>2.6 DB를 검사할 수 없음</td><td>2.6을 종료하고 DB와 같은 위치의 <code>-wal</code> 파일이 사라졌는지 확인합니다.</td></tr>
+      <tr><td>설치형이 보안 프로그램에 의해 종료됨</td><td>조직 정책을 확인하고, Python 실행이 허용된 PC에서는 Python 3.12 실행 모드를 사용합니다.</td></tr>
     </tbody></table>
     <h3>데이터 위치</h3><p>기본 사용자 데이터는 <code>%LOCALAPPDATA%\OfficeFlow</code>에 저장됩니다. 프로그램 제거 시 이 폴더는 자동 삭제하지 않습니다.</p>
     <h3>안전한 재설치</h3><p>먼저 데이터 화면에서 수동 백업을 만든 뒤 재설치하십시오. 같은 PC의 업그레이드는 기존 데이터 폴더를 그대로 사용합니다.</p>

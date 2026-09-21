@@ -258,6 +258,24 @@ class AttachmentService:
                 "첨부 연결은 제거했지만 격리 파일 정리에 실패했습니다."
             ) from error
 
+    def remove_files_after_task_delete(
+        self,
+        relative_paths: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Remove files whose attachment rows were deleted with their task.
+
+        Every path is attempted so one inaccessible file does not prevent the
+        remaining files from being cleaned up. Failed paths remain detectable
+        as orphan files in data management.
+        """
+        failed: list[str] = []
+        for relative_path in relative_paths:
+            try:
+                self._storage.remove(relative_path)
+            except (OSError, AttachmentOperationError):
+                failed.append(relative_path)
+        return tuple(failed)
+
     def _get_required(self, attachment_id: int) -> Attachment:
         attachment = self._repository.get_attachment(attachment_id)
         if attachment is None:

@@ -212,6 +212,24 @@ def test_unlink_can_be_restored_and_delete_file_removes_it(tmp_path: Path) -> No
     assert repository.get_attachment(second.id) is None
 
 
+def test_remove_files_after_task_delete_attempts_every_path(tmp_path: Path) -> None:
+    _task_service, service, _repository, storage = make_attachment_service(tmp_path)
+    first_source = tmp_path / "first.txt"
+    second_source = tmp_path / "second.txt"
+    first_source.write_text("first", encoding="utf-8")
+    second_source.write_text("second", encoding="utf-8")
+    first = storage.import_file(first_source)
+    second = storage.import_file(second_source)
+
+    failed = service.remove_files_after_task_delete(
+        (first.relative_path, "../unsafe.txt", second.relative_path)
+    )
+
+    assert failed == ("../unsafe.txt",)
+    assert not storage.exists(first.relative_path)
+    assert not storage.exists(second.relative_path)
+
+
 def test_duplicate_file_is_not_copied_twice_for_same_task(tmp_path: Path) -> None:
     task_service, service, repository, storage = make_attachment_service(tmp_path)
     task = task_service.create(TaskDraft(title="중복 방지"))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from officeflow.application.reminders import ReminderService
@@ -15,7 +15,13 @@ from officeflow.application.tasks import (
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.infrastructure.database.migrate import upgrade_database
-from officeflow.infrastructure.database.models import AttachmentRecord, ReminderRecord
+from officeflow.infrastructure.database.models import (
+    AttachmentRecord,
+    ChecklistItemRecord,
+    ReminderRecord,
+    TaskRecord,
+    WorkLogRecord,
+)
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
@@ -109,6 +115,80 @@ def test_repository_soft_delete_and_restore_round_trip(tmp_path: Path) -> None:
     assert restored.deleted_at is None
     assert restored.has_attachments is True
     assert service.list(TaskView.TRASH, now=created_at) == []
+    engine.dispose()
+
+
+def test_permanent_delete_cascades_related_data_and_preserves_work_log(
+    tmp_path: Path,
+) -> None:
+    database_file = tmp_path / "officeflow.db"
+    upgrade_database(database_file)
+    engine = create_database_engine(database_file)
+    sessions = SessionFactory(engine)
+    service = TaskService(SqlAlchemyTaskRepository(sessions))
+    created_at = datetime(2026, 9, 19, 1, 0, tzinfo=UTC)
+    task = service.create(TaskDraft(title="완전 삭제 대상"), now=created_at)
+    assert task.id is not None
+    with sessions.transaction() as session:
+        attachment = AttachmentRecord(
+            task_id=task.id,
+            original_name="evidence.txt",
+            stored_name="delete-evidence.txt",
+            relative_path="aa/bb/delete-evidence.txt",
+            size_bytes=12,
+            checksum=None,
+            created_at=created_at,
+            missing_at=None,
+            detached_at=None,
+        )
+        checklist = ChecklistItemRecord(
+            task_id=task.id,
+            content="삭제할 점검 항목",
+            is_done=False,
+            position=0,
+            completed_at=None,
+        )
+        reminder = ReminderRecord(
+            task_id=task.id,
+            relation="start",
+            offset_minutes=0,
+            absolute_at=None,
+            enabled=True,
+            last_fired_key=None,
+            next_fire_at=None,
+            next_occurrence_start=None,
+            schedule_initialized=False,
+        )
+        work_log = WorkLogRecord(
+            task_id=task.id,
+            occurrence_id=None,
+            log_date=date(2026, 9, 19),
+            content="삭제 전 처리 기록",
+            result="처리 완료",
+            priority_snapshot="normal",
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        session.add_all((attachment, checklist, reminder, work_log))
+        session.flush()
+        attachment_id = attachment.id
+        checklist_id = checklist.id
+        reminder_id = reminder.id
+        work_log_id = work_log.id
+
+    service.move_to_trash(task.id, now=created_at + timedelta(minutes=1))
+    attachment_paths = service.delete_permanently(task.id)
+
+    assert attachment_paths == ("aa/bb/delete-evidence.txt",)
+    with sessions.transaction() as session:
+        assert session.get(TaskRecord, task.id) is None
+        assert session.get(AttachmentRecord, attachment_id) is None
+        assert session.get(ChecklistItemRecord, checklist_id) is None
+        assert session.get(ReminderRecord, reminder_id) is None
+        preserved_log = session.get(WorkLogRecord, work_log_id)
+        assert preserved_log is not None
+        assert preserved_log.task_id is None
+        assert preserved_log.content == "삭제 전 처리 기록"
     engine.dispose()
 
 

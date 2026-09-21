@@ -62,7 +62,7 @@ def test_help_button_opens_packaged_user_guide(
     window._help_button.click()
 
     assert opened == [True]
-    assert window._version_label.text() == "OfficeFlow 3.0.0"
+    assert window._version_label.text() == "OfficeFlow 3.0.1"
 
 
 class FakeTrayIcon:
@@ -246,14 +246,43 @@ def test_task_can_move_to_trash_and_be_restored(
     deleted = window._task_model.task_at(window._task_model.index(0, 0))
     assert deleted is not None and deleted.deleted_at is not None
     assert [
-        action.text() for action in window._build_task_context_menu(deleted).actions()
-    ] == ["휴지통에서 복원"]
+        action.text()
+        for action in window._build_task_context_menu(deleted).actions()
+        if not action.isSeparator()
+    ] == ["휴지통에서 복원", "영구 삭제…"]
 
     window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
     window._restore_selected_from_trash()
 
     assert task_service.get(task.id).title == "휴지통 테스트"
     assert task_service.list(TaskView.TRASH) == []
+
+
+def test_trashed_task_can_be_permanently_deleted(
+    qtbot: QtBot,
+    monkeypatch,
+) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    task = task_service.create(TaskDraft(title="완전히 지울 업무"))
+    assert task.id is not None
+    task_service.move_to_trash(task.id)
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.TRASH)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    assert window._permanent_delete_button.isVisibleTo(window._detail_panel)
+    window._delete_selected_permanently()
+
+    assert task.id not in task_repository.tasks
+    assert task_service.list(TaskView.TRASH) == []
+    assert "영구 삭제했습니다" in window.statusBar().currentMessage()
 
 
 def test_trash_view_exposes_preserved_records_and_attachments(
@@ -287,6 +316,7 @@ def test_trash_view_exposes_preserved_records_and_attachments(
 
     assert "완료 요약 · 기록 보기" in labels
     assert "첨부파일 보기…" in labels
+    assert "영구 삭제…" in labels
     assert window._detail_records_button.isEnabled()
     assert window._detail_attachment_button.isEnabled()
 

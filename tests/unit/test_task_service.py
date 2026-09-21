@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
 from officeflow.application.tasks import (
     CalendarRepositoryOverview,
     TaskDraft,
@@ -95,6 +97,18 @@ class InMemoryTaskRepository(TaskRepository):
         restored = replace(task, deleted_at=None, updated_at=restored_at)
         self.tasks[task_id] = restored
         return restored
+
+    def delete_permanently(self, task_id: int) -> tuple[str, ...]:
+        task = self.get_deleted(task_id)
+        if task is None:
+            raise LookupError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
+        del self.tasks[task_id]
+        self.occurrences = {
+            key: occurrence
+            for key, occurrence in self.occurrences.items()
+            if occurrence.task_id != task_id
+        }
+        return ()
 
     def query(
         self,
@@ -371,6 +385,23 @@ def test_move_to_trash_hides_task_and_restore_preserves_its_state() -> None:
     assert restored.status is TaskStatus.PENDING
     assert [item.id for item in service.list(TaskView.ALL, now=NOW)] == [task.id]
     assert service.list(TaskView.TRASH, now=NOW) == []
+
+
+def test_permanent_delete_only_accepts_trashed_tasks() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    task = service.create(TaskDraft(title="완전 삭제"), now=NOW)
+    assert task.id is not None
+
+    with pytest.raises(LookupError, match="휴지통에서"):
+        service.delete_permanently(task.id)
+
+    service.move_to_trash(task.id, now=NOW + timedelta(minutes=1))
+    assert service.delete_permanently(task.id) == ()
+    assert task.id not in repository.tasks
+
+    with pytest.raises(LookupError, match="휴지통에서"):
+        service.delete_permanently(task.id)
 
 
 NOW = datetime(2026, 9, 12, 3, 0, tzinfo=UTC)

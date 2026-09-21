@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(3, 0, 0, 0),
-    prodvers=(3, 0, 0, 0),
+    filevers=(3, 0, 1, 0),
+    prodvers=(3, 0, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,12 +14,12 @@ VSVersionInfo(
       StringTable('041204B0', [
         StringStruct('CompanyName', 'OfficeFlow'),
         StringStruct('FileDescription', 'OfficeFlow 업무 및 일정 관리'),
-        StringStruct('FileVersion', '3.0.0'),
+        StringStruct('FileVersion', '3.0.1'),
         StringStruct('InternalName', 'OfficeFlow'),
         StringStruct('LegalCopyright', 'Copyright (c) 2026 OfficeFlow'),
         StringStruct('OriginalFilename', 'OfficeFlow.exe'),
         StringStruct('ProductName', 'OfficeFlow'),
-        StringStruct('ProductVersion', '3.0.0')
+        StringStruct('ProductVersion', '3.0.1')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [0x0412, 1200])])
