@@ -7,7 +7,7 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 ## 현재 상태
 
 - 단계: Phase 8 완료
-- 버전: OfficeFlow 3.0.1
+- 버전: OfficeFlow 3.0.2
 - 구현 상태: 설치·업그레이드·제거 검증을 마친 Windows 데스크톱 앱
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
@@ -50,12 +50,13 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [사용자 안내](docs/09-user-guide.md)
 - [3.0.0 릴리스 체크리스트](docs/10-release-checklist.md)
 - [Python 실행 모드](docs/11-python-runtime.md)
-- [3.0.1 릴리스 체크리스트](docs/12-release-checklist.md)
+- [3.0.2 릴리스 체크리스트](docs/12-release-checklist.md)
+- [3.0.2 릴리스 노트](docs/release-notes-3.0.2.md)
 - [Phase 8 완료 보고서](docs/phase-reports/phase-8.md)
 
 ## 설치
 
-`dist/installer/OfficeFlow-3.0.1-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
+`dist/installer/OfficeFlow-3.0.2-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
 기본적으로 현재 사용자에게 설치된다. 기존 버전 위에 설치하면 업무 DB와 첨부파일을
 유지한 채 프로그램 파일만 갱신한다.
 

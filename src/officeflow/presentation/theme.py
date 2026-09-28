@@ -120,6 +120,31 @@ QPushButton[nav="true"][compact="true"] {
     border: 1px solid #E1E6EF;
     border-radius: 12px;
 }
+QLineEdit#taskSearchEdit[searchActive="true"] {
+    color: #173A82;
+    background: #EEF4FF;
+    border: 2px solid #2F6FED;
+}
+#taskSearchFeedback {
+    color: #173A82;
+    background: #EEF4FF;
+    border: 1px solid #AFC5F5;
+    border-radius: 8px;
+}
+#taskSearchFeedbackLabel {
+    color: #173A82;
+    font-weight: 600;
+}
+#clearTaskSearch, #emptyClearTaskSearch {
+    color: #245CCC;
+    background: #FFFFFF;
+    border-color: #AFC5F5;
+    font-weight: 600;
+}
+#emptyTaskTitle {
+    font-size: 16px;
+    font-weight: 600;
+}
 #pageTitle {
     font-size: 24px;
     font-weight: 700;
@@ -148,6 +173,17 @@ QPushButton[nav="true"][compact="true"] {
 #calendarDayMoreHint {
     color: #B45309;
     font-weight: 600;
+}
+#calendarDayPanel {
+    background: #FFFFFF;
+}
+QSplitter#calendarDaySplitter::handle {
+    background: #E1E6EF;
+    border-radius: 3px;
+    margin: 2px 36px;
+}
+QSplitter#calendarDaySplitter::handle:hover {
+    background: #7FA3EF;
 }
 #calendarPrevious, #calendarNext {
     min-width: 34px;
@@ -178,6 +214,17 @@ QListWidget#attachmentList, QListWidget#attachmentCleanupList {
     border-radius: 8px;
     outline: none;
     padding: 4px;
+}
+QListWidget#attachmentList[dragActive="true"] {
+    background: #EEF4FF;
+    border: 2px dashed #2F6FED;
+}
+#attachmentDropHint {
+    color: #245CCC;
+    background: #EEF4FF;
+    border: 1px dashed #AFC5F5;
+    border-radius: 7px;
+    padding: 8px 10px;
 }
 QListWidget#checklistList::item, QListWidget#taskWorkLogList::item,
 QListWidget#workLogBrowserList::item, QListWidget#attachmentList::item,

@@ -19,6 +19,14 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "가상환경이 없습니다. scripts\bootstrap.ps1을 먼저 실행하세요."
 }
 
+# Keep editable-install distribution metadata aligned with pyproject.toml before
+# PyInstaller collects package metadata into the Windows bundle.
+& $python -m pip install --disable-pip-version-check --no-deps --no-build-isolation `
+    -e $projectRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "OfficeFlow 로컬 패키지 메타데이터 갱신에 실패했습니다."
+}
+
 function Reset-GeneratedDirectory {
     param([string]$Path)
     $fullPath = [IO.Path]::GetFullPath($Path)

@@ -200,7 +200,7 @@ class MainWindow(QMainWindow):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(250)
         self._search_timer.timeout.connect(self._refresh_tasks)
-        self._search.textChanged.connect(self._search_timer.start)
+        self._search.textChanged.connect(self._on_search_changed)
 
         self._new_task_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         self._new_task_shortcut.activated.connect(self._open_new_task)
@@ -216,11 +216,14 @@ class MainWindow(QMainWindow):
         self._reminder_timer.setInterval(30_000)
         self._reminder_timer.timeout.connect(self._check_reminders)
         if self._reminder_service is not None:
-            self._reminder_timer.start()
-            QTimer.singleShot(0, self._check_reminders)
+            if self._previous_unclean_shutdown:
+                QTimer.singleShot(0, self._show_unclean_shutdown_warning)
+            else:
+                self._start_reminder_monitoring()
         if self._previous_unclean_shutdown:
             logger.warning("이전 OfficeFlow 실행이 정상적으로 종료되지 않았습니다.")
-            QTimer.singleShot(250, self._show_unclean_shutdown_warning)
+            if self._reminder_service is None:
+                QTimer.singleShot(0, self._show_unclean_shutdown_warning)
         if self._desktop_integration:
             self._setup_desktop_integration()
         if self._backup_manager is not None and settings.automatic_backup_enabled:
@@ -372,6 +375,7 @@ class MainWindow(QMainWindow):
         heading.addWidget(self._open_selected_attachment_button)
         self._content_layout.addLayout(heading)
         self._content_layout.addWidget(self._build_filter_bar())
+        self._content_layout.addWidget(self._build_search_feedback())
 
         quick_add = QHBoxLayout()
         self._quick_add_edit = QLineEdit()
@@ -413,17 +417,42 @@ class MainWindow(QMainWindow):
         self._empty_panel = QFrame()
         empty_layout = QVBoxLayout(self._empty_panel)
         empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_layout.addWidget(
-            QLabel("표시할 업무가 없습니다."), alignment=Qt.AlignmentFlag.AlignCenter
-        )
+        self._empty_title = QLabel("표시할 업무가 없습니다.")
+        self._empty_title.setObjectName("emptyTaskTitle")
+        empty_layout.addWidget(self._empty_title, alignment=Qt.AlignmentFlag.AlignCenter)
         self._empty_description = self._named_label(
             "빠르게 등록하거나 다른 보기를 선택해 보세요.", "mutedText"
         )
         self._empty_description.setWordWrap(True)
         self._empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(self._empty_description, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._empty_clear_search_button = QPushButton("검색 해제하고 전체 업무 보기")
+        self._empty_clear_search_button.setObjectName("emptyClearTaskSearch")
+        self._empty_clear_search_button.clicked.connect(self._clear_search)
+        self._empty_clear_search_button.hide()
+        empty_layout.addWidget(
+            self._empty_clear_search_button,
+            alignment=Qt.AlignmentFlag.AlignCenter,
+        )
         self._content_layout.addWidget(self._empty_panel, 1)
         return card
+
+    def _build_search_feedback(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("taskSearchFeedback")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 7, 8, 7)
+        layout.setSpacing(8)
+        self._search_feedback_label = QLabel()
+        self._search_feedback_label.setObjectName("taskSearchFeedbackLabel")
+        layout.addWidget(self._search_feedback_label, 1)
+        self._clear_search_button = QPushButton("검색 해제")
+        self._clear_search_button.setObjectName("clearTaskSearch")
+        self._clear_search_button.clicked.connect(self._clear_search)
+        layout.addWidget(self._clear_search_button)
+        bar.hide()
+        self._search_feedback = bar
+        return bar
 
     def _build_filter_bar(self) -> QWidget:
         bar = QFrame()
@@ -598,6 +627,7 @@ class MainWindow(QMainWindow):
     def _configure_input_tab_order(self) -> None:
         fields: tuple[QWidget, ...] = (
             self._search,
+            self._clear_search_button,
             self._add_button,
             self._filter_toggle,
             self._sort_combo,
@@ -634,6 +664,7 @@ class MainWindow(QMainWindow):
         return button
 
     def _set_view(self, view: TaskView) -> None:
+        self._reset_search()
         self._remember_view_preferences()
         self._calendar_active = False
         self._current_view = view
@@ -656,6 +687,7 @@ class MainWindow(QMainWindow):
         self._refresh_tasks()
 
     def _show_calendar(self) -> None:
+        self._reset_search()
         self._remember_view_preferences()
         self._calendar_active = True
         self._content_stack.setCurrentWidget(self._calendar_page)
@@ -704,11 +736,28 @@ class MainWindow(QMainWindow):
             self._refresh_snoozed_indicators()
             self._task_list.setVisible(total > 0)
             self._empty_panel.setVisible(total == 0)
-            self._empty_description.setText(
-                "필터 조건에 맞는 업무가 없습니다. 위의 '해제'를 누르면 전체 업무를 볼 수 있습니다."
-                if total == 0 and self._active_filter_count()
-                else "빠르게 등록하거나 다른 보기를 선택해 보세요."
-            )
+            search = self._search.text().strip()
+            if total == 0 and search:
+                self._empty_title.setText("검색 결과가 없습니다.")
+                self._empty_description.setText(
+                    f"“{search}”와 일치하는 업무가 없습니다. "
+                    "업무가 삭제된 것은 아닙니다."
+                )
+                self._empty_clear_search_button.show()
+            elif total == 0 and self._active_filter_count():
+                self._empty_title.setText("필터 결과가 없습니다.")
+                self._empty_description.setText(
+                    "필터 조건에 맞는 업무가 없습니다. "
+                    "위의 '모두 해제'를 누르면 전체 업무를 볼 수 있습니다."
+                )
+                self._empty_clear_search_button.hide()
+            else:
+                self._empty_title.setText("표시할 업무가 없습니다.")
+                self._empty_description.setText(
+                    "빠르게 등록하거나 다른 보기를 선택해 보세요."
+                )
+                self._empty_clear_search_button.hide()
+            self._update_search_feedback(total)
             self._update_result_count()
 
             if selected_id is not None:
@@ -800,6 +849,41 @@ class MainWindow(QMainWindow):
         self._update_filter_feedback()
         self._selected_task_id = None
         self._refresh_tasks()
+
+    def _on_search_changed(self, _text: str) -> None:
+        self._update_search_feedback()
+        self._search_timer.start()
+
+    def _reset_search(self) -> bool:
+        self._search_timer.stop()
+        if not self._search.text():
+            self._update_search_feedback()
+            return False
+        blocker = QSignalBlocker(self._search)
+        self._search.clear()
+        del blocker
+        self._selected_task_id = None
+        self._selected_occurrence_start = None
+        self._update_search_feedback()
+        return True
+
+    def _clear_search(self, _checked: bool = False) -> None:
+        if self._reset_search():
+            self._refresh_tasks()
+
+    def _update_search_feedback(self, total: int | None = None) -> None:
+        search = self._search.text().strip()
+        active = bool(search)
+        self._search.setProperty("searchActive", active)
+        self._search.style().unpolish(self._search)
+        self._search.style().polish(self._search)
+        self._search_feedback.setVisible(active)
+        if not active:
+            self._search_feedback_label.clear()
+            self._empty_clear_search_button.hide()
+            return
+        result = f" · 결과 {total}개" if total is not None else ""
+        self._search_feedback_label.setText(f"🔍 “{search}” 검색 중{result}")
 
     def _clear_filters(self) -> None:
         blockers = (
@@ -1041,9 +1125,13 @@ class MainWindow(QMainWindow):
         total = self._task_model.total_task_count
         count_text = f"{loaded}/{total}개 표시" if loaded < total else f"총 {total}개"
         active_filters = self._active_filter_count()
-        self._result_count.setText(
-            f"필터 {active_filters}개 · {count_text}" if active_filters else count_text
-        )
+        prefixes: list[str] = []
+        if self._search.text().strip():
+            prefixes.append("검색 결과")
+        if active_filters:
+            prefixes.append(f"필터 {active_filters}개")
+        prefixes.append(count_text)
+        self._result_count.setText(" · ".join(prefixes))
 
     @staticmethod
     def _set_combo_value(combo: QComboBox, value: str) -> None:
@@ -1654,6 +1742,14 @@ class MainWindow(QMainWindow):
             "저장된 데이터는 그대로 유지됩니다. 놓친 알림은 설정된 복구 범위 안에서 "
             "다시 확인하고 있으니 알림 창과 오늘 업무를 확인해 주세요.",
         )
+        self._start_reminder_monitoring()
+
+    def _start_reminder_monitoring(self) -> None:
+        if self._reminder_service is None:
+            return
+        if not self._reminder_timer.isActive():
+            self._reminder_timer.start()
+        QTimer.singleShot(0, self._check_reminders)
 
     def _check_reminders(self) -> None:
         if self._reminder_service is None:

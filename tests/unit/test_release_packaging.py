@@ -14,10 +14,10 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.1"
+    assert __version__ == "3.0.2"
     assert project["project"]["version"] == __version__
-    assert "FileVersion', '3.0.1'" in version_info
-    assert '#define AppVersion "3.0.1"' in installer
+    assert "FileVersion', '3.0.2'" in version_info
+    assert '#define AppVersion "3.0.2"' in installer
 
 
 def test_installer_is_per_user_upgrade_safe_and_preserves_data() -> None:
@@ -56,7 +56,12 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert "놓친 알림 확인 범위란?" in content
     assert "오래된 수동 백업 정리" in content
     assert "ICS 내보내기는 현재 목록, 선택 업무 또는 기간" in content
-    assert "3개 이상이면 스크롤 안내" in content
+    assert "아래 목록에 최소 3개 일정이 보이고" in content
+    assert "목록 확대" in content
+    assert "업무가 삭제된 것이 아니라는 안내" in content
+    assert "이전 검색어가 자동으로 지워집니다" in content
+    assert "파일 선택 (여러 개)" in content
+    assert "파일 여러 개를 첨부 목록으로 끌어놓어" in content
     assert "Python 실행 모드" in content
     assert "setup-officeflow-python.cmd" in content
     assert "%LOCALAPPDATA%\\OfficeFlow" in content

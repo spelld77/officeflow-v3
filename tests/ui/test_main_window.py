@@ -62,7 +62,7 @@ def test_help_button_opens_packaged_user_guide(
     window._help_button.click()
 
     assert opened == [True]
-    assert window._version_label.text() == "OfficeFlow 3.0.1"
+    assert window._version_label.text() == "OfficeFlow 3.0.2"
 
 
 class FakeTrayIcon:
@@ -113,6 +113,46 @@ def test_unclean_shutdown_warning_is_shown_on_startup(
 
     assert warnings[0][0] == "이전 실행 비정상 종료"
     assert "놓친 알림" in warnings[0][1]
+
+
+def test_unclean_shutdown_warning_finishes_before_recovered_reminders_open(
+    qtbot: QtBot,
+    monkeypatch,
+) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    reminder_repository = InMemoryReminderRepository(task_repository)
+    reminder_service = ReminderService(reminder_repository, task_service)
+    now = datetime.now(UTC).replace(microsecond=0)
+    task = task_service.create(
+        TaskDraft(title="시작 시 복구 알림", starts_at=now - timedelta(minutes=1)),
+        now=now - timedelta(minutes=2),
+    )
+    assert task.id is not None
+    reminder_service.replace_rules(
+        task.id,
+        (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),),
+    )
+    reminder_was_absent: list[bool] = []
+
+    def record_warning(parent: MainWindow, _title: str, _message: str) -> None:
+        reminder_was_absent.append(parent._reminder_dialog is None)
+
+    monkeypatch.setattr(QMessageBox, "warning", record_warning)
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        reminder_service=reminder_service,
+        previous_unclean_shutdown=True,
+    )
+    qtbot.addWidget(window)
+    window.show()
+
+    qtbot.waitUntil(lambda: bool(reminder_was_absent), timeout=1_000)
+    qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
+
+    assert reminder_was_absent == [True]
+    assert window._reminder_timer.isActive()
 
 
 def test_wide_window_shows_three_panels(qtbot: QtBot, task_service: TaskService) -> None:
@@ -742,6 +782,63 @@ def test_filters_combine_and_can_be_cleared(qtbot: QtBot, task_service: TaskServ
     assert pinned.text() == "고정"
 
 
+def test_search_state_is_prominent_and_empty_result_is_explained(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    task_service.create(TaskDraft(title="주간 보고서 작성"))
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+
+    window._search.setText("없는 업무")
+    window._refresh_tasks()
+
+    assert window._search.property("searchActive") is True
+    assert window._search_feedback.isVisibleTo(window)
+    assert "“없는 업무” 검색 중" in window._search_feedback_label.text()
+    assert "결과 0개" in window._search_feedback_label.text()
+    assert window._empty_title.text() == "검색 결과가 없습니다."
+    assert "삭제된 것은 아닙니다" in window._empty_description.text()
+    assert window._empty_clear_search_button.isVisibleTo(window)
+    assert "검색 결과" in window._result_count.text()
+
+
+def test_task_navigation_clears_stale_search_including_current_view(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    task_service.create(TaskDraft(title="남아 있어야 할 업무"))
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    window._search.setText("찾을 수 없음")
+    window._refresh_tasks()
+    assert window._task_model.total_task_count == 0
+
+    window._view_buttons[TaskView.ALL].click()
+
+    assert window._search.text() == ""
+    assert window._search.property("searchActive") is False
+    assert window._search_feedback.isHidden()
+    assert window._task_model.total_task_count == 1
+
+
+def test_search_clear_button_restores_current_task_list(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    task_service.create(TaskDraft(title="복구될 업무"))
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(TaskView.ALL)
+    window._search.setText("다른 검색어")
+    window._refresh_tasks()
+
+    window._clear_search_button.click()
+
+    assert window._search.text() == ""
+    assert window._task_model.total_task_count == 1
+    assert window._empty_panel.isHidden()
+
+
 def test_today_filter_feedback_explains_hidden_all_day_task(
     qtbot: QtBot, tmp_path: Path
 ) -> None:
@@ -874,20 +971,19 @@ def test_calendar_stays_usable_at_minimum_window_size(
     assert window._calendar_page.isVisible()
     assert window._calendar_page.calendar.width() >= 460
     assert window._calendar_page.day_list.isVisible()
+    assert window._calendar_page.day_list.minimumHeight() >= 104
     assert window._calendar_page.edit_button.text() == "수정"
-    assert (
-        window._calendar_page.calendar.geometry().bottom()
-        < window._calendar_page.day_list.geometry().top()
-    )
+    assert window._calendar_page.calendar_splitter.count() == 2
+    assert all(size > 0 for size in window._calendar_page.calendar_splitter.sizes())
 
 
-def test_calendar_emphasizes_three_day_items_and_shows_scroll_cue(
+def test_calendar_shows_three_rows_and_marks_remaining_items(
     qtbot: QtBot, task_service: TaskService
 ) -> None:
     zone = ZoneInfo("Asia/Seoul")
     today = datetime.now(zone).date()
     start = datetime.combine(today, time.min, tzinfo=zone).astimezone(UTC)
-    for index in range(3):
+    for index in range(5):
         task_service.create(
             TaskDraft(
                 title=f"확인할 일정 {index + 1}",
@@ -904,16 +1000,53 @@ def test_calendar_emphasizes_three_day_items_and_shows_scroll_cue(
     qtbot.wait(20)
 
     page = window._calendar_page
-    assert page.day_list.count() == 3
-    assert page.day_count.text() == "총 3개 일정"
+    assert page.day_list.count() == 5
+    assert page.day_count.text() == "총 5개 일정"
     assert page.day_count.property("hasMany") is True
     assert page.day_more_hint.isVisible()
-    assert "총 3개" in page.day_more_hint.text()
+    assert "아래에 2개 더 있음" in page.day_more_hint.text()
     assert (
         page.day_list.verticalScrollBarPolicy()
         is Qt.ScrollBarPolicy.ScrollBarAlwaysOn
     )
     assert page.day_list.verticalScrollBar().isVisible()
+    third_item = page.day_list.item(2)
+    assert third_item is not None
+    assert (
+        page.day_list.visualItemRect(third_item).bottom()
+        <= page.day_list.viewport().height()
+    )
+
+
+def test_calendar_day_list_can_expand_and_restore_splitter_ratio(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window.resize(1100, 760)
+    window.show()
+    window._show_calendar()
+    qtbot.wait(20)
+
+    page = window._calendar_page
+    page.calendar_splitter.setSizes([360, 260])
+    page._remember_splitter_sizes(360, 1)
+    normal_sizes = page.calendar_splitter.sizes()
+
+    page.expand_list_button.click()
+    qtbot.wait(10)
+    expanded_sizes = page.calendar_splitter.sizes()
+    assert page.expand_list_button.text() == "달력 확대"
+    assert expanded_sizes[1] > normal_sizes[1]
+
+    page._refresh_day_list()
+    assert page.calendar_splitter.sizes() == expanded_sizes
+
+    page.expand_list_button.click()
+    qtbot.wait(10)
+    restored_sizes = page.calendar_splitter.sizes()
+    assert page.expand_list_button.text() == "목록 확대"
+    assert abs(restored_sizes[1] - normal_sizes[1]) <= 2
 
 
 def test_calendar_overflow_opens_complete_day_list(qtbot: QtBot, task_service: TaskService) -> None:

@@ -5,10 +5,12 @@ from pathlib import Path
 from threading import Event
 from time import sleep
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QMimeData, QPointF, Qt, QUrl
+from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import QListWidget, QMessageBox, QPushButton
 from pytestqt.qtbot import QtBot
 
+import officeflow.presentation.record_dialog as record_dialog_module
 from officeflow.application.attachments import AttachmentCanceledError, AttachmentService
 from officeflow.application.records import RecordService
 from officeflow.application.tasks import TaskDraft, TaskService
@@ -111,6 +113,35 @@ def test_work_log_browser_filters_by_date(qtbot: QtBot) -> None:
     assert "지표 확인" in dialog.detail.toPlainText()
 
 
+def test_work_log_browser_keeps_selected_detail_when_list_refreshes(
+    qtbot: QtBot,
+) -> None:
+    task_service, record_service = make_dialog_services()
+    task = task_service.create(TaskDraft(title="선택 유지 확인"))
+    assert task.id is not None
+    record_service.add_work_log(
+        task_id=task.id,
+        log_date=date(2026, 9, 15),
+        content="클릭한 상세 내용",
+        result="새로고침 뒤에도 유지",
+    )
+    dialog = WorkLogBrowserDialog(
+        task_service=task_service,
+        record_service=record_service,
+    )
+    qtbot.addWidget(dialog)
+    dialog.date_edit.setDate(QDate(2026, 9, 15))
+    dialog.list_widget.setCurrentRow(0)
+
+    assert "클릭한 상세 내용" in dialog.detail.toPlainText()
+
+    dialog._refresh()
+
+    assert dialog.list_widget.currentRow() == 0
+    assert "클릭한 상세 내용" in dialog.detail.toPlainText()
+    assert "새로고침 뒤에도 유지" in dialog.detail.toPlainText()
+
+
 def test_work_log_browser_includes_tasks_completed_on_selected_date(qtbot: QtBot) -> None:
     task_service, record_service = make_dialog_services()
     completed_at = datetime(2026, 9, 15, 4, 0, tzinfo=UTC)
@@ -158,12 +189,16 @@ def test_work_log_browser_searches_past_tasks_and_log_content(qtbot: QtBot) -> N
     )
     qtbot.addWidget(dialog)
 
+    assert dialog.search_edit.placeholderText().startswith("전체 기간에서 검색")
+    assert dialog.range_checkbox.text() == "기간 제한 (끄면 전체 기간)"
+
     dialog.search_edit.setText("갱신 조건")
     dialog._refresh()
 
     assert dialog.list_widget.count() == 1
     assert "한 달 전 계약 검토" in dialog.list_widget.item(0).text()
     assert "검색 위치: 설명" in dialog.list_widget.item(0).text()
+    assert dialog.result_count_label.text() == "전체 기간 검색 결과 1개 업무"
     assert not dialog.date_edit.isEnabled()
 
     dialog.search_edit.setText("E501")
@@ -217,7 +252,10 @@ def test_work_log_browser_pages_search_results_and_filters_date_range(
     dialog._refresh()
 
     assert dialog.list_widget.count() == 4
-    assert dialog.result_count_label.text() == "검색 결과 4개 업무"
+    assert (
+        dialog.result_count_label.text()
+        == "2026-08-10~2026-08-12 검색 결과 4개 업무"
+    )
 
 
 def test_work_log_browser_groups_completion_and_logs_by_task(
@@ -271,7 +309,7 @@ def test_work_log_browser_groups_completion_and_logs_by_task(
     dialog._refresh()
 
     assert dialog.list_widget.count() == 1
-    assert dialog.result_count_label.text() == "검색 결과 1개 업무"
+    assert dialog.result_count_label.text() == "전체 기간 검색 결과 1개 업무"
     assert "검색 위치:" in dialog.list_widget.item(0).text()
 
 
@@ -429,6 +467,125 @@ def test_task_records_dialog_imports_attachment_without_blocking_ui(
     dialog.attachment_list.setCurrentRow(0)
     assert "SHA-256" in dialog.attachment_detail.text()
     engine.dispose()
+
+
+def test_task_records_dialog_selects_and_imports_multiple_attachments(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_service, record_service = make_dialog_services()
+    task = task_service.create(TaskDraft(title="여러 파일 선택"))
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    first = tmp_path / "첫번째.txt"
+    second = tmp_path / "두번째.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    monkeypatch.setattr(
+        record_dialog_module.QFileDialog,
+        "getOpenFileNames",
+        lambda *_args, **_kwargs: ([str(first), str(second)], "모든 파일 (*.*)"),
+    )
+    dialog = TaskRecordsDialog(
+        task,
+        task_service=task_service,
+        record_service=record_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog._choose_attachment()
+    qtbot.waitUntil(lambda: dialog._attachment_thread is None, timeout=3_000)
+
+    assert dialog.attachment_list.count() == 2
+    assert "첨부 완료: 2개" in dialog.attachment_detail.text()
+
+
+def test_task_records_dialog_imports_files_dropped_on_attachment_list(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    task_service, record_service = make_dialog_services()
+    task = task_service.create(TaskDraft(title="드래그 첨부"))
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    first = tmp_path / "드래그1.txt"
+    second = tmp_path / "드래그2.txt"
+    first.write_text("drag first", encoding="utf-8")
+    second.write_text("drag second", encoding="utf-8")
+    dialog = TaskRecordsDialog(
+        task,
+        task_service=task_service,
+        record_service=record_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(first)), QUrl.fromLocalFile(str(second))])
+    event = QDropEvent(
+        QPointF(10, 10),
+        Qt.DropAction.CopyAction,
+        mime_data,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+    dialog.attachment_list.dropEvent(event)
+    qtbot.waitUntil(lambda: dialog._attachment_thread is None, timeout=3_000)
+
+    assert event.isAccepted()
+    assert dialog.attachment_list.count() == 2
+
+
+def test_multiple_attachment_import_continues_after_one_file_fails(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_service, record_service = make_dialog_services()
+    task = task_service.create(TaskDraft(title="일부 실패 첨부"))
+    attachment_service = AttachmentService(
+        InMemoryAttachmentRepository(),
+        ManagedAttachmentStorage(tmp_path / "attachments"),
+        task_service,
+    )
+    first = tmp_path / "원본.txt"
+    duplicate = tmp_path / "중복.txt"
+    last = tmp_path / "마지막.txt"
+    first.write_text("same", encoding="utf-8")
+    duplicate.write_text("same", encoding="utf-8")
+    last.write_text("different", encoding="utf-8")
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, title, message, *_args: warnings.append((title, message)),
+    )
+    dialog = TaskRecordsDialog(
+        task,
+        task_service=task_service,
+        record_service=record_service,
+        attachment_service=attachment_service,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog._add_attachment_sources((first, duplicate, last))
+    qtbot.waitUntil(lambda: dialog._attachment_thread is None, timeout=3_000)
+
+    assert dialog.attachment_list.count() == 2
+    assert len(warnings) == 1
+    assert warnings[0][0] == "첨부 실패 1개"
+    assert "중복.txt" in warnings[0][1]
 
 
 def test_task_records_dialog_waits_for_attachment_cancel_before_closing(

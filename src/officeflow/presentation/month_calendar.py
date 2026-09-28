@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -501,6 +502,8 @@ class CalendarPage(QFrame):
         self._day_tasks: tuple[ScheduledTask, ...] = ()
         self._selected_task: ScheduledTask | None = None
         self._snoozed_until: dict[tuple[int, datetime | None], datetime] = {}
+        self._compact = False
+        self._normal_splitter_sizes = [380, 170]
         self.setObjectName("calendarCard")
 
         self._layout = QVBoxLayout(self)
@@ -533,8 +536,26 @@ class CalendarPage(QFrame):
         toolbar.addWidget(self.create_button)
         self._layout.addLayout(toolbar)
 
+        self.calendar_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.calendar_splitter.setObjectName("calendarDaySplitter")
+        self.calendar_splitter.setChildrenCollapsible(False)
+        self.calendar_splitter.setHandleWidth(8)
+        self.calendar_splitter.setOpaqueResize(True)
+
         self.calendar = MonthCalendarWidget(timezone=timezone)
-        self._layout.addWidget(self.calendar, 1)
+        self.calendar.setMinimumHeight(220)
+        self.calendar_splitter.addWidget(self.calendar)
+
+        self.day_panel = QWidget()
+        self.day_panel.setObjectName("calendarDayPanel")
+        self.day_panel.setMinimumHeight(156)
+        self.day_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        day_panel_layout = QVBoxLayout(self.day_panel)
+        day_panel_layout.setContentsMargins(0, 0, 0, 0)
+        day_panel_layout.setSpacing(6)
 
         day_header = QHBoxLayout()
         self.day_label = QLabel()
@@ -548,11 +569,16 @@ class CalendarPage(QFrame):
         self.day_more_hint.hide()
         day_header.addWidget(self.day_more_hint)
         day_header.addStretch()
+        self.expand_list_button = QPushButton("목록 확대")
+        self.expand_list_button.setObjectName("calendarExpandDayList")
+        self.expand_list_button.setCheckable(True)
+        self.expand_list_button.setToolTip("달력을 줄이고 선택 날짜의 일정 목록을 크게 봅니다.")
+        day_header.addWidget(self.expand_list_button)
         self.edit_button = QPushButton("선택 일정 수정")
         self.edit_button.setObjectName("calendarEdit")
         self.edit_button.setEnabled(False)
         day_header.addWidget(self.edit_button)
-        self._layout.addLayout(day_header)
+        day_panel_layout.addLayout(day_header)
 
         self.day_list = QListWidget()
         self.day_list.setObjectName("calendarDayList")
@@ -561,11 +587,15 @@ class CalendarPage(QFrame):
         self.day_list.setVerticalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerItem
         )
-        self.day_list.setMaximumHeight(112)
-        self.day_list.setMinimumHeight(70)
+        self.day_list.setMinimumHeight(112)
         self.day_list.setToolTip("일정을 더블 클릭하면 수정할 수 있습니다.")
         self.day_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._layout.addWidget(self.day_list)
+        day_panel_layout.addWidget(self.day_list, 1)
+        self.calendar_splitter.addWidget(self.day_panel)
+        self.calendar_splitter.setStretchFactor(0, 3)
+        self.calendar_splitter.setStretchFactor(1, 2)
+        self.calendar_splitter.setSizes(self._normal_splitter_sizes)
+        self._layout.addWidget(self.calendar_splitter, 1)
 
         self.previous_button.clicked.connect(lambda: self._move_month(-1))
         self.next_button.clicked.connect(lambda: self._move_month(1))
@@ -574,6 +604,8 @@ class CalendarPage(QFrame):
             lambda: self.createRequested.emit(self.calendar.selected_date)
         )
         self.edit_button.clicked.connect(self._activate_selected)
+        self.expand_list_button.toggled.connect(self._toggle_day_list_expanded)
+        self.calendar_splitter.splitterMoved.connect(self._remember_splitter_sizes)
         self.calendar.dateSelected.connect(self._select_date)
         self.calendar.moreRequested.connect(self._select_date)
         self.calendar.dateActivated.connect(self.createRequested)
@@ -618,13 +650,40 @@ class CalendarPage(QFrame):
         self._refresh_day_list()
 
     def set_compact(self, compact: bool) -> None:
+        self._compact = compact
         self.calendar.set_compact(compact)
         self._layout.setContentsMargins(*(12, 8, 12, 9) if compact else (18, 15, 18, 14))
         self._layout.setSpacing(6 if compact else 10)
-        self.day_list.setMinimumHeight(58 if compact else 70)
-        self.day_list.setMaximumHeight(68 if compact else 112)
+        self.calendar.setMinimumHeight(195 if compact else 220)
+        self.day_panel.setMinimumHeight(146 if compact else 156)
+        self.day_list.setMinimumHeight(104 if compact else 112)
         self.create_button.setVisible(not compact)
         self.edit_button.setText("수정" if compact else "선택 일정 수정")
+        self._update_more_hint(len(self._day_tasks))
+
+    def _toggle_day_list_expanded(self, expanded: bool) -> None:
+        self.expand_list_button.setText("달력 확대" if expanded else "목록 확대")
+        sizes = self.calendar_splitter.sizes()
+        if expanded:
+            if len(sizes) == 2 and all(size > 0 for size in sizes):
+                self._normal_splitter_sizes = sizes
+            total = max(sum(sizes), 500)
+            calendar_size = max(self.calendar.minimumHeight(), int(total * 0.35))
+            self.calendar_splitter.setSizes(
+                [
+                    calendar_size,
+                    max(self.day_panel.minimumHeight(), total - calendar_size),
+                ]
+            )
+        else:
+            self.calendar_splitter.setSizes(self._normal_splitter_sizes)
+
+    def _remember_splitter_sizes(self, _position: int, _index: int) -> None:
+        if self.expand_list_button.isChecked():
+            return
+        sizes = self.calendar_splitter.sizes()
+        if len(sizes) == 2 and all(size > 0 for size in sizes):
+            self._normal_splitter_sizes = sizes
 
     def _move_month(self, delta: int) -> None:
         year, month = shift_month(*self.calendar.displayed_month, delta)
@@ -671,24 +730,33 @@ class CalendarPage(QFrame):
                 self.day_list.setCurrentItem(item)
         self.day_label.setText(f"{self.selected_date.month}월 {self.selected_date.day}일")
         has_many = len(items) >= 3
+        has_overflow = len(items) > 3
         self.day_count.setText(f"총 {len(items)}개 일정" if items else "일정 없음")
         self.day_count.setProperty("hasMany", has_many)
         self.day_count.style().unpolish(self.day_count)
         self.day_count.style().polish(self.day_count)
-        self.day_more_hint.setVisible(has_many)
-        self.day_more_hint.setText(
-            f"↓ 스크롤해 총 {len(items)}개 일정을 모두 확인하세요"
-        )
+        self.day_more_hint.setVisible(has_overflow)
+        self._update_more_hint(len(items))
         self.day_list.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn
-            if has_many
+            if has_overflow
             else Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self.day_list.setAccessibleDescription(
             f"선택한 날짜의 일정 {len(items)}개. "
-            + ("목록을 스크롤해 모두 확인하세요." if has_many else "")
+            + ("목록을 스크롤하거나 확대해 모두 확인하세요." if has_overflow else "")
         )
         self.edit_button.setEnabled(self.day_list.currentItem() is not None)
+
+    def _update_more_hint(self, item_count: int) -> None:
+        remaining_count = max(0, item_count - 3)
+        if self._compact:
+            self.day_more_hint.setText(f"↓ 아래에 {remaining_count}개 더 있음")
+        else:
+            self.day_more_hint.setText(
+                f"↓ 아래에 {remaining_count}개 더 있음 · "
+                "스크롤하거나 목록 확대"
+            )
 
     def _select_task(self, task: ScheduledTask) -> None:
         span = task_date_span(task, self._timezone)
