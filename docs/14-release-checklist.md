@@ -16,8 +16,8 @@
 - [x] ZIP에 사용자 DB·첨부·가상환경·바이트코드 캐시·개발용 egg-info 제외 확인
 - [x] 패키징된 실행 파일로 구버전 DB 업그레이드·기존 업무/첨부 유지·보호 사본 확인
 - [x] 버전·SHA-256·릴리스 명세 일치 검증 (배포 파일 888개)
-- [ ] 소스 커밋·main 업로드
-- [ ] v3.0.3 태그·GitHub 릴리스와 배포 파일 게시
+- [x] 소스 커밋·main 업로드
+- [x] v3.0.3 태그·GitHub 릴리스와 배포 파일 게시
 
 ## 산출물
 
@@ -36,3 +36,15 @@
 
 Python ZIP은 wheelhouse를 포함하지 않으므로 새 환경의 최초 설정에는 인터넷이 필요하다.
 검증용 가상환경과 테스트 DB는 프로젝트의 `artifacts`/`build`에만 생성하며 Git에서 제외한다.
+
+## 게시 확인
+
+- 릴리스 소스: `b2d9940b0468754afe27b040c09ec1bb15046266`
+- 태그: `v3.0.3` (위 소스 커밋)
+- 공개 릴리스: https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.3
+- 한국 시간 2026-10-01 공개, 최신 안정 버전으로 지정 (`draft=false`, `prerelease=false`).
+- GitHub 자산 5개의 크기·SHA-256이 로컬 검증본과 모두 일치한다.
+- 설치본 SHA-256: `6fc12e20d636da53070e12b3ee5d414310cffbe200e80487a57dec08c7fb19b3`
+- Python ZIP SHA-256: `6a5b91c0262e49703c9a6bebba9eaeecdb976e66a0fcafb8a2a76970a5cb42a9`
+
+이 게시 확인 기록은 릴리스 이후 문서 커밋으로 main에 추가한다. 배포 태그와 파일은 변경하지 않는다.
