@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from officeflow.domain.attachment import Attachment
 from officeflow.infrastructure.database.models import AttachmentRecord, TaskRecord
+from officeflow.infrastructure.database.search import attachment_match_summaries
 from officeflow.infrastructure.database.session import SessionFactory
 
 
@@ -24,6 +25,12 @@ class SqlAlchemyAttachmentRepository:
         )
         with self._sessions.transaction() as session:
             return tuple(self._to_domain(record) for record in session.scalars(statement).all())
+
+    def filename_matches_for_tasks(
+        self, task_ids: tuple[int, ...], search: str
+    ) -> dict[int, tuple[int, str, int]]:
+        with self._sessions.transaction() as session:
+            return attachment_match_summaries(session, task_ids, search)
 
     def get_attachment(self, attachment_id: int) -> Attachment | None:
         with self._sessions.transaction() as session:

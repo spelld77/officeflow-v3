@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "3.0.2"
+  #define AppVersion "3.0.3"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\..\dist\OfficeFlow"
@@ -12,8 +12,14 @@
 #endif
 
 [Setup]
+#ifdef VerificationBuild
+AppId={{E3014E42-8758-49AC-BB49-8B5B7214987B}
+AppName=OfficeFlow Verification
+VersionInfoProductName=OfficeFlow Verification
+#else
 AppId={{824ED7F8-1C70-4B62-A862-130A68B37C35}
 AppName=OfficeFlow
+#endif
 AppVersion={#AppVersion}
 AppVerName=OfficeFlow {#AppVersion}
 AppPublisher=OfficeFlow
@@ -53,11 +59,15 @@ Name: "{group}\OfficeFlow"; Filename: "{app}\OfficeFlow.exe"
 Name: "{group}\OfficeFlow 사용자 안내"; Filename: "{app}\OfficeFlow-사용자안내.html"
 Name: "{autodesktop}\OfficeFlow"; Filename: "{app}\OfficeFlow.exe"; Tasks: desktopicon
 
+#ifndef VerificationBuild
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OfficeFlow v3"; ValueData: """{app}\OfficeFlow.exe"" --background"; Flags: uninsdeletevalue; Tasks: startup
+#endif
 
 [Run]
 Filename: "{app}\OfficeFlow.exe"; Description: "OfficeFlow 실행"; Flags: postinstall nowait skipifsilent unchecked
 
+#ifndef VerificationBuild
 [UninstallRun]
 Filename: "{app}\OfficeFlow.exe"; Parameters: "--remove-startup"; Flags: runhidden waituntilterminated; RunOnceId: "OfficeFlowRemoveStartup"
+#endif

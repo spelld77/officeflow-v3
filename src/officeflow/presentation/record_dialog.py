@@ -139,9 +139,7 @@ class AttachmentListWidget(QListWidget):
     def dropEvent(self, event: QDropEvent) -> None:
         self._set_drag_active(False)
         sources = tuple(
-            Path(url.toLocalFile())
-            for url in event.mimeData().urls()
-            if url.isLocalFile()
+            Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()
         )
         if not sources:
             event.ignore()
@@ -236,6 +234,7 @@ class TaskRecordsDialog(QDialog):
         self._selected_attachment_id: int | None = None
         self._attachment_thread: QThread | None = None
         self._attachment_worker: AttachmentImportWorker | None = None
+        self._owner_shutting_down = False
         self._attachment_progress: QProgressDialog | None = None
         self._attachment_import_successes = 0
         self._attachment_import_failures: list[tuple[Path, str]] = []
@@ -279,9 +278,7 @@ class TaskRecordsDialog(QDialog):
         root.addWidget(buttons)
 
         self._refresh_checklist()
-        self.result_edit.setPlainText(
-            task_service.result_note(self._task_id, occurrence_start)
-        )
+        self.result_edit.setPlainText(task_service.result_note(self._task_id, occurrence_start))
         self._refresh_work_logs()
         if attachment_service is not None:
             self._refresh_attachments()
@@ -294,9 +291,7 @@ class TaskRecordsDialog(QDialog):
         for index in range(self.checklist_list.count()):
             item = self.checklist_list.item(index)
             item.setFlags(
-                item.flags()
-                & ~Qt.ItemFlag.ItemIsEditable
-                & ~Qt.ItemFlag.ItemIsUserCheckable
+                item.flags() & ~Qt.ItemFlag.ItemIsEditable & ~Qt.ItemFlag.ItemIsUserCheckable
             )
         self.result_edit.setReadOnly(True)
         self.log_date_edit.setEnabled(False)
@@ -311,9 +306,7 @@ class TaskRecordsDialog(QDialog):
         if self._attachment_service is not None:
             self.add_attachment_button.setEnabled(False)
             self.attachment_list.setAcceptDrops(False)
-            self.attachment_drop_hint.setText(
-                "휴지통의 업무는 첨부파일을 열어볼 수만 있습니다."
-            )
+            self.attachment_drop_hint.setText("휴지통의 업무는 첨부파일을 열어볼 수만 있습니다.")
             self.unlink_attachment_button.setEnabled(False)
             self.delete_attachment_button.setEnabled(False)
 
@@ -458,9 +451,7 @@ class TaskRecordsDialog(QDialog):
         self.attachment_detail = QLabel("첨부파일을 선택하세요.")
         self.attachment_detail.setObjectName("attachmentDetail")
         self.attachment_detail.setWordWrap(True)
-        self.attachment_detail.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        self.attachment_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.attachment_detail)
 
         actions = QHBoxLayout()
@@ -495,9 +486,7 @@ class TaskRecordsDialog(QDialog):
         for checklist in items:
             item = QListWidgetItem(checklist.content)
             item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEditable
+                item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEditable
             )
             item.setCheckState(
                 Qt.CheckState.Checked if checklist.is_done else Qt.CheckState.Unchecked
@@ -508,9 +497,7 @@ class TaskRecordsDialog(QDialog):
 
     def _add_checklist(self) -> None:
         try:
-            self._record_service.add_checklist_item(
-                self._task_id, self.checklist_edit.text()
-            )
+            self._record_service.add_checklist_item(self._task_id, self.checklist_edit.text())
         except (RecordValidationError, LookupError) as error:
             QMessageBox.warning(self, "체크리스트를 추가하지 못했습니다.", str(error))
             return
@@ -673,9 +660,7 @@ class TaskRecordsDialog(QDialog):
             return
         attachments = self._attachment_service.attachments_for_task(self._task_id)
         self._attachments_by_id = {
-            attachment.id: attachment
-            for attachment in attachments
-            if attachment.id is not None
+            attachment.id: attachment for attachment in attachments if attachment.id is not None
         }
         self.attachment_list.clear()
         for attachment in attachments:
@@ -694,6 +679,14 @@ class TaskRecordsDialog(QDialog):
             else "첨부파일을 선택하면 저장 정보와 상태를 확인할 수 있습니다."
         )
         self._set_attachment_actions_enabled(False)
+
+    def select_attachment(self, attachment_id: int) -> None:
+        if self._attachment_service is None:
+            return
+        for index in range(self.attachment_list.count()):
+            if self.attachment_list.item(index).data(Qt.ItemDataRole.UserRole) == attachment_id:
+                self.attachment_list.setCurrentRow(index)
+                return
 
     def _choose_attachment(self) -> None:
         sources, _selected_filter = QFileDialog.getOpenFileNames(
@@ -754,9 +747,7 @@ class TaskRecordsDialog(QDialog):
         if not unique_sources:
             return
         large_sources = [
-            source
-            for source in unique_sources
-            if source_sizes[source] >= 100 * 1024 * 1024
+            source for source in unique_sources if source_sizes[source] >= 100 * 1024 * 1024
         ]
         if large_sources:
             total_size = sum(source_sizes[source] for source in large_sources)
@@ -776,11 +767,7 @@ class TaskRecordsDialog(QDialog):
         self._start_attachment_imports((source,))
 
     def _start_attachment_imports(self, sources: tuple[Path, ...]) -> None:
-        if (
-            not sources
-            or self._attachment_service is None
-            or self._attachment_thread is not None
-        ):
+        if not sources or self._attachment_service is None or self._attachment_thread is not None:
             return
         thread = QThread(self)
         worker = AttachmentImportWorker(self._attachment_service, self._task_id, sources)
@@ -822,6 +809,17 @@ class TaskRecordsDialog(QDialog):
             return
         super().reject()
 
+    def shutdown(self) -> None:
+        """Finish a modeless dialog's import before its owner disposes the DB."""
+        self._owner_shutting_down = True
+        self._close_when_attachment_finishes = False
+        if self._attachment_worker is not None:
+            self._attachment_worker.cancel()
+        if self._attachment_thread is not None:
+            self._attachment_thread.quit()
+            self._attachment_thread.wait()
+        self.reject()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._defer_close_for_attachment_import():
             event.ignore()
@@ -847,8 +845,7 @@ class TaskRecordsDialog(QDialog):
         self._attachment_import_successes += 1
         if self._attachment_progress is not None:
             self._attachment_progress.setValue(
-                self._attachment_import_successes
-                + len(self._attachment_import_failures)
+                self._attachment_import_successes + len(self._attachment_import_failures)
             )
 
     @Slot(int, int, str)
@@ -865,8 +862,7 @@ class TaskRecordsDialog(QDialog):
         self._attachment_import_failures.append((source_path, message))
         if self._attachment_progress is not None:
             self._attachment_progress.setValue(
-                self._attachment_import_successes
-                + len(self._attachment_import_failures)
+                self._attachment_import_successes + len(self._attachment_import_failures)
             )
 
     @Slot()
@@ -875,6 +871,8 @@ class TaskRecordsDialog(QDialog):
 
     @Slot()
     def _attachment_import_finished(self) -> None:
+        if self._owner_shutting_down:
+            return
         if self._attachment_progress is not None:
             self._attachment_progress.close()
         if hasattr(self, "add_attachment_button"):
@@ -905,9 +903,7 @@ class TaskRecordsDialog(QDialog):
                 "나머지 파일은 계속 처리했습니다.\n\n" + "\n".join(lines),
             )
         elif canceled and successes and not self._close_when_attachment_finishes:
-            self.attachment_detail.setText(
-                f"첨부 {successes}개 완료 · 나머지 파일은 취소됨"
-            )
+            self.attachment_detail.setText(f"첨부 {successes}개 완료 · 나머지 파일은 취소됨")
         self._attachment_import_successes = 0
         self._attachment_import_failures = []
         self._attachment_import_canceled = False
@@ -935,8 +931,7 @@ class TaskRecordsDialog(QDialog):
         checksum = attachment.checksum or "아직 계산되지 않음"
         status = "파일 누락" if attachment.missing_at is not None else "사용 가능"
         self.attachment_detail.setText(
-            f"상태: {status}\n크기: {self._format_size(attachment.size_bytes)}\n"
-            f"SHA-256: {checksum}"
+            f"상태: {status}\n크기: {self._format_size(attachment.size_bytes)}\nSHA-256: {checksum}"
         )
         self._set_attachment_actions_enabled(True)
         self.open_attachment_button.setEnabled(attachment.missing_at is None)
@@ -1079,9 +1074,7 @@ class WorkLogBrowserDialog(QDialog):
         root.addWidget(title)
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("workLogSearch")
-        self.search_edit.setPlaceholderText(
-            "전체 기간에서 검색: 제목, 설명, 완료 요약, 업무일지 내용"
-        )
+        self.search_edit.setPlaceholderText("전체 기간에서 검색: 제목, 내용, 첨부파일명")
         self.search_edit.setClearButtonEnabled(True)
         root.addWidget(self.search_edit)
         self._search_timer = QTimer(self)
@@ -1241,9 +1234,7 @@ class WorkLogBrowserDialog(QDialog):
             else "전체 기간"
         )
         self.load_more_button.setVisible(has_more)
-        self.load_more_button.setText(
-            f"업무 더 보기 (현재 {len(self._groups_by_key):,}개)"
-        )
+        self.load_more_button.setText(f"업무 더 보기 (현재 {len(self._groups_by_key):,}개)")
         if has_more:
             self.result_count_label.setText(
                 f"{scope} 검색 결과 현재 {len(self._groups_by_key):,}개 업무 · 더 있음"
@@ -1261,9 +1252,7 @@ class WorkLogBrowserDialog(QDialog):
         searching: bool,
     ) -> None:
         selected_key = self._selected_group_key
-        task_ids = {
-            task.id for task in completed if task.id is not None
-        } | {
+        task_ids = {task.id for task in completed if task.id is not None} | {
             log.task_id for log in logs if log.task_id is not None
         }
         tasks_by_id = self._task_service.get_many_including_deleted(tuple(task_ids))
@@ -1293,22 +1282,21 @@ class WorkLogBrowserDialog(QDialog):
                 key,
                 _RecordGroup(
                     key=key,
-                    task=(
-                        tasks_by_id.get(log.task_id)
-                        if log.task_id is not None
-                        else None
-                    ),
+                    task=(tasks_by_id.get(log.task_id) if log.task_id is not None else None),
                 ),
             )
             group.logs.append(log)
 
         search = self.search_edit.text().strip()
+        self._filename_matches = (
+            self._attachment_service.filename_matches_for_tasks(tuple(task_ids), search)
+            if self._attachment_service is not None
+            else {}
+        )
         for group in groups.values():
             group.match_locations = self._match_locations(group, search)
 
-        task_group_ids = tuple(
-            key[1] for key in groups if key[0] == "task"
-        )
+        task_group_ids = tuple(key[1] for key in groups if key[0] == "task")
         work_log_counts = self._record_service.work_log_counts(task_group_ids)
         ordered_groups = sorted(
             groups.values(),
@@ -1332,9 +1320,7 @@ class WorkLogBrowserDialog(QDialog):
             group.work_log_count = count
             states.append(f"업무일지 {count:,}건")
             if searching and group.match_locations:
-                states.append(
-                    "검색 위치: " + "·".join(sorted(group.match_locations))
-                )
+                states.append("검색 위치: " + "·".join(sorted(group.match_locations)))
             item = QListWidgetItem(f"{title}  ·  {'  ·  '.join(states)}")
             item.setData(Qt.ItemDataRole.UserRole, ("group", *group.key))
             self.list_widget.addItem(item)
@@ -1351,7 +1337,7 @@ class WorkLogBrowserDialog(QDialog):
             self._selected_group_key = None
             self.detail.setPlainText(
                 (
-                    "검색 결과가 없습니다. 제목, 설명, 완료 요약 또는 업무일지 내용으로 검색해 보세요."
+                    "검색 결과가 없습니다. 제목, 설명, 완료 요약, 업무일지 내용 또는 첨부파일명으로 검색해 보세요."
                     if searching
                     else "이 날짜에 완료한 업무나 작성한 업무일지가 없습니다."
                 )
@@ -1371,6 +1357,8 @@ class WorkLogBrowserDialog(QDialog):
         locations: set[str] = set()
         task = group.task
         if task is not None:
+            if task.id in self._filename_matches:
+                locations.add("첨부파일명")
             if contains_term(task.title):
                 locations.add("제목")
             if contains_term(task.description):
@@ -1434,9 +1422,7 @@ class WorkLogBrowserDialog(QDialog):
 
         lines = [f"{title} · {status}"]
         if group.match_locations:
-            lines.extend(
-                ("", "검색 위치: " + " · ".join(sorted(group.match_locations)))
-            )
+            lines.extend(("", "검색 위치: " + " · ".join(sorted(group.match_locations))))
         lines.extend(("", "완료 요약", summary or "입력된 완료 요약이 없습니다."))
         log_heading = f"업무일지 {work_log_count:,}건"
         if work_log_count > len(logs):

@@ -201,6 +201,18 @@ def test_v26_preview_migrate_and_apply_preserves_source_and_converts_data(tmp_pa
     }
 
     manager.apply_pending_restore()
+    upgrade_database(paths.database_file)
+    from officeflow.application.attachment_search import AttachmentSearchQuery
+    from officeflow.infrastructure.database.attachment_search_repository import (
+        SqlAlchemyAttachmentSearchRepository,
+    )
+    from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
+    engine = create_database_engine(paths.database_file)
+    try:
+        found = SqlAlchemyAttachmentSearchRepository(SessionFactory(engine)).search_page(AttachmentSearchQuery(search="attached"))
+        assert len(found.items) == 1 and found.items[0].original_name == "attached.txt"
+    finally:
+        engine.dispose()
     with closing(sqlite3.connect(paths.database_file)) as database:
         database.row_factory = sqlite3.Row
         assert database.execute(

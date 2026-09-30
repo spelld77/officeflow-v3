@@ -49,6 +49,16 @@ foreach ($name in @(
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $packageRoot
 }
 Copy-Item -LiteralPath (Join-Path $projectRoot "src") -Destination $packageRoot -Recurse
+# Ship sources only, never developer bytecode caches.
+Get-ChildItem -LiteralPath $resolvedPackage -Directory -Recurse |
+    Where-Object { $_.Name -eq "__pycache__" -or $_.Name -like "*.egg-info" } |
+    ForEach-Object {
+        $cachePath = [IO.Path]::GetFullPath($_.FullName)
+        if (-not $cachePath.StartsWith($resolvedPackage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "캐시 정리 경로가 배포 폴더 밖입니다: $cachePath"
+        }
+        Remove-Item -LiteralPath $cachePath -Recurse -Force
+    }
 Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\diagnose_python_runtime.py") `
     -Destination (Join-Path $packageRoot "scripts")
 Copy-Item -LiteralPath (Join-Path $projectRoot "docs\11-python-runtime.md") `

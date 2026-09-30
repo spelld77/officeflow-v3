@@ -151,6 +151,7 @@ class AttachmentRecord(Base):
     __table_args__ = (
         Index("ix_attachments_task_missing", "task_id", "missing_at"),
         Index("ix_attachments_detached_created", "detached_at", "created_at"),
+        Index("ix_attachments_created_id", "created_at", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

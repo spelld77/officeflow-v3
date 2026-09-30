@@ -57,6 +57,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "work_logs",
         "task_search",
         "work_log_search",
+        "attachment_search",
     } <= tables
     assert {
         "ix_tasks_active_schedule",
@@ -88,8 +89,12 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "work_log_search_update",
         "work_log_search_delete",
         "reminder_schedule_task_changed",
+        "attachment_search_insert",
+        "attachment_search_update",
+        "attachment_search_delete",
     } <= triggers
-    assert revision == "0009_reminder_schedule_cache"
+    assert revision == "0010_attachment_search"
+    assert "ix_attachments_created_id" in attachment_indexes
 
 
 def test_initial_migration_is_idempotent(tmp_path: Path) -> None:

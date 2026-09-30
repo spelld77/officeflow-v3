@@ -6,6 +6,9 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $resolvedInstaller = (Resolve-Path -LiteralPath $InstallerPath).Path
+if ((Get-Item -LiteralPath $resolvedInstaller).VersionInfo.ProductName.Trim() -ne "OfficeFlow Verification") {
+    throw "실사용 설치 등록을 보호하기 위해 VerificationBuild 설치파일만 검증할 수 있습니다."
+}
 $testRoot = Join-Path $projectRoot "build\installer-verification"
 $installDir = Join-Path $testRoot "installed"
 $dataDir = Join-Path $testRoot "user-data"

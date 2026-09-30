@@ -101,7 +101,12 @@ class TaskListModel(QAbstractListModel):
                     if snoozed_until is not None
                     else ""
                 )
-                return f"{entry.description or entry.title}{attachment}{snooze}"
+                match = (
+                    f"\n파일명 일치: {entry.matched_attachment_name} ({entry.matched_attachment_count}개)"
+                    if entry.matched_attachment_name
+                    else ""
+                )
+                return f"{entry.description or entry.title}{attachment}{snooze}{match}"
             if role == self.TASK_ROLE:
                 return entry
             if role == self.SNOOZED_UNTIL_ROLE:
@@ -395,9 +400,7 @@ class TaskItemDelegate(QStyledItemDelegate):
         painter.setPen(
             QPen(QColor("#A8B3C5" if deleted else "#2F6FED" if completed else "#A8B3C5"), 1.6)
         )
-        painter.setBrush(
-            QColor("#EEF2F7" if deleted else "#2F6FED" if completed else "#FFFFFF")
-        )
+        painter.setBrush(QColor("#EEF2F7" if deleted else "#2F6FED" if completed else "#FFFFFF"))
         painter.drawEllipse(completion_rect)
         if deleted:
             painter.setPen(QPen(QColor("#778197"), 1.5))
@@ -437,11 +440,7 @@ class TaskItemDelegate(QStyledItemDelegate):
         title_font.setBold(True)
         painter.setFont(title_font)
         painter.setPen(
-            QColor(
-                "#778197"
-                if deleted or task.status is TaskStatus.COMPLETED
-                else "#172033"
-            )
+            QColor("#778197" if deleted or task.status is TaskStatus.COMPLETED else "#172033")
         )
         if self._compact:
             snooze = (
@@ -455,9 +454,7 @@ class TaskItemDelegate(QStyledItemDelegate):
         painter.drawText(
             title_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            option.fontMetrics.elidedText(
-                title, Qt.TextElideMode.ElideRight, title_rect.width()
-            ),
+            option.fontMetrics.elidedText(title, Qt.TextElideMode.ElideRight, title_rect.width()),
         )
 
         if not self._compact:
@@ -467,17 +464,18 @@ class TaskItemDelegate(QStyledItemDelegate):
             painter.setFont(meta_font)
             painter.setPen(QColor("#68738A"))
             meta = format_task_schedule(task)
-            if snoozed_until is not None:
-                meta += (
-                    "  ·  ⏰ 재알림 "
-                    + format_snoozed_time(snoozed_until, task.timezone)
+            if task.matched_attachment_name:
+                meta = f"파일명 일치: {task.matched_attachment_name}" + (
+                    f" 외 {task.matched_attachment_count - 1}개"
+                    if task.matched_attachment_count > 1
+                    else ""
                 )
+            if snoozed_until is not None:
+                meta += "  ·  ⏰ 재알림 " + format_snoozed_time(snoozed_until, task.timezone)
             painter.drawText(
                 meta_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                option.fontMetrics.elidedText(
-                    meta, Qt.TextElideMode.ElideRight, meta_rect.width()
-                ),
+                option.fontMetrics.elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width()),
             )
 
         status_top = rect.top() + (7 if self._compact else 12)
@@ -487,7 +485,11 @@ class TaskItemDelegate(QStyledItemDelegate):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(attachment_rect, 12, 12)
             painter.setPen(QColor("#2F6FED"))
-            painter.drawText(attachment_rect, Qt.AlignmentFlag.AlignCenter, "첨부")
+            painter.drawText(
+                attachment_rect,
+                Qt.AlignmentFlag.AlignCenter,
+                "일치" if task.matched_attachment_name else "첨부",
+            )
         status_rect = QRectF(rect.right() - 104, status_top, 60, 24)
         painter.setBrush(QColor("#EEF2F7"))
         painter.setPen(Qt.PenStyle.NoPen)

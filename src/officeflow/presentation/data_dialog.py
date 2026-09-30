@@ -107,6 +107,7 @@ class DataManagementDialog(QDialog):
         self._automatic_backup_keep = automatic_backup_keep
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
+        self._owner_shutting_down = False
         self._progress: QProgressDialog | None = None
         self._usage_loading = False
         self._cleanup_loaded = False
@@ -895,15 +896,21 @@ class DataManagementDialog(QDialog):
         thread.start()
 
     def _operation_succeeded(self, result: object, message: Callable[[Any], str]) -> None:
+        if self._owner_shutting_down:
+            return
         self.status_label.setText(message(result))
         if isinstance(result, BackupInfo):
             self._refresh_usage_after_finish = True
 
     def _operation_failed(self, error: object) -> None:
+        if self._owner_shutting_down:
+            return
         self.status_label.setText(f"작업 실패: {error}")
         QMessageBox.critical(self, "데이터 작업 실패", str(error))
 
     def _operation_finished(self) -> None:
+        if self._owner_shutting_down:
+            return
         if self._progress is not None:
             self._progress.close()
         self._progress = None
@@ -947,6 +954,16 @@ class DataManagementDialog(QDialog):
         if self._worker is not None:
             self._worker.cancel()
             return
+        super().reject()
+
+    def shutdown(self) -> None:
+        """Wait for a modeless cleanup operation before its owner closes."""
+        self._owner_shutting_down = True
+        if self._worker is not None:
+            self._worker.cancel()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait()
         super().reject()
 
     def accept(self) -> None:

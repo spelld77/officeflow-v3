@@ -14,7 +14,7 @@ def sqlite_url(database_file: Path) -> str:
 
 def create_database_engine(database_file: Path, *, echo: bool = False) -> Engine:
     database_file.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(sqlite_url(database_file), echo=echo)
+    engine = create_engine(sqlite_url(database_file), echo=echo, hide_parameters=True)
 
     @event.listens_for(engine, "connect")
     def configure_sqlite(dbapi_connection: object, _connection_record: object) -> None:

@@ -66,15 +66,11 @@ class AttachmentRepository(Protocol):
 
     def add_attachment(self, attachment: Attachment) -> Attachment: ...
 
-    def set_missing_at(
-        self, attachment_id: int, missing_at: datetime | None
-    ) -> Attachment: ...
+    def set_missing_at(self, attachment_id: int, missing_at: datetime | None) -> Attachment: ...
 
     def set_checksum(self, attachment_id: int, checksum: str) -> Attachment: ...
 
-    def set_detached_at(
-        self, attachment_id: int, detached_at: datetime | None
-    ) -> Attachment: ...
+    def set_detached_at(self, attachment_id: int, detached_at: datetime | None) -> Attachment: ...
 
     def delete_attachment(self, attachment_id: int) -> None: ...
 
@@ -127,6 +123,27 @@ class AttachmentService:
                 attachment = self._repository.set_missing_at(attachment.id_required, None)
             refreshed.append(attachment)
         return tuple(refreshed)
+
+    def filename_matches_for_tasks(
+        self, task_ids: tuple[int, ...], search: str
+    ) -> dict[int, tuple[int, str, int]]:
+        """Metadata-only matches; do not inspect files while searching."""
+        if len(search.strip()) < 2:
+            return {}
+        matcher = getattr(self._repository, "filename_matches_for_tasks", None)
+        if matcher is not None:
+            return dict(matcher(task_ids, search))
+        terms = search.strip().lower().split()
+        result: dict[int, tuple[int, str, int]] = {}
+        for task_id in task_ids:
+            matches = [
+                item
+                for item in self._repository.list_attachments(task_id)
+                if all(term in item.original_name.lower() for term in terms)
+            ]
+            if matches:
+                result[task_id] = (matches[0].id_required, matches[0].original_name, len(matches))
+        return result
 
     def attach(
         self,

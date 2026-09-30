@@ -6,9 +6,10 @@ import sys
 from collections.abc import Callable
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from officeflow import __version__
+from officeflow.application.attachment_search import AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.records import RecordService
@@ -23,7 +24,13 @@ from officeflow.infrastructure.backup import BackupError, BackupManager
 from officeflow.infrastructure.database.attachment_repository import (
     SqlAlchemyAttachmentRepository,
 )
-from officeflow.infrastructure.database.migrate import upgrade_database
+from officeflow.infrastructure.database.attachment_search_repository import (
+    SqlAlchemyAttachmentSearchRepository,
+)
+from officeflow.infrastructure.database.migrate import (
+    needs_attachment_search_upgrade,
+    upgrade_database,
+)
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
@@ -33,6 +40,7 @@ from officeflow.infrastructure.exports.excel import ExcelTaskExporter
 from officeflow.infrastructure.migration.legacy_v26 import LegacyV26Migration
 from officeflow.infrastructure.settings.store import JsonSettingsStore
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
+from officeflow.presentation.database_upgrade import DatabaseUpgradeDialog
 from officeflow.presentation.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -57,7 +65,11 @@ def build_application(
 
     settings_store = JsonSettingsStore(paths.settings_file)
     settings = settings_store.load()
-    upgrade_database(paths.database_file)
+    app = application or QApplication(argv or sys.argv)
+    if needs_attachment_search_upgrade(paths.database_file):
+        DatabaseUpgradeDialog(lambda progress: upgrade_database(paths.database_file, progress=progress)).run_upgrade()
+    else:
+        upgrade_database(paths.database_file)
     engine = create_database_engine(paths.database_file)
     sessions = SessionFactory(engine)
     task_service = TaskService(SqlAlchemyTaskRepository(sessions), timezone=settings.timezone)
@@ -79,7 +91,6 @@ def build_application(
         timezone=settings.timezone,
     )
 
-    app = application or QApplication(argv or sys.argv)
     app.setApplicationName("OfficeFlow")
     app.setApplicationDisplayName("OfficeFlow v3")
     app.setApplicationVersion(__version__)
@@ -98,6 +109,9 @@ def build_application(
         reminder_service=reminder_service,
         record_service=record_service,
         attachment_service=attachment_service,
+        attachment_search_service=AttachmentSearchService(
+            SqlAlchemyAttachmentSearchRepository(sessions)
+        ),
         export_service=export_service,
         backup_manager=backup_manager,
         migration_service=migration_service,
@@ -136,13 +150,23 @@ def main() -> int:
     run_state = RunStateTracker(paths.running_marker_file)
     previous_unclean_shutdown = run_state.begin()
 
-    app, window = build_application(
-        arguments,
-        application=app,
-        desktop_integration=True,
-        previous_unclean_shutdown=previous_unclean_shutdown,
-        on_clean_shutdown=run_state.mark_clean,
-    )
+    try:
+        app, window = build_application(
+            arguments,
+            application=app,
+            desktop_integration=True,
+            previous_unclean_shutdown=previous_unclean_shutdown,
+            on_clean_shutdown=run_state.mark_clean,
+        )
+    except Exception as error:
+        logger.exception("OfficeFlow 데이터 준비 또는 시작에 실패했습니다.")
+        message = "데이터 준비 또는 프로그램 시작을 완료하지 못했습니다. 로그를 확인한 뒤 다시 실행해 주세요."
+        if isinstance(error, OSError):
+            message += f"\n\n{error}"
+        QMessageBox.critical(None, "OfficeFlow 시작 실패", message)
+        run_state.mark_clean()
+        coordinator.close()
+        return 1
     coordinator.messageReceived.connect(window.handle_external_command)
     app.aboutToQuit.connect(window.shutdown)
     app.aboutToQuit.connect(coordinator.close)

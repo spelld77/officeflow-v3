@@ -117,7 +117,16 @@ if (-not $SkipInstaller) {
 
     $installer = Join-Path $installerDir "OfficeFlow-$version-Setup.exe"
     if (-not $SkipInstallerVerification) {
-        & (Join-Path $projectRoot "scripts\verify-installer.ps1") -InstallerPath $installer
+        # An isolated installer identity must not alter the user's real uninstall
+        # registration or Windows startup setting during lifecycle verification.
+        $verificationDir = Join-Path $buildRoot "verification-installer"
+        New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
+        & $IsccPath "/DAppVersion=$version" "/DSourceDir=$appDir" `
+            "/DOutputDir=$verificationDir" "/DSetupIcon=$icon" "/DVerificationBuild=1" `
+            (Join-Path $projectRoot "packaging\windows\OfficeFlow.iss")
+        if ($LASTEXITCODE -ne 0) { throw "격리 검증용 설치 프로그램 빌드에 실패했습니다." }
+        $verificationInstaller = Join-Path $verificationDir "OfficeFlow-$version-Setup.exe"
+        & (Join-Path $projectRoot "scripts\verify-installer.ps1") -InstallerPath $verificationInstaller
         if ($LASTEXITCODE -ne 0) { throw "설치 프로그램 검증에 실패했습니다." }
     }
 }

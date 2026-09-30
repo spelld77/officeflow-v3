@@ -8,12 +8,20 @@ from itertools import pairwise
 from typing import ClassVar
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QThread, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QResizeEvent, QShortcut
+from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QThread, QTimer, QUrl
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDesktopServices,
+    QKeySequence,
+    QResizeEvent,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -31,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow import __version__
+from officeflow.application.attachment_search import AttachmentSearchHit, AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.migration import LegacyMigration
@@ -53,6 +62,7 @@ from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.infrastructure.windows.hotkey import WindowsGlobalHotkey
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.app_icon import create_app_icon
+from officeflow.presentation.attachment_search_page import AttachmentSearchPageWidget
 from officeflow.presentation.data_dialog import DataManagementDialog, OperationWorker
 from officeflow.presentation.help import open_user_help
 from officeflow.presentation.month_calendar import CalendarPage
@@ -123,6 +133,7 @@ class MainWindow(QMainWindow):
         desktop_integration: bool = False,
         startup_manager: WindowsStartupManager | None = None,
         previous_unclean_shutdown: bool = False,
+        attachment_search_service: AttachmentSearchService | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -130,6 +141,10 @@ class MainWindow(QMainWindow):
         self._reminder_service = reminder_service
         self._record_service = record_service
         self._attachment_service = attachment_service
+        self._attachment_search_service = attachment_search_service
+        self._file_search_active = False
+        self._file_page: AttachmentSearchPageWidget | None = None
+        self._file_dialogs: list[QDialog] = []
         self._export_service = export_service
         self._backup_manager = backup_manager
         self._migration_service = migration_service
@@ -201,6 +216,7 @@ class MainWindow(QMainWindow):
         self._search_timer.setInterval(250)
         self._search_timer.timeout.connect(self._refresh_tasks)
         self._search.textChanged.connect(self._on_search_changed)
+        self._search_mode.currentIndexChanged.connect(self._change_search_mode)
 
         self._new_task_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         self._new_task_shortcut.activated.connect(self._open_new_task)
@@ -307,12 +323,20 @@ class MainWindow(QMainWindow):
         self._calendar_page.dateSelected.connect(self._refresh_calendar_day)
         self._calendar_page.taskSelected.connect(self._on_calendar_task_selected)
         self._calendar_page.taskActivated.connect(self._open_calendar_task)
-        self._calendar_page.taskContextRequested.connect(
-            self._show_calendar_task_context_menu
-        )
+        self._calendar_page.taskContextRequested.connect(self._show_calendar_task_context_menu)
         self._calendar_page.createRequested.connect(self._open_calendar_new)
         self._content_stack.addWidget(self._task_content)
         self._content_stack.addWidget(self._calendar_page)
+        if self._attachment_search_service is not None:
+            self._file_page = AttachmentSearchPageWidget(
+                self._attachment_search_service, self._settings.timezone
+            )
+            self._file_page.backRequested.connect(self._return_from_file_search)
+            self._file_page.clearRequested.connect(self._clear_file_search)
+            self._file_page.openRequested.connect(self._open_search_file)
+            self._file_page.taskRequested.connect(lambda hit: self._open_file_records(hit, False))
+            self._file_page.manageRequested.connect(lambda hit: self._open_file_records(hit, True))
+            self._content_stack.addWidget(self._file_page)
         self._body_layout.addWidget(self._content_stack, 3)
         self._detail_panel = self._build_detail()
         self._body_layout.addWidget(self._detail_panel, 2)
@@ -324,6 +348,12 @@ class MainWindow(QMainWindow):
         top_bar.setObjectName("topBar")
         layout = QHBoxLayout(top_bar)
         layout.setContentsMargins(14, 12, 14, 12)
+
+        self._search_mode = QComboBox()
+        self._search_mode.setObjectName("searchTarget")
+        self._search_mode.addItems(["업무", "첨부파일"])
+        self._search_mode.setVisible(self._attachment_search_service is not None)
+        layout.addWidget(self._search_mode)
 
         self._search = QLineEdit()
         self._search.setObjectName("taskSearchEdit")
@@ -393,9 +423,7 @@ class MainWindow(QMainWindow):
         self._task_list = QListView()
         self._task_list.setObjectName("taskList")
         self._task_list.setModel(self._task_model)
-        self._task_list.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
-        )
+        self._task_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._task_delegate = TaskItemDelegate(self._task_list)
         self._task_list.setItemDelegate(self._task_delegate)
         self._task_delegate.quickCompleteRequested.connect(self._quick_complete_task)
@@ -430,6 +458,10 @@ class MainWindow(QMainWindow):
         self._empty_clear_search_button.setObjectName("emptyClearTaskSearch")
         self._empty_clear_search_button.clicked.connect(self._clear_search)
         self._empty_clear_search_button.hide()
+        self._find_files_button = QPushButton("전체 기간의 첨부파일 찾기")
+        self._find_files_button.clicked.connect(lambda: self._search_mode.setCurrentIndex(1))
+        self._find_files_button.hide()
+        empty_layout.addWidget(self._find_files_button, alignment=Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(
             self._empty_clear_search_button,
             alignment=Qt.AlignmentFlag.AlignCenter,
@@ -573,6 +605,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._detail_title)
         layout.addWidget(self._detail_status)
         layout.addWidget(self._detail_schedule)
+        self._matched_file_button = QPushButton("일치한 첨부파일 열기")
+        self._matched_file_button.hide()
+        self._matched_file_button.clicked.connect(self._open_matched_file)
+        layout.addWidget(self._matched_file_button)
         layout.addSpacing(8)
         layout.addWidget(self._detail_description)
         layout.addStretch()
@@ -617,9 +653,7 @@ class MainWindow(QMainWindow):
         self._permanent_delete_button.setToolTip(
             "휴지통의 업무와 관련 데이터를 복구할 수 없도록 삭제합니다."
         )
-        self._permanent_delete_button.clicked.connect(
-            self._delete_selected_permanently
-        )
+        self._permanent_delete_button.clicked.connect(self._delete_selected_permanently)
         self._permanent_delete_button.hide()
         layout.addWidget(self._permanent_delete_button)
         return panel
@@ -664,6 +698,7 @@ class MainWindow(QMainWindow):
         return button
 
     def _set_view(self, view: TaskView) -> None:
+        self._leave_file_search()
         self._reset_search()
         self._remember_view_preferences()
         self._calendar_active = False
@@ -687,6 +722,7 @@ class MainWindow(QMainWindow):
         self._refresh_tasks()
 
     def _show_calendar(self) -> None:
+        self._leave_file_search()
         self._reset_search()
         self._remember_view_preferences()
         self._calendar_active = True
@@ -701,6 +737,9 @@ class MainWindow(QMainWindow):
         self._refresh_calendar()
 
     def _refresh_tasks(self) -> None:
+        if self._file_search_active and self._file_page is not None:
+            self._file_page.refresh()
+            return
         if self._calendar_active:
             self._refresh_calendar()
             return
@@ -708,9 +747,7 @@ class MainWindow(QMainWindow):
             selected_id = self._selected_task_id
             if self._current_view is TaskView.TODAY:
                 local_day = datetime.now(ZoneInfo(self._settings.timezone)).date()
-                self._page_title.setText(
-                    f"오늘 · {local_day.month}월 {local_day.day}일"
-                )
+                self._page_title.setText(f"오늘 · {local_day.month}월 {local_day.day}일")
                 pages = self._task_service.today_flow_pages(
                     self._build_query(offset=0, group=None),
                 )
@@ -720,14 +757,9 @@ class MainWindow(QMainWindow):
                     loader=self._load_group_page,
                 )
                 total = sum(page.total for page in pages.values())
-                remaining = (
-                    pages[TaskGroup.OVERDUE].total
-                    + pages[TaskGroup.IN_PROGRESS].total
-                )
+                remaining = pages[TaskGroup.OVERDUE].total + pages[TaskGroup.IN_PROGRESS].total
                 completed = pages[TaskGroup.COMPLETED].total
-                self._page_caption.setText(
-                    f"남은 업무 {remaining}개 · 완료 {completed}개"
-                )
+                self._page_caption.setText(f"남은 업무 {remaining}개 · 완료 {completed}개")
             else:
                 self._page_title.setText(self.VIEW_LABELS[self._current_view][0])
                 page = self._task_service.query(self._build_query(offset=0))
@@ -737,11 +769,13 @@ class MainWindow(QMainWindow):
             self._task_list.setVisible(total > 0)
             self._empty_panel.setVisible(total == 0)
             search = self._search.text().strip()
+            self._find_files_button.setVisible(
+                total == 0 and bool(search) and self._file_page is not None
+            )
             if total == 0 and search:
                 self._empty_title.setText("검색 결과가 없습니다.")
                 self._empty_description.setText(
-                    f"“{search}”와 일치하는 업무가 없습니다. "
-                    "업무가 삭제된 것은 아닙니다."
+                    f"“{search}”와 일치하는 업무가 없습니다. 업무가 삭제된 것은 아닙니다."
                 )
                 self._empty_clear_search_button.show()
             elif total == 0 and self._active_filter_count():
@@ -753,9 +787,7 @@ class MainWindow(QMainWindow):
                 self._empty_clear_search_button.hide()
             else:
                 self._empty_title.setText("표시할 업무가 없습니다.")
-                self._empty_description.setText(
-                    "빠르게 등록하거나 다른 보기를 선택해 보세요."
-                )
+                self._empty_description.setText("빠르게 등록하거나 다른 보기를 선택해 보세요.")
                 self._empty_clear_search_button.hide()
             self._update_search_feedback(total)
             self._update_result_count()
@@ -773,6 +805,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"업무를 불러오지 못했습니다: {error}", 5000)
 
     def _refresh_calendar(self, _year: int | None = None, _month: int | None = None) -> None:
+        if self._file_search_active:
+            return
         try:
             self._refresh_snoozed_indicators()
             start_date, end_date = self._calendar_page.visible_date_range
@@ -852,7 +886,111 @@ class MainWindow(QMainWindow):
 
     def _on_search_changed(self, _text: str) -> None:
         self._update_search_feedback()
+        if self._file_search_active and self._file_page is not None:
+            self._file_page.set_search(_text)
+            return
         self._search_timer.start()
+
+    def _change_search_mode(self, index: int) -> None:
+        if self._file_page is None:
+            return
+        self._search_timer.stop()
+        if index == 1:
+            self._open_task_shortcut.setEnabled(False)
+            self._file_search_active = True
+            self._selected_task_id = None
+            self._update_detail(None)
+            self._content_stack.setCurrentWidget(self._file_page)
+            self._file_page.activate(self._search.text(), calendar=self._calendar_active)
+        else:
+            self._leave_file_search()
+            self._content_stack.setCurrentWidget(
+                self._calendar_page if self._calendar_active else self._task_content
+            )
+            self._refresh_tasks()
+        self._apply_responsive_layout()
+
+    def _leave_file_search(self) -> None:
+        self._file_search_active = False
+        self._open_task_shortcut.setEnabled(True)
+        if self._file_page is not None:
+            self._file_page.deactivate()
+        blocker = QSignalBlocker(self._search_mode)
+        self._search_mode.setCurrentIndex(0)
+        del blocker
+
+    def _return_from_file_search(self) -> None:
+        self._reset_search()
+        self._search_mode.setCurrentIndex(0)
+
+    def _clear_file_search(self) -> None:
+        self._reset_search()
+        if self._file_page is not None:
+            self._file_page.reset_conditions()
+            self._file_page.set_search("")
+
+    def _open_matched_file(self) -> None:
+        attachment_id = self._matched_file_button.property("attachmentId")
+        if isinstance(attachment_id, int):
+            self._open_attachment_id(attachment_id)
+
+    def _open_search_file(self, hit: AttachmentSearchHit) -> None:
+        self._open_attachment_id(hit.attachment_id)
+
+    def _open_attachment_id(self, attachment_id: int) -> None:
+        if self._attachment_service is None:
+            return
+        try:
+            path = self._attachment_service.path_for_open(attachment_id)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                raise OSError("파일을 열지 못했습니다. 연결 프로그램과 접근 권한을 확인해 주세요.")
+        except (LookupError, OSError, RuntimeError) as error:
+            self.statusBar().showMessage(str(error), 8000)
+            if self._file_search_active and self._file_page is not None:
+                self._file_page.feedback.setText(str(error))
+                self._file_page.refresh()
+            else:
+                self._refresh_tasks()
+
+    def _keep_file_dialog(self, dialog: QDialog) -> None:
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setStyleSheet(LIGHT_STYLESHEET)
+        self._file_dialogs.append(dialog)
+
+        def finished(_result: int) -> None:
+            if dialog in self._file_dialogs:
+                self._file_dialogs.remove(dialog)
+            dialog.deleteLater()
+            if not self._force_quit:
+                self._refresh_tasks()
+
+        dialog.finished.connect(finished)
+        dialog.show()
+
+    def _open_file_records(self, hit: AttachmentSearchHit, attachments: bool) -> None:
+        if attachments and hit.detached:
+            self._open_data_management(cleanup=True)
+            return
+        if self._record_service is None:
+            return
+        try:
+            task = self._task_service.get_including_deleted(hit.task_id)
+            dialog = TaskRecordsDialog(
+                task,
+                task_service=self._task_service,
+                record_service=self._record_service,
+                attachment_service=self._attachment_service,
+                initial_tab="attachments" if attachments else "result",
+                parent=self,
+            )
+            if attachments:
+                dialog.select_attachment(hit.attachment_id)
+            dialog.changed.connect(self._refresh_tasks)
+            self._keep_file_dialog(dialog)
+        except LookupError as error:
+            self.statusBar().showMessage(str(error), 8000)
+            self._refresh_tasks()
 
     def _reset_search(self) -> bool:
         self._search_timer.stop()
@@ -883,7 +1021,9 @@ class MainWindow(QMainWindow):
             self._empty_clear_search_button.hide()
             return
         result = f" · 결과 {total}개" if total is not None else ""
-        self._search_feedback_label.setText(f"🔍 “{search}” 검색 중{result}")
+        scope = self.VIEW_LABELS[self._current_view][0]
+        hint = " · 첨부파일명은 2글자부터 검색" if len(search) < 2 else ""
+        self._search_feedback_label.setText(f"🔍 “{search}” 검색 중 · {scope}{result}{hint}")
 
     def _clear_filters(self) -> None:
         blockers = (
@@ -930,9 +1070,7 @@ class MainWindow(QMainWindow):
         self._set_combo_value(self._priority_filter, str(preferences.get("priority", "")))
         self._pinned_filter.setChecked(bool(preferences.get("pinned_only", False)))
         self._attachment_filter.setChecked(bool(preferences.get("has_attachments", False)))
-        default_sort = (
-            TaskSort.UPDATED.value if view is TaskView.TRASH else TaskSort.SCHEDULE.value
-        )
+        default_sort = TaskSort.UPDATED.value if view is TaskView.TRASH else TaskSort.SCHEDULE.value
         self._set_combo_value(
             self._sort_combo,
             str(preferences.get("sort", default_sort)),
@@ -955,9 +1093,7 @@ class MainWindow(QMainWindow):
         attached = self._attachment_filter.isChecked()
         self._pinned_filter.setText("✓고정" if pinned else "고정")
         self._attachment_filter.setText("✓첨부" if attached else "첨부")
-        self._pinned_filter.setToolTip(
-            "고정된 업무만 표시 중" if pinned else "고정된 업무만 표시"
-        )
+        self._pinned_filter.setToolTip("고정된 업무만 표시 중" if pinned else "고정된 업무만 표시")
         self._attachment_filter.setToolTip(
             "첨부파일이 있는 업무만 표시 중" if attached else "첨부파일이 있는 업무만 표시"
         )
@@ -1009,13 +1145,16 @@ class MainWindow(QMainWindow):
             self._task_list.setCurrentIndex(index)
         self._selected_task_id = task.id
         self._selected_occurrence_start = (
-            task.starts_at
-            if task.deleted_at is None and task.recurrence_rule
-            else None
+            task.starts_at if task.deleted_at is None and task.recurrence_rule else None
         )
 
     def _build_task_context_menu(self, task: Task) -> QMenu:
         menu = QMenu(self)
+        if task.matched_attachment_id is not None:
+            matching_file = menu.addAction("일치한 첨부파일 열기")
+            attachment_id = task.matched_attachment_id
+            matching_file.triggered.connect(lambda: self._open_attachment_id(attachment_id))
+            menu.addSeparator()
         if task.deleted_at is not None:
             if self._attachment_service is not None and self._record_service is not None:
                 attachments = menu.addAction("첨부파일 보기…")
@@ -1041,9 +1180,7 @@ class MainWindow(QMainWindow):
             edit_result.triggered.connect(self._open_selected_result)
             if self._selected_occurrence_start is None:
                 reactivate = menu.addAction("다시 진행")
-                reactivate.triggered.connect(
-                    lambda: self._transition_selected(TaskStatus.ACTIVE)
-                )
+                reactivate.triggered.connect(lambda: self._transition_selected(TaskStatus.ACTIVE))
 
         if menu.actions():
             menu.addSeparator()
@@ -1199,7 +1336,7 @@ class MainWindow(QMainWindow):
         else:
             self._automatic_backup_timer.stop()
 
-    def _open_data_management(self) -> None:
+    def _open_data_management(self, *, cleanup: bool = False) -> None:
         if self._export_service is None or self._backup_manager is None:
             return
         dialog = DataManagementDialog(
@@ -1211,15 +1348,18 @@ class MainWindow(QMainWindow):
             task_service=self._task_service,
             selected_task_ids=self._selected_task_ids_for_export(),
             automatic_backup_enabled=self._settings.automatic_backup_enabled,
-            automatic_backup_interval_hours=(
-                self._settings.automatic_backup_interval_hours
-            ),
+            automatic_backup_interval_hours=(self._settings.automatic_backup_interval_hours),
             automatic_backup_keep=self._settings.automatic_backup_keep,
             parent=self,
         )
         dialog.quitRequested.connect(self._quit_application)
         dialog.setStyleSheet(LIGHT_STYLESHEET)
-        dialog.exec()
+        if cleanup:
+            if dialog._cleanup_tab_index is not None:
+                dialog.tabs.setCurrentIndex(dialog._cleanup_tab_index)
+            self._keep_file_dialog(dialog)
+        else:
+            dialog.exec()
 
     def _selected_task_ids_for_export(self) -> tuple[int, ...]:
         selected_ids: list[int] = []
@@ -1278,9 +1418,7 @@ class MainWindow(QMainWindow):
 
     def _automatic_backup_succeeded(self, result: object) -> None:
         if isinstance(result, BackupInfo):
-            self.statusBar().showMessage(
-                f"자동 백업을 완료했습니다: {result.path.name}", 4000
-            )
+            self.statusBar().showMessage(f"자동 백업을 완료했습니다: {result.path.name}", 4000)
 
     @staticmethod
     def _automatic_backup_failed(error: object) -> None:
@@ -1395,18 +1533,14 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            attachment_paths = self._task_service.delete_permanently(
-                self._selected_task_id
-            )
+            attachment_paths = self._task_service.delete_permanently(self._selected_task_id)
         except (LookupError, ValueError) as error:
             self._show_error("업무를 영구 삭제하지 못했습니다.", error)
             return
 
         failed_paths = attachment_paths
         if attachment_paths and self._attachment_service is not None:
-            failed_paths = self._attachment_service.remove_files_after_task_delete(
-                attachment_paths
-            )
+            failed_paths = self._attachment_service.remove_files_after_task_delete(attachment_paths)
 
         self._selected_task_id = None
         self._selected_occurrence_start = None
@@ -1425,9 +1559,7 @@ class MainWindow(QMainWindow):
                 "지우지 못했으므로 데이터 → 첨부 정리에서 확인해 주세요.",
             )
             return
-        self.statusBar().showMessage(
-            f"'{task.title}' 업무를 영구 삭제했습니다.", 4000
-        )
+        self.statusBar().showMessage(f"'{task.title}' 업무를 영구 삭제했습니다.", 4000)
 
     def _open_selected_records(
         self,
@@ -1498,9 +1630,7 @@ class MainWindow(QMainWindow):
         if task is not None:
             self._selected_task_id = task.id
             if task.deleted_at is not None:
-                self.statusBar().showMessage(
-                    "휴지통의 업무는 먼저 복원한 뒤 열 수 있습니다.", 3500
-                )
+                self.statusBar().showMessage("휴지통의 업무는 먼저 복원한 뒤 열 수 있습니다.", 3500)
                 return
             self._open_editor(
                 self._task_service.get(task.id)
@@ -1587,6 +1717,9 @@ class MainWindow(QMainWindow):
         self._apply_responsive_layout()
 
     def _update_detail(self, task: Task | None) -> None:
+        self._matched_file_button.setVisible(task is not None and task.matched_attachment_id is not None)
+        self._matched_file_button.setProperty("attachmentId", task.matched_attachment_id if task else None)
+        self._matched_file_button.setToolTip(task.matched_attachment_name if task else "")
         if task is None:
             self._detail_title.setText("업무 상세")
             self._detail_status.setText("목록에서 업무를 선택하세요.")
@@ -1637,6 +1770,10 @@ class MainWindow(QMainWindow):
             )
         if task.has_attachments:
             self._detail_schedule.setText(f"{self._detail_schedule.text()}\n첨부파일 있음")
+        if task.matched_attachment_name:
+            self._detail_schedule.setText(
+                f"{self._detail_schedule.text()}\n파일명 일치: {task.matched_attachment_name}"
+            )
         if task.recurrence_rule:
             self._detail_schedule.setText(f"{self._detail_schedule.text()}\n반복 일정")
         if not deleted and self._reminder_service is not None and task.id is not None:
@@ -1662,8 +1799,7 @@ class MainWindow(QMainWindow):
         self._edit_button.setEnabled(not deleted)
         self._detail_records_button.setEnabled(self._record_service is not None)
         self._detail_attachment_button.setEnabled(
-            self._record_service is not None
-            and self._attachment_service is not None
+            self._record_service is not None and self._attachment_service is not None
         )
         self._pending_button.setEnabled(not deleted and task.status is TaskStatus.ACTIVE)
         self._complete_button.setEnabled(
@@ -1681,9 +1817,7 @@ class MainWindow(QMainWindow):
         else:
             self._pending_button.setText("대기")
         self._open_selected_button.setText("복원" if deleted else "열기")
-        self._open_selected_button.setToolTip(
-            "선택한 업무 복원" if deleted else "선택한 업무 수정"
-        )
+        self._open_selected_button.setToolTip("선택한 업무 복원" if deleted else "선택한 업무 수정")
         self._open_selected_button.setVisible(not self._detail_panel.isVisible())
         self._open_selected_records_button.setVisible(
             self._record_service is not None and not self._detail_panel.isVisible()
@@ -1805,9 +1939,7 @@ class MainWindow(QMainWindow):
         if task.id is None:
             return None
         occurrence_start = (
-            self._selected_occurrence_start
-            if task.recurrence_rule
-            else task.starts_at
+            self._selected_occurrence_start if task.recurrence_rule else task.starts_at
         )
         exact = self._active_snoozes.get((task.id, occurrence_start))
         if exact is not None:
@@ -1882,9 +2014,7 @@ class MainWindow(QMainWindow):
                     8_000,
                 )
         else:
-            self.statusBar().showMessage(
-                messages.get(action_name, "알림을 처리했습니다."), 3000
-            )
+            self.statusBar().showMessage(messages.get(action_name, "알림을 처리했습니다."), 3000)
 
     def _clear_reminder_dialog(self) -> None:
         self._reminder_dialog = None
@@ -1990,6 +2120,14 @@ class MainWindow(QMainWindow):
             application.quit()
 
     def shutdown(self) -> None:
+        self._force_quit = True
+        if self._file_page is not None:
+            self._file_page.shutdown()
+        for dialog in tuple(self._file_dialogs):
+            if isinstance(dialog, (TaskRecordsDialog, DataManagementDialog)):
+                dialog.shutdown()
+            else:
+                dialog.reject()
         self._persist_settings()
         self._automatic_backup_timer.stop()
         if self._reminder_dialog is not None:
@@ -2025,8 +2163,10 @@ class MainWindow(QMainWindow):
             timing = "당일 오전 9시"
         elif offset < 0:
             minutes = abs(offset)
-            timing = f"{minutes // 1_440}일 전" if minutes % 1_440 == 0 else (
-                f"{minutes // 60}시간 전" if minutes % 60 == 0 else f"{minutes}분 전"
+            timing = (
+                f"{minutes // 1_440}일 전"
+                if minutes % 1_440 == 0
+                else (f"{minutes // 60}시간 전" if minutes % 60 == 0 else f"{minutes}분 전")
             )
         else:
             timing = f"{offset}분 후"
@@ -2039,7 +2179,7 @@ class MainWindow(QMainWindow):
     def _apply_responsive_layout(self) -> None:
         width = self.width()
         compact_navigation = width < self.COMPACT_BREAKPOINT
-        show_detail = width >= self.DETAIL_BREAKPOINT
+        show_detail = width >= self.DETAIL_BREAKPOINT and not self._file_search_active
         self._detail_panel.setVisible(show_detail)
         self._body_layout.setSpacing(16 if show_detail else 0)
         self._open_selected_button.setVisible(
@@ -2109,6 +2249,19 @@ class MainWindow(QMainWindow):
                 button.style().polish(button)
 
         self._page_caption.setVisible(not compact_navigation)
+        for button in self._nav_buttons:
+            short_height = self.height() < 720
+            if button.property("shortHeight") != short_height:
+                button.setProperty("shortHeight", short_height)
+                button.style().unpolish(button)
+                button.style().polish(button)
+        self._search_mode.setItemText(0, "일정" if self._calendar_active else "업무")
+        self._search.setPlaceholderText(
+            "파일명 검색 (2글자 이상)"
+            if self._file_search_active
+            else ("일정·첨부파일명 검색" if self._calendar_active else "업무·내용·첨부파일명 검색")
+        )
+        self._add_button.setVisible(not self._file_search_active)
 
     @staticmethod
     def _set_nav_selected(button: QPushButton, selected: bool) -> None:

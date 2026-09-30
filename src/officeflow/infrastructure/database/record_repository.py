@@ -13,7 +13,7 @@ from officeflow.infrastructure.database.models import (
     TaskRecord,
     WorkLogRecord,
 )
-from officeflow.infrastructure.database.search import fts_prefix_query
+from officeflow.infrastructure.database.search import fts_prefix_query, matching_attachment_tasks
 from officeflow.infrastructure.database.session import SessionFactory
 
 
@@ -159,9 +159,7 @@ class SqlAlchemyRecordRepository:
         )
         with self._sessions.transaction() as session:
             total = int(session.scalar(count_statement) or 0)
-            items = tuple(
-                self._to_work_log(record) for record in session.scalars(statement).all()
-            )
+            items = tuple(self._to_work_log(record) for record in session.scalars(statement).all())
         return WorkLogPage(items=items, total=total, offset=offset, limit=limit)
 
     def has_duplicate_work_log(
@@ -207,11 +205,7 @@ class SqlAlchemyRecordRepository:
         matching_logs: Any = (
             select(literal_column("rowid"))
             .select_from(text("work_log_search"))
-            .where(
-                text("work_log_search MATCH :work_log_fts").bindparams(
-                    work_log_fts=query
-                )
-            )
+            .where(text("work_log_search MATCH :work_log_fts").bindparams(work_log_fts=query))
         )
         matching_tasks: Any = (
             select(literal_column("rowid"))
@@ -221,6 +215,7 @@ class SqlAlchemyRecordRepository:
         return or_(
             WorkLogRecord.id.in_(matching_logs),
             WorkLogRecord.task_id.in_(matching_tasks),
+            WorkLogRecord.task_id.in_(matching_attachment_tasks(search)),
         )
 
     def add_work_log(self, work_log: WorkLog) -> WorkLog:

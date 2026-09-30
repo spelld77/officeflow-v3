@@ -115,6 +115,12 @@ QPushButton[nav="true"][compact="true"] {
     text-align: center;
     padding: 10px 4px;
 }
+QPushButton[nav="true"][shortHeight="true"] {
+    padding: 4px 14px;
+}
+QPushButton[nav="true"][shortHeight="true"][compact="true"] {
+    padding: 4px 4px;
+}
 #topBar, #detailPanel, #contentCard, #calendarCard {
     background: #FFFFFF;
     border: 1px solid #E1E6EF;

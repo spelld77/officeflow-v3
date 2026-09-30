@@ -48,6 +48,9 @@ class Task:
     deleted_at: datetime | None = None
     legacy_id: int | None = None
     has_attachments: bool = False
+    matched_attachment_id: int | None = None
+    matched_attachment_name: str = ""
+    matched_attachment_count: int = 0
 
     def __post_init__(self) -> None:
         normalized_title = self.title.strip()

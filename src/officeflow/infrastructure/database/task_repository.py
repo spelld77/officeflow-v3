@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -33,7 +34,11 @@ from officeflow.infrastructure.database.models import (
     TaskOccurrenceRecord,
     TaskRecord,
 )
-from officeflow.infrastructure.database.search import fts_prefix_query
+from officeflow.infrastructure.database.search import (
+    attachment_match_summaries,
+    fts_prefix_query,
+    matching_attachment_tasks,
+)
 from officeflow.infrastructure.database.session import SessionFactory
 
 
@@ -86,9 +91,7 @@ class SqlAlchemyTaskRepository:
         if not task_ids:
             return {}
         attachment_exists = self._attachment_exists()
-        statement = select(TaskRecord, attachment_exists).where(
-            TaskRecord.id.in_(task_ids)
-        )
+        statement = select(TaskRecord, attachment_exists).where(TaskRecord.id.in_(task_ids))
         if not include_deleted:
             statement = statement.where(TaskRecord.deleted_at.is_(None))
         with self._sessions.transaction() as session:
@@ -174,7 +177,31 @@ class SqlAlchemyTaskRepository:
                 self._to_domain(record, has_attachments=bool(has_attachments))
                 for record, has_attachments in session.execute(statement).all()
             )
-        return TaskPage(items=items, total=total, offset=query.offset, limit=query.limit)
+        return TaskPage(
+            items=self._with_matches(items, query.search),
+            total=total,
+            offset=query.offset,
+            limit=query.limit,
+        )
+
+    def _with_matches(self, items: tuple[Task, ...], search: str) -> tuple[Task, ...]:
+        if not items or len(search.strip()) < 2:
+            return items
+        with self._sessions.transaction() as session:
+            matches = attachment_match_summaries(
+                session, tuple(task.id for task in items if task.id is not None), search
+            )
+        return tuple(
+            replace(
+                task,
+                matched_attachment_id=matches[task.id][0],
+                matched_attachment_name=matches[task.id][1],
+                matched_attachment_count=matches[task.id][2],
+            )
+            if task.id in matches
+            else task
+            for task in items
+        )
 
     def list_overlapping(
         self,
@@ -222,10 +249,11 @@ class SqlAlchemyTaskRepository:
             )
         )
         with self._sessions.transaction() as session:
-            return tuple(
+            items = tuple(
                 self._to_domain(record, has_attachments=bool(has_attachments))
                 for record, has_attachments in session.execute(statement).all()
             )
+        return self._with_matches(items, search)
 
     def calendar_overview(
         self,
@@ -299,7 +327,9 @@ class SqlAlchemyTaskRepository:
             .order_by(TaskRecord.starts_at, TaskRecord.id)
         )
         with self._sessions.transaction() as session:
-            regular_total = int(session.scalar(select(func.count(TaskRecord.id)).where(*regular)) or 0)
+            regular_total = int(
+                session.scalar(select(func.count(TaskRecord.id)).where(*regular)) or 0
+            )
             regular_previews = tuple(
                 self._to_domain(record, has_attachments=bool(has_attachments))
                 for record, has_attachments in session.execute(preview_statement).all()
@@ -415,9 +445,7 @@ class SqlAlchemyTaskRepository:
             predicates.append(TaskRecord.is_pinned.is_(True))
         if query.has_attachments is not None:
             attachment_exists = cls._attachment_exists()
-            predicates.append(
-                attachment_exists if query.has_attachments else ~attachment_exists
-            )
+            predicates.append(attachment_exists if query.has_attachments else ~attachment_exists)
         if query.completed_after is not None:
             predicates.append(TaskRecord.completed_at >= query.completed_after)
         if query.completed_before is not None:
@@ -435,15 +463,12 @@ class SqlAlchemyTaskRepository:
         matching_work_log_tasks: Any = (
             select(literal_column("task_id"))
             .select_from(text("work_log_search"))
-            .where(
-                text("work_log_search MATCH :work_log_fts").bindparams(
-                    work_log_fts=query
-                )
-            )
+            .where(text("work_log_search MATCH :work_log_fts").bindparams(work_log_fts=query))
         )
         return or_(
             TaskRecord.id.in_(matching_tasks),
             TaskRecord.id.in_(matching_work_log_tasks),
+            TaskRecord.id.in_(matching_attachment_tasks(search)),
         )
 
     @staticmethod
