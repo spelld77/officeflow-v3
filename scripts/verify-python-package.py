@@ -56,6 +56,12 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "packaging/windows/OfficeFlow-사용자안내.html",
             "src/officeflow/infrastructure/database/migrations/versions/0010_attachment_search.py",
             "src/officeflow/presentation/attachment_search_page.py",
+            "src/officeflow/domain/hourly_notification.py",
+            "src/officeflow/application/hourly_notifications.py",
+            "src/officeflow/presentation/hourly_notification_controller.py",
+            "src/officeflow/presentation/hourly_notification_dialog.py",
+            "src/officeflow/presentation/hourly_notification_settings.py",
+            "src/officeflow/presentation/notification_coordinator.py",
         )
         if any(f"{root_name}/{name}" not in names for name in required):
             raise ValueError("Required runtime file missing")

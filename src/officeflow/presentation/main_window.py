@@ -42,6 +42,7 @@ from officeflow import __version__
 from officeflow.application.attachment_search import AttachmentSearchHit, AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
+from officeflow.application.hourly_notifications import HourlyState
 from officeflow.application.migration import LegacyMigration
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderAlert, ReminderService
@@ -55,16 +56,26 @@ from officeflow.application.tasks import (
     TaskView,
 )
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
+from officeflow.domain.hourly_notification import HourlySettings
 from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
 from officeflow.infrastructure.backup import BackupInfo, BackupManager
-from officeflow.infrastructure.settings.store import AppSettings
+from officeflow.infrastructure.settings.store import (
+    AppSettings,
+    hourly_settings,
+    with_hourly_settings,
+)
 from officeflow.infrastructure.windows.hotkey import WindowsGlobalHotkey
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.attachment_search_page import AttachmentSearchPageWidget
 from officeflow.presentation.data_dialog import DataManagementDialog, OperationWorker
 from officeflow.presentation.help import open_user_help
+from officeflow.presentation.hourly_notification_controller import (
+    HourlyNotificationController,
+    NotificationClock,
+)
+from officeflow.presentation.hourly_notification_dialog import format_next
 from officeflow.presentation.month_calendar import CalendarPage
 from officeflow.presentation.record_dialog import (
     CompleteTaskDialog,
@@ -134,6 +145,8 @@ class MainWindow(QMainWindow):
         startup_manager: WindowsStartupManager | None = None,
         previous_unclean_shutdown: bool = False,
         attachment_search_service: AttachmentSearchService | None = None,
+        hourly_notifications_enabled: bool = False,
+        hourly_notification_clock: NotificationClock | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -181,6 +194,8 @@ class MainWindow(QMainWindow):
         self._undo_timer.setInterval(10_000)
         self._undo_timer.timeout.connect(self._clear_completion_undo)
         self._reminder_dialog: ReminderDialog | None = None
+        self._settings_dialog: SettingsDialog | None = None
+        self._hourly_notifications_enabled = hourly_notifications_enabled
         self._automatic_backup_thread: QThread | None = None
         self._automatic_backup_worker: OperationWorker | None = None
         self._automatic_backup_timer = QTimer(self)
@@ -207,6 +222,18 @@ class MainWindow(QMainWindow):
         self._undo_button.clicked.connect(self._undo_last_completion)
         self._undo_button.hide()
         self.statusBar().addPermanentWidget(self._undo_button)
+        self._hourly_controller = HourlyNotificationController(
+            hourly_settings(settings), parent=self,
+            save_settings=self._save_hourly_settings,
+            other_window=lambda: self._reminder_dialog,
+            clock=hourly_notification_clock,
+        )
+        self._hourly_button = QPushButton()
+        self._hourly_button.setObjectName("hourlyNotificationStatus")
+        self._hourly_button.setMenu(self._hourly_controller.menu)
+        self._hourly_button.hide()
+        self.statusBar().addPermanentWidget(self._hourly_button)
+        self._hourly_controller.stateChanged.connect(self._on_hourly_state)
         self._restore_view_preferences(self._current_view)
         self._set_compact_list(True)
         self._configure_input_tab_order()
@@ -242,6 +269,8 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._show_unclean_shutdown_warning)
         if self._desktop_integration:
             self._setup_desktop_integration()
+        if self._hourly_notifications_enabled and not self._previous_unclean_shutdown:
+            QTimer.singleShot(0, self._hourly_controller.start)
         if self._backup_manager is not None and settings.automatic_backup_enabled:
             self._automatic_backup_timer.start()
             QTimer.singleShot(1_500, self._maybe_automatic_backup)
@@ -1299,12 +1328,34 @@ class MainWindow(QMainWindow):
         self._open_editor(None, initial_date=initial_date)
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self._settings, self)
-        dialog.setStyleSheet(LIGHT_STYLESHEET)
-        if dialog.exec() != SettingsDialog.DialogCode.Accepted:
+        if self._settings_dialog is not None:
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
             return
+        dialog = SettingsDialog(self._settings, self)
+        self._settings_dialog = dialog
+        dialog.setStyleSheet(LIGHT_STYLESHEET)
+        dialog.hourlySettingsRequested.connect(self._hourly_controller.open_settings)
+        dialog.accepted.connect(lambda: self._apply_general_settings(dialog.settings()))
+        dialog.finished.connect(self._clear_settings_dialog)
+        dialog.show()
+
+    def _clear_settings_dialog(self, _result: int) -> None:
+        if self._settings_dialog is not None:
+            self._settings_dialog.deleteLater()
+            self._settings_dialog = None
+
+    def _apply_general_settings(self, edited: AppSettings) -> None:
         previous = self._settings
-        updated = dialog.settings()
+        # A modeless editor must not overwrite date flags/view/geometry changed meanwhile.
+        updated = replace(self._settings, **{
+            key: getattr(edited, key) for key in (
+                "minimize_to_tray", "start_with_windows", "global_quick_add_shortcut",
+                "missed_reminder_grace_minutes", "automatic_backup_enabled",
+                "automatic_backup_interval_hours", "automatic_backup_keep",
+            )
+        })
         try:
             self._startup_manager.set_enabled(updated.start_with_windows)
         except OSError as error:
@@ -1323,7 +1374,18 @@ class MainWindow(QMainWindow):
             )
             self._register_global_hotkey()
         if self._save_settings is not None:
-            self._save_settings(self._settings)
+            try:
+                self._save_settings(self._settings)
+            except OSError as error:
+                self._settings = previous
+                try:
+                    self._startup_manager.set_enabled(previous.start_with_windows)
+                except OSError:
+                    logger.exception("설정 저장 실패 후 시작 프로그램 설정을 복원하지 못했습니다.")
+                self._sync_quit_policy()
+                self._register_global_hotkey()
+                self._show_error("설정을 저장하지 못해 변경을 적용하지 않았습니다.", error)
+                return
         if shortcut_registered or not self._desktop_integration:
             self.statusBar().showMessage("설정을 적용했습니다.", 3000)
         else:
@@ -1335,6 +1397,35 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._maybe_automatic_backup)
         else:
             self._automatic_backup_timer.stop()
+
+    def _save_hourly_settings(self, value: HourlySettings) -> None:
+        updated = with_hourly_settings(self._settings, value)
+        if self._save_settings is not None:
+            self._save_settings(updated)
+        self._settings = updated
+
+    def _on_hourly_state(self, state: HourlyState) -> None:
+        if self._shutdown_done:
+            return
+        self._settings = with_hourly_settings(self._settings, self._hourly_controller.service.settings)
+        summary = self._hourly_controller.status_text(state)
+        if not state.enabled:
+            short = "매시 알림 꺼짐"
+        elif state.snoozed_until is not None:
+            short = f"재알림 {state.snoozed_until:%H:%M}"
+        elif state.next_regular_at is not None:
+            short = f"다음 {format_next(state.next_regular_at, state.bucket.starts_at)}"
+        else:
+            short = "매시 알림 예정 없음"
+        if state.error is not None:
+            short = "매시 알림 오류"
+        self._hourly_button.setText(short)
+        # Size to the concise label, including menu arrow/padding: never clip the text.
+        self._hourly_button.setFixedWidth(self._hourly_button.sizeHint().width())
+        self._hourly_button.setToolTip(summary + (f"\n{state.error}" if state.error else ""))
+        self._hourly_button.setVisible(not state.enabled or state.reason is None or state.error is not None)
+        if self._tray_icon is not None:
+            self._tray_icon.setToolTip(f"OfficeFlow · {summary}" + (" · 설정/표시 오류" if state.error else ""))
 
     def _open_data_management(self, *, cleanup: bool = False) -> None:
         if self._export_service is None or self._backup_manager is None:
@@ -1877,6 +1968,8 @@ class MainWindow(QMainWindow):
             "다시 확인하고 있으니 알림 창과 오늘 업무를 확인해 주세요.",
         )
         self._start_reminder_monitoring()
+        if self._hourly_notifications_enabled:
+            self._hourly_controller.start()
 
     def _start_reminder_monitoring(self) -> None:
         if self._reminder_service is None:
@@ -1886,7 +1979,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._check_reminders)
 
     def _check_reminders(self) -> None:
-        if self._reminder_service is None:
+        if self._reminder_service is None or self._shutdown_done:
             return
         try:
             alerts = self._reminder_service.poll_due(
@@ -1903,6 +1996,7 @@ class MainWindow(QMainWindow):
         if self._reminder_dialog is not None:
             self._reminder_dialog.add_alerts(alerts)
             self._reminder_dialog.present()
+            self._hourly_controller.reposition()
             return
         self._reminder_dialog = ReminderDialog(
             alerts,
@@ -1920,6 +2014,7 @@ class MainWindow(QMainWindow):
         )
         self._reminder_dialog.finished.connect(lambda _result: self._clear_reminder_dialog())
         self._reminder_dialog.present()
+        self._hourly_controller.reposition()
 
     def _refresh_snoozed_indicators(self) -> None:
         reminders: dict[tuple[int, datetime | None], datetime] = {}
@@ -2035,6 +2130,7 @@ class MainWindow(QMainWindow):
             quit_action.triggered.connect(self._quit_application)
             menu.addAction(open_action)
             menu.addAction(quick_add_action)
+            menu.addMenu(self._hourly_controller.menu)
             menu.addSeparator()
             menu.addAction(quit_action)
             tray.setContextMenu(menu)
@@ -2120,7 +2216,14 @@ class MainWindow(QMainWindow):
             application.quit()
 
     def shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
         self._force_quit = True
+        self._hourly_controller.shutdown()
+        self._reminder_timer.stop()
+        if self._settings_dialog is not None:
+            self._settings_dialog.close()
         if self._file_page is not None:
             self._file_page.shutdown()
         for dialog in tuple(self._file_dialogs):
@@ -2128,7 +2231,10 @@ class MainWindow(QMainWindow):
                 dialog.shutdown()
             else:
                 dialog.reject()
-        self._persist_settings()
+        try:
+            self._persist_settings()
+        except OSError:
+            logger.exception("종료 시 설정을 저장하지 못했습니다.")
         self._automatic_backup_timer.stop()
         if self._reminder_dialog is not None:
             self._reminder_dialog.dismiss_for_shutdown()
@@ -2143,8 +2249,7 @@ class MainWindow(QMainWindow):
             self._global_hotkey = None
         if self._tray_icon is not None:
             self._tray_icon.hide()
-        if self._on_shutdown is not None and not self._shutdown_done:
-            self._shutdown_done = True
+        if self._on_shutdown is not None:
             self._on_shutdown()
 
     @staticmethod
@@ -2285,13 +2390,16 @@ class MainWindow(QMainWindow):
             self._apply_responsive_layout()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._persist_settings()
         if (
             not self._force_quit
             and self._settings.minimize_to_tray
             and self._tray_icon is not None
             and self._tray_icon.isVisible()
         ):
+            try:
+                self._persist_settings()
+            except OSError:
+                logger.exception("트레이로 숨기기 전에 설정을 저장하지 못했습니다.")
             self.hide()
             event.ignore()
             if not self._tray_hint_shown:

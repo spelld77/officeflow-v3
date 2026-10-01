@@ -53,6 +53,7 @@ def build_application(
     desktop_integration: bool = False,
     previous_unclean_shutdown: bool = False,
     on_clean_shutdown: Callable[[], None] | None = None,
+    hourly_notifications_enabled: bool = False,
 ) -> tuple[QApplication, MainWindow]:
     paths = AppPaths.discover()
     paths.ensure_directories()
@@ -119,6 +120,7 @@ def build_application(
         on_shutdown=shutdown,
         desktop_integration=desktop_integration,
         previous_unclean_shutdown=previous_unclean_shutdown,
+        hourly_notifications_enabled=hourly_notifications_enabled,
     )
     return app, window
 
@@ -155,6 +157,7 @@ def main() -> int:
             arguments,
             application=app,
             desktop_integration=True,
+            hourly_notifications_enabled=True,
             previous_unclean_shutdown=previous_unclean_shutdown,
             on_clean_shutdown=run_state.mark_clean,
         )

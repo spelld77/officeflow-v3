@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -20,17 +22,24 @@ from officeflow.infrastructure.windows.hotkey import parse_windows_hotkey
 
 
 class SettingsDialog(QDialog):
+    hourlySettingsRequested = Signal()
+
     def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._original = settings
         self._settings: AppSettings | None = None
 
         self.setWindowTitle("OfficeFlow 설정")
-        self.setModal(True)
+        self.setModal(False)
         self.resize(520, 500)
         self.setMinimumSize(460, 450)
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body.setStyleSheet("background: #F4F6FA;")
+        root = QVBoxLayout(body)
         root.setContentsMargins(22, 20, 22, 18)
         root.setSpacing(14)
 
@@ -98,6 +107,9 @@ class SettingsDialog(QDialog):
         self.backup_interval_spin.setEnabled(settings.automatic_backup_enabled)
         self.backup_keep_spin.setEnabled(settings.automatic_backup_enabled)
         root.addLayout(form)
+        self.hourly_button = QPushButton("매시 알림 설정...")
+        self.hourly_button.clicked.connect(self.hourlySettingsRequested.emit)
+        root.addWidget(self.hourly_button)
 
         self.settings_hint = QLabel(
             "놓친 알림은 프로그램 종료·절전 중 예정 시각을 지난 알림입니다. "
@@ -116,6 +128,8 @@ class SettingsDialog(QDialog):
         self.error_label.hide()
         root.addWidget(self.error_label)
         root.addStretch()
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -126,7 +140,7 @@ class SettingsDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        outer.addWidget(buttons)
 
     def settings(self) -> AppSettings:
         if self._settings is None:

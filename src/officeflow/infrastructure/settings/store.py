@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from officeflow.domain.hourly_notification import HourlySettings, time_minutes
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +30,15 @@ class AppSettings:
     automatic_backup_enabled: bool = True
     automatic_backup_interval_hours: int = 24
     automatic_backup_keep: int = 10
+    hourly_notification_minute: int = 35
+    hourly_notification_message: str = "인사랑 업무기록을 확인하세요."
+    hourly_notification_weekday_exclusion_start: str = "09:00"
+    hourly_notification_weekday_exclusion_end: str = "18:00"
+    hourly_notification_extra_exclusions: tuple[tuple[str, str], ...] = ()
+    hourly_notification_sound: bool = False
+    hourly_notification_morning_continuation_required: bool = True
+    hourly_notification_holiday_date: str | None = None
+    hourly_notification_morning_continuation_date: str | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.missed_reminder_grace_minutes <= 43_200:
@@ -41,6 +53,29 @@ class AppSettings:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError as error:
             raise ValueError("지원하지 않는 시간대입니다.") from error
+        hourly_settings(self)
+
+
+def hourly_settings(settings: AppSettings) -> HourlySettings:
+    return HourlySettings(
+        timezone=settings.timezone,
+        **{
+            key: getattr(settings, f"hourly_notification_{key}")
+            for key in HourlySettings.__dataclass_fields__
+            if key != "timezone"
+        },
+    )
+
+
+def with_hourly_settings(settings: AppSettings, hourly: HourlySettings) -> AppSettings:
+    return replace(
+        settings,
+        **{
+            f"hourly_notification_{key}": getattr(hourly, key)
+            for key in HourlySettings.__dataclass_fields__
+            if key != "timezone"
+        },
+    )
 
 
 class JsonSettingsStore:
@@ -64,6 +99,49 @@ class JsonSettingsStore:
             preferences = values.get("view_preferences")
             if preferences is not None and not isinstance(preferences, dict):
                 values.pop("view_preferences")
+            # Repair only malformed new fields, preserving existing desktop/backup settings.
+            hourly_values = {
+                key.removeprefix("hourly_notification_"): values.pop(key)
+                for key in list(values)
+                if key.startswith("hourly_notification_")
+            }
+            valid = HourlySettings()
+            weekday_times: dict[str, str] = {}
+            for key, value in hourly_values.items():
+                try:
+                    if key in ("weekday_exclusion_start", "weekday_exclusion_end"):
+                        time_minutes(value)
+                        weekday_times[key] = value
+                        continue
+                    if key == "extra_exclusions":
+                        if not isinstance(value, (list, tuple)) or any(
+                            not isinstance(item, (list, tuple))
+                            or len(item) != 2
+                            or not all(isinstance(part, str) for part in item)
+                            for item in value
+                        ):
+                            continue
+                        value = tuple(tuple(item) for item in value)
+                    valid = replace(valid, **{key: value})
+                except (TypeError, ValueError):
+                    continue
+            with suppress(ValueError):
+                valid = replace(
+                    valid,
+                    weekday_exclusion_start=weekday_times.get(
+                        "weekday_exclusion_start", valid.weekday_exclusion_start
+                    ),
+                    weekday_exclusion_end=weekday_times.get(
+                        "weekday_exclusion_end", valid.weekday_exclusion_end
+                    ),
+                )
+            values.update(
+                {
+                    f"hourly_notification_{key}": getattr(valid, key)
+                    for key in HourlySettings.__dataclass_fields__
+                    if key != "timezone"
+                }
+            )
             return AppSettings(**values)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return AppSettings()

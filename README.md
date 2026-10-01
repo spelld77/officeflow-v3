@@ -7,7 +7,7 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 ## 현재 상태
 
 - 단계: Phase 8 완료
-- 버전: OfficeFlow 3.0.3
+- 버전: OfficeFlow 3.0.4
 - 구현 상태: 설치·업그레이드·제거 검증을 마친 Windows 데스크톱 앱
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
@@ -56,11 +56,19 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [첨부파일 검색 검증 보고서](docs/phase-reports/attachment-search.md)
 - [3.0.3 릴리스 체크리스트](docs/14-release-checklist.md)
 - [3.0.3 릴리스 노트](docs/release-notes-3.0.3.md)
+- [매시 정기 알림 설계](docs/15-hourly-notification-design.md)
+- [매시 알림 구현·검증 보고서](docs/phase-reports/hourly-notification.md)
+- [3.0.4 릴리스 체크리스트](docs/16-release-checklist.md)
+- [3.0.4 릴리스 노트](docs/release-notes-3.0.4.md)
 - [Phase 8 완료 보고서](docs/phase-reports/phase-8.md)
 
 ## 설치
 
-`dist/installer/OfficeFlow-3.0.3-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
+3.0.4부터 매시 알림이 추가되었다. 실제 실행마다 기본 활성화되며 트레이의
+`매시 알림` 또는 `설정 → 매시 알림 설정...`에서 조정한다. 인사랑 기록은 직접 해야 하며
+이 기능은 기록·출근 인증을 하지 않는다. 이번 실행에서 끄더라도 다음 실행에는 다시 켜진다.
+
+`dist/installer/OfficeFlow-3.0.4-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
 기본적으로 현재 사용자에게 설치된다. 기존 버전 위에 설치하면 업무 DB와 첨부파일을
 유지한 채 프로그램 파일만 갱신한다.
 
@@ -80,7 +88,8 @@ Python 모드를 사용할 수 있다. Python 3.12 64비트가 설치된 상태�
 업데이트하려면 기존 OfficeFlow를 완전히 종료하고 수동 백업을 만든 뒤 새 Python ZIP을
 별도 폴더에 압축 해제한다. `setup-officeflow-python.cmd`를 한 번 실행한 후
 `run-officeflow-python.cmd`로 시작한다. 동일한 사용자 데이터 폴더를 사용하므로 DB·첨부를
-배포 폴더에 복사할 필요가 없다. 첫 실행에서 DB 보호 사본을 만들고 파일명 검색 색인을 준비한다.
+배포 폴더에 복사할 필요가 없다. 3.0.3에서 3.0.4로 업데이트할 때는 DB 스키마 변경이 없다.
+3.0.2 이하의 오래된 DB는 첫 실행에서 보호 사본을 만들고 파일명 검색 색인을 준비한다.
 
 ## 내보내기와 백업
 
