@@ -59,6 +59,20 @@ Get-ChildItem -LiteralPath $resolvedPackage -Directory -Recurse |
         }
         Remove-Item -LiteralPath $cachePath -Recurse -Force
     }
+# Removing bytecode caches can leave retired source packages as empty directories.
+# Prune only the copied source tree, not the runtime/help directories populated below.
+$sourceRoot = Join-Path $resolvedPackage "src"
+Get-ChildItem -LiteralPath $sourceRoot -Directory -Recurse |
+    Sort-Object { $_.FullName.Length } -Descending |
+    ForEach-Object {
+        $emptySourcePath = [IO.Path]::GetFullPath($_.FullName)
+        if (-not $emptySourcePath.StartsWith($sourceRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "빈 소스 폴더가 배포 경로 밖입니다: $emptySourcePath"
+        }
+        if (-not (Get-ChildItem -LiteralPath $emptySourcePath -Force)) {
+            Remove-Item -LiteralPath $emptySourcePath
+        }
+    }
 Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\diagnose_python_runtime.py") `
     -Destination (Join-Path $packageRoot "scripts")
 Copy-Item -LiteralPath (Join-Path $projectRoot "docs\11-python-runtime.md") `
