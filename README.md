@@ -2,7 +2,7 @@
 
 OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파일을 한곳에서 관리하는 Windows 데스크톱 애플리케이션이다.
 
-기존 OfficeFlow v2.6을 직접 개조하지 않고 새 구조로 개발한다. 다만 기존 SQLite 데이터와 첨부파일은 공식 마이그레이션 절차를 통해 보존한다.
+기존 OfficeFlow를 직접 개조하지 않고 새 구조로 개발했다. 이미 v3로 이전한 업무·업무일지·첨부파일은 그대로 사용하며, 현재 소스에서는 사용이 끝난 v2.6 가져오기 기능을 제거했다.
 
 ## 현재 상태
 
@@ -29,12 +29,12 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [UX 설계](docs/02-ux-spec.md)
 - [기술 아키텍처](docs/03-architecture.md)
 - [데이터 모델](docs/04-data-model.md)
-- [기존 데이터 이전](docs/05-migration.md)
+- [기존 데이터 이전 (종료된 기능의 설계 기록)](docs/05-migration.md)
 - [개발 및 품질 지침](docs/06-development-process.md)
 - [개발 로드맵](docs/07-roadmap.md)
 - [승인할 제품 결정](docs/08-product-decisions.md)
 - [ADR-0001: 기술 스택](docs/adr/0001-desktop-stack.md)
-- [ADR-0002: v2.6 데이터 변환 규칙](docs/adr/0002-legacy-v26-mapping.md)
+- [ADR-0002: v2.6 데이터 변환 규칙 (역사 기록)](docs/adr/0002-legacy-v26-mapping.md)
 - [Phase 1 완료 보고서](docs/phase-reports/phase-1.md)
 - [Phase 2 완료 보고서](docs/phase-reports/phase-2.md)
 - [Phase 3A 완료 보고서](docs/phase-reports/phase-3a.md)
@@ -99,17 +99,12 @@ Python 모드를 사용할 수 있다. Python 3.12 64비트가 설치된 상태�
 - 복원 파일은 먼저 무결성을 검사하고 다음 실행 전에 적용한다. 적용 직전의 현재 데이터도 자동으로 별도 백업한다.
 - 자동 백업 주기와 보관 개수는 `설정`에서 변경할 수 있다.
 
-## v2.6 데이터 가져오기
+## 이미 이전한 데이터
 
-1. OfficeFlow v2.6을 완전히 종료한다.
-2. v3 사이드바의 `데이터`에서 `2.6 데이터 가져오기`를 선택한다.
-3. 기존 `office_tasks.db`를 고른다. DB 옆의 `saved_files` 폴더는 자동으로 찾으며 다른
-   위치라면 직접 지정한다.
-4. `가져오기 전 검사`에서 항목 개수와 경고를 확인한 뒤 `안전하게 가져오기`를 누른다.
-5. 완료 후 v3를 완전히 종료하고 다시 실행한다.
-
-원본 v2.6 DB와 파일은 수정하지 않으며, v3의 기존 데이터도 유지된다. 원본 DB 안전 사본과
-변환 보고서는 v3 데이터 폴더의 `backups`, `migration-reports`에 저장된다.
+v2.6에서 가져온 데이터도 일반 v3 업무와 같은 방식으로 조회·수정·검색·백업한다.
+현재 소스의 가져오기 기능 제거는 DB 스키마를 변경하거나 데이터를 다시 변환하지 않는다.
+기존 원본 ID와 가져오기 표식은 호환용 정보로 유지하며, 이미 저장된 변환 보고서·원본 안전 사본도 자동 삭제하지 않는다.
+PC를 옮길 때는 현재 v3의 `.ofbackup` 백업과 복원을 사용한다.
 
 ## 범위 기준
 

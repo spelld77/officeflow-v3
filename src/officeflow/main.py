@@ -37,7 +37,6 @@ from officeflow.infrastructure.database.session import SessionFactory, create_da
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 from officeflow.infrastructure.exports.calendar import ICalendarTaskExporter
 from officeflow.infrastructure.exports.excel import ExcelTaskExporter
-from officeflow.infrastructure.migration.legacy_v26 import LegacyV26Migration
 from officeflow.infrastructure.settings.store import JsonSettingsStore
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.database_upgrade import DatabaseUpgradeDialog
@@ -86,12 +85,6 @@ def build_application(
         ExcelTaskExporter(),
         ICalendarTaskExporter(),
     )
-    migration_service = LegacyV26Migration(
-        paths,
-        backup_manager,
-        timezone=settings.timezone,
-    )
-
     app.setApplicationName("OfficeFlow")
     app.setApplicationDisplayName("OfficeFlow v3")
     app.setApplicationVersion(__version__)
@@ -115,7 +108,6 @@ def build_application(
         ),
         export_service=export_service,
         backup_manager=backup_manager,
-        migration_service=migration_service,
         save_settings=settings_store.save,
         on_shutdown=shutdown,
         desktop_integration=desktop_integration,

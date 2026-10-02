@@ -15,7 +15,7 @@
 | 컬럼 | 설명 |
 |---|---|
 | id | 내부 기본키 |
-| legacy_id | v2.6 원본 업무 ID, 신규 업무는 NULL |
+| legacy_id | 이미 이전한 업무의 원본 ID를 보존하는 호환 필드. 가져오기 기능 종료 후에도 유지하며 신규 업무는 NULL |
 | title | 목록에 표시할 짧은 제목 |
 | description | 상세 내용 |
 | status | active, pending, completed, canceled, archived |

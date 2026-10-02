@@ -44,6 +44,7 @@ class TaskRecord(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Keep the existing schema and imported provenance compatible with older backups.
     legacy_id: Mapped[int | None] = mapped_column(Integer, unique=True)
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")

@@ -26,7 +26,7 @@
     <p class="lead">업무가 많아도 빠르게 찾고, 하루 일정부터 여러 날·반복 일정까지 한곳에서 관리합니다.</p>
     <nav>
       <a href="#start">시작하기</a><a href="#tasks">업무와 일정</a><a href="#records">기록과 첨부</a>
-      <a href="#reminders">알림</a><a href="#find">검색과 캘린더</a><a href="#migration">2.6 가져오기</a>
+      <a href="#reminders">알림</a><a href="#find">검색과 캘린더</a>
       <a href="#backup">백업</a><a href="#python">Python 실행</a><a href="#trouble">문제 해결</a>
     </nav>
   </header>
@@ -96,16 +96,7 @@
     <p>ICS 내보내기는 현재 목록, 선택 업무 또는 기간을 지정할 수 있습니다. 기간에 하루라도 겹치는 여러 날 일정이 포함되며 반복 일정은 기본적으로 제외됩니다. 여러 업무는 Ctrl을 누른 채 선택합니다.</p>
   </section>
 
-  <section id="migration"><h2>6. OfficeFlow 2.6 데이터 가져오기</h2>
-    <ol><li>OfficeFlow 2.6을 완전히 종료합니다.</li>
-      <li>v3의 <b>데이터 → 2.6 데이터 가져오기</b>를 엽니다.</li>
-      <li><code>office_tasks.db</code>를 선택합니다. 옆의 <code>saved_files</code>는 자동으로 찾습니다.</li>
-      <li><b>가져오기 전 검사</b>에서 개수와 경고를 확인하고 <b>안전하게 가져오기</b>를 실행합니다.</li>
-      <li>완료 후 OfficeFlow를 완전히 종료하고 다시 실행합니다.</li></ol>
-    <p class="note">원본 DB는 수정하지 않으며 현재 v3 데이터도 유지됩니다. 실행 중이라는 오류가 나오면 2.6을 종료하고 잠시 기다린 뒤 다시 검사하세요.</p>
-  </section>
-
-  <section id="backup"><h2>7. 데이터 관리와 백업</h2>
+  <section id="backup"><h2>6. 데이터 관리와 백업</h2>
     <ul><li><b>데이터 → 사용량</b>에서 DB·첨부·백업 크기, 정리 대기 파일과 용량이 큰 첨부파일 상위 5개를 확인합니다.</li>
       <li><b>첨부 저장 폴더 열기</b>로 관리 폴더를 확인할 수 있지만, 탐색기에서 파일을 이동·이름 변경·삭제하면 연결이 깨질 수 있으므로 변경은 OfficeFlow에서 합니다.</li>
       <li><code>.ofbackup</code>은 DB·첨부파일·설정을 함께 보관하고 복원 전에 무결성을 검사합니다.</li>
@@ -114,9 +105,10 @@
       <li>PC가 자동 백업 기준 시각에 꺼져 있으면 다음 OfficeFlow 실행 후 백업합니다. 자동 백업은 설정한 개수만 보관합니다.</li>
       <li>수동 백업은 자동 삭제하지 않습니다. <b>오래된 수동 백업 정리</b>에서 남길 개수와 삭제 용량을 확인한 뒤 정리합니다.</li>
       <li>복원은 다음 실행 전에 적용되며, 적용 직전 현재 데이터도 보호용 백업으로 남깁니다.</li></ul>
+    <p class="note">예전에 이전한 업무·업무일지·첨부파일도 그대로 조회하고 백업·복원할 수 있습니다. 사용이 끝난 이전 버전 가져오기 기능을 제거해도 현재 데이터와 기존 백업은 변경하지 않습니다.</p>
   </section>
 
-  <section id="python"><h2>8. Python 실행 모드</h2>
+  <section id="python"><h2>7. Python 실행 모드</h2>
     <p>회사 보안 정책이 서명되지 않은 실행 파일을 제한하지만 Python 실행은 허용하는 경우 <code>OfficeFlow-Python-3.0.4.zip</code>을 별도 폴더에 압축 해제해 사용할 수 있습니다.</p>
     <ol><li>Python 3.12 64비트를 설치합니다. 다른 Python 버전이 함께 있어도 괜찮습니다.</li>
       <li>최초 한 번 <code>setup-officeflow-python.cmd</code>를 실행해 전용 <code>.venv</code>와 라이브러리를 준비합니다.</li>
@@ -126,14 +118,13 @@
     <p class="note">Python 배포 폴더를 옮겼다면 설정 스크립트를 다시 실행하고 Windows 자동 시작 설정을 껐다가 켜십시오.</p>
   </section>
 
-  <section id="trouble"><h2>9. 문제 해결</h2>
+  <section id="trouble"><h2>8. 문제 해결</h2>
     <table><thead><tr><th>증상</th><th>확인할 내용</th></tr></thead><tbody>
       <tr><td>창이 보이지 않음</td><td>작업 표시줄 알림 영역의 OfficeFlow 아이콘을 두 번 누릅니다.</td></tr>
       <tr><td>전역 단축키가 동작하지 않음</td><td>다른 프로그램이 같은 키를 사용 중인지 확인하고 설정에서 다른 조합을 지정합니다.</td></tr>
       <tr><td>첨부파일 누락</td><td>업무 기록 화면에서 누락 상태를 확인하고 원본 파일을 다시 연결합니다.</td></tr>
       <tr><td>알림을 놓침</td><td>설정의 놓친 알림 확인 범위와 Windows 자동 실행 여부를 확인합니다. 범위보다 오래된 알림은 자동으로 다시 띄우지 않습니다.</td></tr>
       <tr><td>복원 후 내용이 바뀌지 않음</td><td>트레이를 포함해 OfficeFlow를 완전히 종료한 뒤 다시 실행합니다.</td></tr>
-      <tr><td>2.6 DB를 검사할 수 없음</td><td>2.6을 종료하고 DB와 같은 위치의 <code>-wal</code> 파일이 사라졌는지 확인합니다.</td></tr>
       <tr><td>설치형이 보안 프로그램에 의해 종료됨</td><td>조직 정책을 확인하고, Python 실행이 허용된 PC에서는 Python 3.12 실행 모드를 사용합니다.</td></tr>
     </tbody></table>
     <h3>데이터 위치</h3><p>기본 사용자 데이터는 <code>%LOCALAPPDATA%\OfficeFlow</code>에 저장됩니다. 프로그램 제거 시 이 폴더는 자동 삭제하지 않습니다.</p>

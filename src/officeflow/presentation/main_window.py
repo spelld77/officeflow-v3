@@ -43,7 +43,6 @@ from officeflow.application.attachment_search import AttachmentSearchHit, Attach
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.hourly_notifications import HourlyState
-from officeflow.application.migration import LegacyMigration
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderAlert, ReminderService
 from officeflow.application.tasks import (
@@ -138,7 +137,6 @@ class MainWindow(QMainWindow):
         attachment_service: AttachmentService | None = None,
         export_service: ExportService | None = None,
         backup_manager: BackupManager | None = None,
-        migration_service: LegacyMigration | None = None,
         save_settings: Callable[[AppSettings], None] | None = None,
         on_shutdown: Callable[[], None] | None = None,
         desktop_integration: bool = False,
@@ -160,7 +158,6 @@ class MainWindow(QMainWindow):
         self._file_dialogs: list[QDialog] = []
         self._export_service = export_service
         self._backup_manager = backup_manager
-        self._migration_service = migration_service
         self._save_settings = save_settings
         self._on_shutdown = on_shutdown
         self._shutdown_done = False
@@ -318,7 +315,7 @@ class MainWindow(QMainWindow):
         self._data_button.setEnabled(
             self._export_service is not None and self._backup_manager is not None
         )
-        self._data_button.setToolTip("내보내기·백업·복원 및 2.6 데이터 가져오기")
+        self._data_button.setToolTip("내보내기·백업·복원 및 첨부 정리")
         self._data_button.clicked.connect(self._open_data_management)
         self._sidebar_layout.addWidget(self._data_button)
         self._help_button = self._create_nav_button("도움말")
@@ -1434,7 +1431,6 @@ class MainWindow(QMainWindow):
             export_service=self._export_service,
             backup_manager=self._backup_manager,
             query=self._build_query(offset=0, limit=None),
-            migration_service=self._migration_service,
             attachment_service=self._attachment_service,
             task_service=self._task_service,
             selected_task_ids=self._selected_task_ids_for_export(),

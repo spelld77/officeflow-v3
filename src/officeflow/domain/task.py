@@ -46,6 +46,7 @@ class Task:
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+    # Preserve provenance on already imported tasks; no legacy importer is needed.
     legacy_id: int | None = None
     has_attachments: bool = False
     matched_attachment_id: int | None = None

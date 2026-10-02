@@ -53,10 +53,6 @@ class AppPaths:
     def running_marker_file(self) -> Path:
         return self.root / "officeflow.running"
 
-    @property
-    def migration_report_dir(self) -> Path:
-        return self.root / "migration-reports"
-
     def ensure_directories(self) -> None:
         for path in (
             self.root,
@@ -64,6 +60,5 @@ class AppPaths:
             self.attachment_dir,
             self.backup_dir,
             self.log_dir,
-            self.migration_report_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

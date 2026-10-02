@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
 
 from officeflow.application.attachments import AttachmentOperationError, AttachmentService
 from officeflow.application.exporting import CalendarExportResult, ExportService
-from officeflow.application.migration import LegacyMigration
 from officeflow.application.tasks import TaskQuery, TaskService
 from officeflow.domain.attachment import Attachment
 from officeflow.infrastructure.backup import (
@@ -85,7 +84,6 @@ class DataManagementDialog(QDialog):
         export_service: ExportService,
         backup_manager: BackupManager,
         query: TaskQuery,
-        migration_service: LegacyMigration | None = None,
         attachment_service: AttachmentService | None = None,
         task_service: TaskService | None = None,
         selected_task_ids: tuple[int, ...] = (),
@@ -98,7 +96,6 @@ class DataManagementDialog(QDialog):
         self._export_service = export_service
         self._backup_manager = backup_manager
         self._query = query
-        self._migration_service = migration_service
         self._attachment_service = attachment_service
         self._task_service = task_service
         self._selected_task_ids = selected_task_ids
@@ -494,14 +491,6 @@ class DataManagementDialog(QDialog):
                 (("현재 목록 Excel", self._export_excel), ("일정 선택 ICS", self._export_ics)),
             )
         )
-        if self._migration_service is not None:
-            layout.addWidget(
-                self._section(
-                    "이전 버전 가져오기",
-                    "OfficeFlow 2.6 DB를 먼저 검사한 뒤 현재 3.0 데이터에 안전하게 합칩니다.",
-                    (("2.6 데이터 가져오기", self._open_legacy_migration),),
-                )
-            )
         layout.addWidget(self._build_backup_section())
         layout.addStretch()
         scroll.setWidget(content)
@@ -549,15 +538,6 @@ class DataManagementDialog(QDialog):
         management_actions.addStretch()
         layout.addLayout(management_actions)
         return card
-
-    def _open_legacy_migration(self) -> None:
-        if self._migration_service is None:
-            return
-        from officeflow.presentation.migration_dialog import LegacyMigrationDialog
-
-        dialog = LegacyMigrationDialog(self._migration_service, self)
-        dialog.quitRequested.connect(self.quitRequested.emit)
-        dialog.exec()
 
     def _section(
         self,
