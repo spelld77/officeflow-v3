@@ -52,6 +52,9 @@ class Task:
     matched_attachment_id: int | None = None
     matched_attachment_name: str = ""
     matched_attachment_count: int = 0
+    # Read-only history projection: original occurrence identity, not effective time.
+    occurrence_id: int | None = None
+    occurrence_start: datetime | None = None
 
     def __post_init__(self) -> None:
         normalized_title = self.title.strip()

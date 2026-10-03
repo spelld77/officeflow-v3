@@ -69,6 +69,19 @@ $pyinstallerArguments = @(
 & $python @pyinstallerArguments
 if ($LASTEXITCODE -ne 0) { throw "Windows 실행 파일 빌드에 실패했습니다." }
 
+# --add-data copies the migration source tree, including developer bytecode.
+# Keep migration .py files but remove only caches inside the generated bundle.
+$resolvedAppDir = [IO.Path]::GetFullPath($appDir)
+Get-ChildItem -LiteralPath $resolvedAppDir -Directory -Recurse -Filter "__pycache__" |
+    Sort-Object { $_.FullName.Length } -Descending |
+    ForEach-Object {
+        $bundleCachePath = [IO.Path]::GetFullPath($_.FullName)
+        if (-not $bundleCachePath.StartsWith($resolvedAppDir + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "캐시 정리 경로가 EXE 배포 폴더 밖입니다: $bundleCachePath"
+        }
+        Remove-Item -LiteralPath $bundleCachePath -Recurse -Force
+    }
+
 # Qt 6 uses the Windows 10+ system ICU. A developer PATH may contain an unrelated ICU DLL;
 # PyInstaller can accidentally collect it and create an incompatible bundle.
 Get-ChildItem -LiteralPath (Join-Path $appDir "_internal") -Filter "icu*.dll" -File |

@@ -256,6 +256,36 @@ class SqlAlchemyReminderRepository:
                 for delivery, reminder, task in session.execute(statement).all()
             )
 
+    def list_unhandled_reminder_targets(
+        self, *, fired_since: datetime, due_at: datetime
+    ) -> tuple[tuple[ReminderDelivery, ReminderTarget], ...]:
+        statement = (
+            select(ReminderDeliveryRecord, ReminderRecord, TaskRecord)
+            .join(ReminderRecord, ReminderRecord.id == ReminderDeliveryRecord.reminder_id)
+            .join(TaskRecord, TaskRecord.id == ReminderDeliveryRecord.task_id)
+            .where(
+                ReminderDeliveryRecord.status == ReminderDeliveryStatus.FIRED.value,
+                ReminderDeliveryRecord.acknowledged_at.is_(None),
+                ReminderDeliveryRecord.last_fired_at >= fired_since,
+                ReminderDeliveryRecord.last_fired_at <= due_at,
+                ReminderRecord.enabled.is_(True),
+                TaskRecord.deleted_at.is_(None),
+                TaskRecord.status.in_((TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)),
+            )
+            .order_by(ReminderDeliveryRecord.scheduled_at, ReminderDeliveryRecord.id)
+        )
+        with self._sessions.transaction() as session:
+            return tuple(
+                (
+                    self._to_delivery(delivery),
+                    ReminderTarget(
+                        reminder=self._to_reminder(reminder),
+                        task=SqlAlchemyTaskRepository._to_domain(task),
+                    ),
+                )
+                for delivery, reminder, task in session.execute(statement).all()
+            )
+
     def list_active_snoozed_deliveries(self) -> tuple[ReminderDelivery, ...]:
         statement = (
             select(ReminderDeliveryRecord)

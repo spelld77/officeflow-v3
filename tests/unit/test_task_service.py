@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
@@ -22,6 +23,9 @@ from officeflow.domain.task import Task
 
 
 class InMemoryTaskRepository(TaskRepository):
+    def read_snapshot(self):
+        return nullcontext(self)
+
     def __init__(self) -> None:
         self.tasks: dict[int, Task] = {}
         self.occurrences: dict[tuple[int, datetime], TaskOccurrence] = {}
@@ -151,6 +155,31 @@ class InMemoryTaskRepository(TaskRepository):
             )
             and (not normalized or normalized in f"{task.title}\n{task.description}".casefold())
         )
+
+    def get_occurrences_by_ids(self, occurrence_ids: tuple[int, ...]) -> dict[int, TaskOccurrence]:
+        return {item.id: item for item in self.occurrences.values() if item.id in occurrence_ids}
+
+    def completed_history_page(self, query: TaskQuery) -> TaskPage:
+        items = [task for task in self.tasks.values() if task.deleted_at is None
+                 and task.status is TaskStatus.COMPLETED and task.completed_at is not None]
+        for occurrence in self.occurrences.values():
+            task = self.get(occurrence.task_id)
+            if task is not None and occurrence.status is OccurrenceStatus.COMPLETED:
+                items.append(replace(
+                    task, status=TaskStatus.COMPLETED, starts_at=occurrence.starts_at,
+                    ends_at=occurrence.ends_at, result_note=occurrence.result_note,
+                    completed_at=occurrence.completed_at, occurrence_id=occurrence.id,
+                    occurrence_start=occurrence.occurrence_start,
+                ))
+        terms = query.search.casefold().split()
+        items = [task for task in items if task.completed_at is not None
+                 and (query.completed_after is None or task.completed_at >= query.completed_after)
+                 and (query.completed_before is None or task.completed_at < query.completed_before)
+                 and all(term in f"{task.title}\n{task.description}\n{task.result_note}".casefold()
+                         for term in terms)]
+        items.sort(key=lambda task: (task.completed_at, task.id, task.occurrence_id or 0), reverse=True)
+        end = None if query.limit is None else query.offset + query.limit
+        return TaskPage(tuple(items[query.offset:end]), len(items), query.offset, query.limit)
 
     def calendar_overview(
         self,
@@ -820,7 +849,7 @@ def test_today_flow_merges_in_progress_and_upcoming_in_work_order() -> None:
     pages = service.today_flow_pages(query, now=NOW)
 
     assert first.total == 3
-    assert all(item.limit == 2 for item in first_queries)
+    assert [item.limit for item in first_queries] == [2, 1]
     assert [task.title for task in first.items] == ["진행 중 업무", "곧 시작할 업무"]
     assert [task.title for task in second.items] == ["나중 업무"]
     assert tuple(pages) == (
@@ -828,6 +857,21 @@ def test_today_flow_merges_in_progress_and_upcoming_in_work_order() -> None:
         TaskGroup.IN_PROGRESS,
         TaskGroup.COMPLETED,
     )
+
+
+def test_today_flow_pages_beyond_500_with_recurring_and_regular_tasks() -> None:
+    repository = InMemoryTaskRepository()
+    service = TaskService(repository)
+    for number in range(600):
+        service.create(TaskDraft(title=f"대량 {number:03}", starts_at=NOW + timedelta(hours=1)), now=NOW)
+    recurring = service.create(TaskDraft(title="반복", starts_at=NOW + timedelta(hours=2),
+                                        recurrence_rule="FREQ=DAILY"), now=NOW)
+    page = service.today_flow_page(TaskQuery(view=TaskView.TODAY, offset=550, limit=100),
+                                   TaskGroup.IN_PROGRESS, now=NOW)
+    assert page.total == 601
+    assert len(page.items) == 51
+    assert page.items[-1].id == recurring.id
+    assert all(query.limit is None or query.limit <= 500 for query in repository.queries)
 
 
 def test_query_combines_filters_sorting_and_pagination() -> None:

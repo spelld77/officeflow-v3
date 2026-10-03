@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from enum import StrEnum
@@ -63,11 +63,19 @@ class TaskExporter(Protocol):
     ) -> Path: ...
 
 
+class StreamingTaskExporter(Protocol):
+    def export_stream(
+        self, tasks: Iterable[Task], destination: Path, *,
+        cancel_requested: Callable[[], bool] | None = None,
+        progress: Callable[[int], None] | None = None,
+    ) -> Path: ...
+
+
 class ExportService:
     def __init__(
         self,
         task_service: TaskService,
-        excel_exporter: TaskExporter,
+        excel_exporter: StreamingTaskExporter,
         calendar_exporter: TaskExporter,
     ) -> None:
         self._task_service = task_service
@@ -80,10 +88,11 @@ class ExportService:
         destination: Path,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        progress: Callable[[int], None] | None = None,
     ) -> Path:
-        tasks = self._all_matching(query)
-        return self._excel_exporter.export(
-            tasks, destination, cancel_requested=cancel_requested
+        tasks = self._task_service.export_tasks(query, cancel_requested=cancel_requested)
+        return self._excel_exporter.export_stream(
+            tasks, destination, cancel_requested=cancel_requested, progress=progress,
         )
 
     def export_calendar(

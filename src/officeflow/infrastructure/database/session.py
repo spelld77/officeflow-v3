@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Connection, Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 
@@ -28,8 +28,22 @@ def create_database_engine(database_file: Path, *, echo: bool = False) -> Engine
 
 
 class SessionFactory:
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine | Connection) -> None:
+        self._bind = engine
         self._factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[SessionFactory]:
+        if isinstance(self._bind, Connection):
+            yield self
+            return
+        with self._bind.connect() as connection:
+            # sqlite3's legacy transaction mode does not BEGIN for SELECT.
+            connection.exec_driver_sql("BEGIN")
+            try:
+                yield SessionFactory(connection)
+            finally:
+                connection.rollback()
 
     @contextmanager
     def transaction(self) -> Iterator[Session]:

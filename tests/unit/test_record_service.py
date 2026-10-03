@@ -135,6 +135,10 @@ class InMemoryRecordRepository(RecordRepository):
         self.next_log_id += 1
         return saved
 
+    def count_occurrence_work_logs(self, occurrence_ids: tuple[int, ...]) -> dict[int, int]:
+        return {key: sum(item.occurrence_id == key for item in self.work_log_items.values())
+                for key in occurrence_ids}
+
     def update_work_log(self, work_log: WorkLog) -> WorkLog:
         assert work_log.id is not None
         self.work_log_items[work_log.id] = work_log

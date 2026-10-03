@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFocusEvent, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -275,11 +275,12 @@ class MonthCalendarWidget(QWidget):
             painter.drawText(day_rect, Qt.AlignmentFlag.AlignCenter, str(day.day))
 
         lane_limit = 2 if self._compact else 3
+        count_only = self._summary_mode or row_height < self.DATE_HEIGHT + self.BAR_HEIGHT + 8
         available_lanes = max(1, int((row_height - self.DATE_HEIGHT - 22) // self.BAR_HEIGHT))
         lane_limit = min(lane_limit, available_lanes)
         segments = (
             ()
-            if self._summary_mode
+            if count_only
             else build_calendar_segments(self._tasks, grid_start, self._timezone)
         )
         visible_task_days: set[tuple[int | None, datetime | None, date]] = set()
@@ -334,7 +335,7 @@ class MonthCalendarWidget(QWidget):
             if hidden == 0:
                 continue
             row, column = divmod(offset, 7)
-            if self._summary_mode:
+            if count_only:
                 label = f"{hidden}개 일정" if column_width >= 130 else f"{hidden}개"
             else:
                 label = f"+{hidden}개 더 보기" if column_width >= 130 else f"+{hidden}개"
@@ -492,6 +493,8 @@ class CalendarPage(QFrame):
     dateSelected = Signal(object)
     taskSelected = Signal(object)
     taskActivated = Signal(object)
+    attachmentsRequested = Signal(object)
+    taskSelectionCleared = Signal()
     taskContextRequested = Signal(object, object)
     createRequested = Signal(object)
 
@@ -503,6 +506,8 @@ class CalendarPage(QFrame):
         self._selected_task: ScheduledTask | None = None
         self._snoozed_until: dict[tuple[int, datetime | None], datetime] = {}
         self._compact = False
+        self._records_available = True
+        self._attachments_available = True
         self._normal_splitter_sizes = [380, 170]
         self.setObjectName("calendarCard")
 
@@ -548,7 +553,7 @@ class CalendarPage(QFrame):
 
         self.day_panel = QWidget()
         self.day_panel.setObjectName("calendarDayPanel")
-        self.day_panel.setMinimumHeight(156)
+        self.day_panel.setMinimumHeight(180)
         self.day_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
@@ -558,6 +563,7 @@ class CalendarPage(QFrame):
         day_panel_layout.setSpacing(6)
 
         day_header = QHBoxLayout()
+        day_header.setSpacing(5)
         self.day_label = QLabel()
         self.day_label.setObjectName("calendarDayTitle")
         self.day_count = QLabel()
@@ -567,30 +573,42 @@ class CalendarPage(QFrame):
         self.day_more_hint = QLabel("↓ 목록을 스크롤해 전체 일정을 확인하세요")
         self.day_more_hint.setObjectName("calendarDayMoreHint")
         self.day_more_hint.hide()
-        day_header.addWidget(self.day_more_hint)
         day_header.addStretch()
         self.expand_list_button = QPushButton("목록 확대")
         self.expand_list_button.setObjectName("calendarExpandDayList")
         self.expand_list_button.setCheckable(True)
         self.expand_list_button.setToolTip("달력을 줄이고 선택 날짜의 일정 목록을 크게 봅니다.")
+        self.expand_list_button.setProperty("calendarAction", True)
         day_header.addWidget(self.expand_list_button)
-        self.edit_button = QPushButton("선택 일정 수정")
-        self.edit_button.setObjectName("calendarEdit")
-        self.edit_button.setEnabled(False)
-        day_header.addWidget(self.edit_button)
+        self.records_button = QPushButton("기록")
+        self.records_button.setObjectName("calendarRecords")
+        self.records_button.setToolTip("선택한 업무의 체크리스트 · 완료 요약 · 업무일지 확인 (더블클릭)")
+        self.attachments_button = QPushButton("첨부")
+        self.attachments_button.setObjectName("calendarAttachments")
+        self.attachments_button.setToolTip("선택한 업무의 첨부파일 목록 보기 · 관리")
+        self.more_button = QPushButton("⋯")
+        self.more_button.setObjectName("calendarTaskActions")
+        self.more_button.setAccessibleName("선택 일정 메뉴")
+        self.more_button.setToolTip("체크리스트 · 업무일지 · 완료 · 일정 수정 등")
+        for button in (self.records_button, self.attachments_button, self.more_button):
+            button.setProperty("calendarAction", True)
+            button.setEnabled(False)
+            day_header.addWidget(button)
         day_panel_layout.addLayout(day_header)
 
         self.day_list = QListWidget()
         self.day_list.setObjectName("calendarDayList")
         self.day_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.day_list.setAlternatingRowColors(True)
+        self.day_list.setUniformItemSizes(True)
         self.day_list.setVerticalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerItem
         )
         self.day_list.setMinimumHeight(112)
-        self.day_list.setToolTip("일정을 더블 클릭하면 수정할 수 있습니다.")
+        self.day_list.setToolTip("일정을 더블클릭하면 업무 기록이 열립니다. 일정 수정은 ⋯ 또는 오른쪽 클릭 메뉴에서 합니다.")
         self.day_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         day_panel_layout.addWidget(self.day_list, 1)
+        day_panel_layout.addWidget(self.day_more_hint)
         self.calendar_splitter.addWidget(self.day_panel)
         self.calendar_splitter.setStretchFactor(0, 3)
         self.calendar_splitter.setStretchFactor(1, 2)
@@ -603,7 +621,9 @@ class CalendarPage(QFrame):
         self.create_button.clicked.connect(
             lambda: self.createRequested.emit(self.calendar.selected_date)
         )
-        self.edit_button.clicked.connect(self._activate_selected)
+        self.records_button.clicked.connect(self._activate_selected)
+        self.attachments_button.clicked.connect(self._open_selected_attachments)
+        self.more_button.clicked.connect(self._show_selected_context_menu)
         self.expand_list_button.toggled.connect(self._toggle_day_list_expanded)
         self.calendar_splitter.splitterMoved.connect(self._remember_splitter_sizes)
         self.calendar.dateSelected.connect(self._select_date)
@@ -637,7 +657,9 @@ class CalendarPage(QFrame):
         self._day_tasks = ()
         self.calendar.set_overview(overview)
         self.summary_label.setVisible(overview.summary_mode)
-        self._refresh_day_list()
+        # A month refresh loads the day rows immediately afterwards. Keep the
+        # identity across that temporary empty state, but disable row actions.
+        self._refresh_day_list(preserve_selection=True)
 
     def set_day_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
         self._day_tasks = tasks
@@ -654,12 +676,37 @@ class CalendarPage(QFrame):
         self.calendar.set_compact(compact)
         self._layout.setContentsMargins(*(12, 8, 12, 9) if compact else (18, 15, 18, 14))
         self._layout.setSpacing(6 if compact else 10)
-        self.calendar.setMinimumHeight(195 if compact else 220)
-        self.day_panel.setMinimumHeight(146 if compact else 156)
-        self.day_list.setMinimumHeight(104 if compact else 112)
+        self.calendar.setMinimumHeight(168 if compact else 220)
+        self.day_panel.setMinimumHeight(170 if compact else 180)
+        self._update_day_list_minimum_height()
         self.create_button.setVisible(not compact)
-        self.edit_button.setText("수정" if compact else "선택 일정 수정")
         self._update_more_hint(len(self._day_tasks))
+
+    def set_record_capabilities(self, *, records: bool, attachments: bool) -> None:
+        self._records_available = records
+        self._attachments_available = records and attachments
+        self._update_action_buttons()
+
+    def _day_row_height(self) -> int:
+        # Native Windows list decoration otherwise makes a one-line item much
+        # taller than its text. Reserve readable text + padding explicitly.
+        return max(32, self.day_list.fontMetrics().height() + 12)
+
+    def _update_day_list_minimum_height(self) -> None:
+        self.day_list.setMinimumHeight(
+            max(104 if self._compact else 112, self._day_row_height() * 3 + 8)
+        )
+
+    def _update_action_buttons(self) -> None:
+        selected = self._selected_task if self.day_list.currentItem() is not None else None
+        self.records_button.setEnabled(selected is not None and self._records_available)
+        self.attachments_button.setEnabled(selected is not None and self._attachments_available)
+        self.more_button.setEnabled(selected is not None)
+        if selected is not None:
+            self.attachments_button.setToolTip(
+                "등록한 첨부파일 목록 보기 · 관리" if selected.has_attachments
+                else "첨부파일이 없습니다. 목록을 열어 파일을 추가할 수 있습니다."
+            )
 
     def _toggle_day_list_expanded(self, expanded: bool) -> None:
         self.expand_list_button.setText("달력 확대" if expanded else "목록 확대")
@@ -716,18 +763,28 @@ class CalendarPage(QFrame):
         year, month = self.calendar.displayed_month
         self.month_label.setText(f"{year}년 {MONTH_LABELS[month - 1]}")
 
-    def _refresh_day_list(self) -> None:
-        selected_id = self._selected_task.id if self._selected_task else None
+    def _refresh_day_list(self, *, preserve_selection: bool = False) -> None:
+        selected_key = (
+            (self._selected_task.id, self._selected_task.occurrence_start)
+            if self._selected_task is not None else None
+        )
         items = self._day_tasks
-        self.day_list.clear()
-        for task in items:
-            item = QListWidgetItem(self._day_item_text(task))
-            item.setData(Qt.ItemDataRole.UserRole, task)
-            if task.status is TaskStatus.COMPLETED:
-                item.setForeground(QColor("#7D899E"))
-            self.day_list.addItem(item)
-            if task.id == selected_id:
-                self.day_list.setCurrentItem(item)
+        scroll = self.day_list.verticalScrollBar().value()
+        with QSignalBlocker(self.day_list):
+            self.day_list.clear()
+            for task in items:
+                item = QListWidgetItem(self._day_item_text(task))
+                item.setSizeHint(QSize(0, self._day_row_height()))
+                item.setData(Qt.ItemDataRole.UserRole, task)
+                if task.status is TaskStatus.COMPLETED:
+                    item.setForeground(QColor("#7D899E"))
+                self.day_list.addItem(item)
+                if (task.id, task.occurrence_start) == selected_key:
+                    self.day_list.setCurrentItem(item)
+        current = self.day_list.currentItem()
+        if current is not None or not preserve_selection:
+            self._on_day_item_changed(current, None)
+        self.day_list.verticalScrollBar().setValue(scroll)
         self.day_label.setText(f"{self.selected_date.month}월 {self.selected_date.day}일")
         has_many = len(items) >= 3
         has_overflow = len(items) > 3
@@ -746,7 +803,8 @@ class CalendarPage(QFrame):
             f"선택한 날짜의 일정 {len(items)}개. "
             + ("목록을 스크롤하거나 확대해 모두 확인하세요." if has_overflow else "")
         )
-        self.edit_button.setEnabled(self.day_list.currentItem() is not None)
+        self._update_action_buttons()
+        self._update_day_list_minimum_height()
 
     def _update_more_hint(self, item_count: int) -> None:
         remaining_count = max(0, item_count - 3)
@@ -771,9 +829,11 @@ class CalendarPage(QFrame):
     ) -> None:
         task = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
         self._selected_task = task if isinstance(task, ScheduledTask) else None
-        self.edit_button.setEnabled(self._selected_task is not None)
+        self._update_action_buttons()
         if self._selected_task is not None:
             self.taskSelected.emit(self._selected_task)
+        else:
+            self.taskSelectionCleared.emit()
 
     def _on_day_item_activated(self, item: QListWidgetItem) -> None:
         task = item.data(Qt.ItemDataRole.UserRole)
@@ -795,6 +855,17 @@ class CalendarPage(QFrame):
     def _activate_selected(self) -> None:
         if self._selected_task is not None:
             self.taskActivated.emit(self._selected_task)
+
+    def _open_selected_attachments(self) -> None:
+        if self._selected_task is not None:
+            self.attachmentsRequested.emit(self._selected_task)
+
+    def _show_selected_context_menu(self) -> None:
+        if self._selected_task is not None:
+            self.taskContextRequested.emit(
+                self._selected_task,
+                self.more_button.mapToGlobal(QPoint(0, self.more_button.height())),
+            )
 
     def _day_item_text(self, task: ScheduledTask) -> str:
         zone = ZoneInfo(self._timezone)

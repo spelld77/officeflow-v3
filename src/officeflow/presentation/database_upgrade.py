@@ -5,6 +5,8 @@ from collections.abc import Callable
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QProgressBar, QVBoxLayout
 
+from officeflow.presentation.background import finish_thread
+
 
 class UpgradeWorker(QThread):
     progress = Signal(str)
@@ -24,12 +26,13 @@ class UpgradeWorker(QThread):
 class DatabaseUpgradeDialog(QDialog):
     """Show responsive, non-cancellable progress before the DB is opened."""
 
-    def __init__(self, operation: Callable[[Callable[[str], None]], None]) -> None:
+    def __init__(self, operation: Callable[[Callable[[str], None]], None], *,
+                 message: str = "첨부파일 검색을 준비하고 있습니다…") -> None:
         super().__init__()
         self.setWindowTitle("OfficeFlow · 데이터 준비")
         self.resize(440, 150)
         root = QVBoxLayout(self)
-        self.label = QLabel("첨부파일 검색을 준비하고 있습니다…")
+        self.label = QLabel(message)
         self.label.setWordWrap(True)
         root.addWidget(self.label)
         bar = QProgressBar()
@@ -54,7 +57,7 @@ class DatabaseUpgradeDialog(QDialog):
         try:
             self.worker.start()
             self.exec()
-            self.worker.wait()
+            finish_thread(self.worker, parent=self, label="데이터 준비를 마무리하고 있습니다…")
         finally:
             if isinstance(application, QApplication) and previous is not None:
                 application.setQuitOnLastWindowClosed(previous)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -76,6 +77,8 @@ class AttachmentRepository(Protocol):
 
 
 class AttachmentStorage(Protocol):
+    def operation_lock(self) -> AbstractContextManager[bool]: ...
+
     def import_file(
         self,
         source: Path,
@@ -87,7 +90,10 @@ class AttachmentStorage(Protocol):
 
     def exists(self, relative_path: str) -> bool: ...
 
-    def checksum(self, relative_path: str) -> str: ...
+    def checksum(
+        self, relative_path: str, *, cancel_requested: Callable[[], bool] | None = None,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> str: ...
 
     def remove(self, relative_path: str) -> None: ...
 
@@ -160,23 +166,26 @@ class AttachmentService:
             cancel_requested=cancel_requested,
         )
         try:
-            duplicate = self._repository.find_active_by_checksum(task_id, stored.checksum)
-            if duplicate is not None:
-                raise DuplicateAttachmentError(
-                    f"같은 내용의 파일이 이미 이 업무에 첨부되어 있습니다: "
-                    f"{duplicate.original_name}"
+            with self._storage.operation_lock():
+                if not self._storage.exists(stored.relative_path):
+                    raise AttachmentOperationError("첨부 등록 중 저장 파일이 사라졌습니다. 다시 첨부해 주세요.")
+                duplicate = self._repository.find_active_by_checksum(task_id, stored.checksum)
+                if duplicate is not None:
+                    raise DuplicateAttachmentError(
+                        f"같은 내용의 파일이 이미 이 업무에 첨부되어 있습니다: "
+                        f"{duplicate.original_name}"
+                    )
+                attachment = Attachment(
+                    id=None,
+                    task_id=task_id,
+                    original_name=source_path.name,
+                    stored_name=stored.stored_name,
+                    relative_path=stored.relative_path,
+                    size_bytes=stored.size_bytes,
+                    checksum=stored.checksum,
+                    created_at=now or datetime.now(UTC),
                 )
-            attachment = Attachment(
-                id=None,
-                task_id=task_id,
-                original_name=source_path.name,
-                stored_name=stored.stored_name,
-                relative_path=stored.relative_path,
-                size_bytes=stored.size_bytes,
-                checksum=stored.checksum,
-                created_at=now or datetime.now(UTC),
-            )
-            return self._repository.add_attachment(attachment)
+                return self._repository.add_attachment(attachment)
         except Exception:
             try:
                 self._storage.remove(stored.relative_path)
@@ -202,11 +211,19 @@ class AttachmentService:
             self._repository.set_missing_at(attachment_id, None)
         return path
 
-    def verify(self, attachment_id: int, *, now: datetime | None = None) -> AttachmentVerification:
+    def verify(
+        self, attachment_id: int, *, now: datetime | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> AttachmentVerification:
+        if cancel_requested is not None and cancel_requested():
+            raise AttachmentCanceledError("무결성 검사를 취소했습니다.")
         attachment = self._get_required(attachment_id)
         try:
             path = self._storage.resolve(attachment.relative_path)
-            actual_checksum = self._storage.checksum(attachment.relative_path)
+            actual_checksum = self._storage.checksum(
+                attachment.relative_path, cancel_requested=cancel_requested, progress=progress,
+            )
         except FileNotFoundError:
             missing = self._repository.set_missing_at(
                 attachment_id,
@@ -252,6 +269,10 @@ class AttachmentService:
         return self._repository.set_detached_at(attachment_id, None)
 
     def delete_file(self, attachment_id: int) -> None:
+        with self._storage.operation_lock():
+            self._delete_file_locked(attachment_id)
+
+    def _delete_file_locked(self, attachment_id: int) -> None:
         attachment = self._get_required(attachment_id)
         try:
             quarantined = self._storage.quarantine(attachment.relative_path)

@@ -43,12 +43,14 @@ from officeflow.application.attachments import (
     AttachmentIntegrity,
     AttachmentOperationError,
     AttachmentService,
+    AttachmentVerification,
 )
 from officeflow.application.records import DuplicateWorkLogError, RecordService
 from officeflow.application.tasks import TaskService
 from officeflow.domain.attachment import Attachment
 from officeflow.domain.records import ChecklistItem, RecordValidationError, WorkLog
 from officeflow.domain.task import Task
+from officeflow.presentation.background import OperationWorker, finish_thread
 
 
 def _qdate(value: date) -> QDate:
@@ -64,6 +66,7 @@ class _RecordGroup:
     logs: list[WorkLog] = field(default_factory=list)
     match_locations: set[str] = field(default_factory=set)
     work_log_count: int = 0
+    summary: str = ""
 
 
 class AttachmentImportWorker(QObject):
@@ -204,6 +207,8 @@ class CompleteTaskDialog(QDialog):
 
 class TaskRecordsDialog(QDialog):
     changed = Signal()
+    tabChanged = Signal(str)
+    TAB_KEYS = ("checklist", "result", "work_log", "attachments")
 
     def __init__(
         self,
@@ -234,6 +239,10 @@ class TaskRecordsDialog(QDialog):
         self._selected_attachment_id: int | None = None
         self._attachment_thread: QThread | None = None
         self._attachment_worker: AttachmentImportWorker | None = None
+        self._verification_thread: QThread | None = None
+        self._verification_worker: OperationWorker | None = None
+        self._verification_progress: QProgressDialog | None = None
+        self._close_when_verification_finishes = False
         self._owner_shutting_down = False
         self._attachment_progress: QProgressDialog | None = None
         self._attachment_import_successes = 0
@@ -242,7 +251,7 @@ class TaskRecordsDialog(QDialog):
         self._close_when_attachment_finishes = False
 
         self.setWindowTitle(f"업무 기록 · {task.title}")
-        self.setModal(True)
+        self.setModal(False)
         self.resize(620, 650)
         self.setMinimumSize(500, 540)
 
@@ -266,10 +275,9 @@ class TaskRecordsDialog(QDialog):
         self.tabs.addTab(self._build_work_log_tab(), "업무일지")
         if attachment_service is not None:
             self.tabs.addTab(self._build_attachment_tab(), "첨부파일")
-        tab_indexes = {"checklist": 0, "result": 1, "work_log": 2, "attachments": 3}
-        requested_index = tab_indexes.get(initial_tab or "")
-        if requested_index is not None and requested_index < self.tabs.count():
-            self.tabs.setCurrentIndex(requested_index)
+        if initial_tab is not None:
+            self.select_tab(initial_tab)
+        self.tabs.currentChanged.connect(lambda _index: self.tabChanged.emit(self.current_tab_key))
         root.addWidget(self.tabs, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -655,6 +663,16 @@ class TaskRecordsDialog(QDialog):
         self._refresh_work_logs()
         self.changed.emit()
 
+    @property
+    def current_tab_key(self) -> str:
+        return self.TAB_KEYS[self.tabs.currentIndex()]
+
+    def select_tab(self, key: str) -> None:
+        if key in self.TAB_KEYS:
+            index = self.TAB_KEYS.index(key)
+            if index < self.tabs.count():
+                self.tabs.setCurrentIndex(index)
+
     def _refresh_attachments(self) -> None:
         if self._attachment_service is None:
             return
@@ -701,6 +719,8 @@ class TaskRecordsDialog(QDialog):
 
     @Slot(object)
     def _add_attachment_sources(self, sources_value: object) -> None:
+        if self._verification_thread is not None:
+            return
         if self._read_only or self._attachment_service is None:
             return
         if self._attachment_thread is not None:
@@ -805,23 +825,33 @@ class TaskRecordsDialog(QDialog):
         thread.start()
 
     def reject(self) -> None:
-        if self._defer_close_for_attachment_import():
+        if self._defer_close_for_verification() or self._defer_close_for_attachment_import():
             return
         super().reject()
 
     def shutdown(self) -> None:
         """Finish a modeless dialog's import before its owner disposes the DB."""
         self._owner_shutting_down = True
+        if self._verification_worker is not None:
+            self._verification_worker.cancel()
+        if self._verification_thread is not None:
+            self._verification_thread.quit()
+            finish_thread(self._verification_thread, parent=self, label="파일 검사를 취소하고 마무리하고 있습니다…")
         self._close_when_attachment_finishes = False
         if self._attachment_worker is not None:
             self._attachment_worker.cancel()
         if self._attachment_thread is not None:
             self._attachment_thread.quit()
-            self._attachment_thread.wait()
+            finish_thread(self._attachment_thread, parent=self, label="첨부 복사를 취소하고 마무리하고 있습니다…")
+        self._attachment_thread = None
+        self._attachment_worker = None
+        if self._attachment_progress is not None:
+            self._attachment_progress.close()
+        self._attachment_progress = None
         self.reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._defer_close_for_attachment_import():
+        if self._defer_close_for_verification() or self._defer_close_for_attachment_import():
             event.ignore()
             return
         super().closeEvent(event)
@@ -955,23 +985,80 @@ class TaskRecordsDialog(QDialog):
     def _verify_attachment(self) -> None:
         if self._selected_attachment_id is None or self._attachment_service is None:
             return
-        try:
-            result = self._attachment_service.verify(self._selected_attachment_id)
-        except (AttachmentOperationError, LookupError, OSError) as error:
-            QMessageBox.warning(self, "무결성을 확인하지 못했습니다.", str(error))
+        if self._verification_thread is not None or self._attachment_thread is not None:
             return
-        if result.integrity is AttachmentIntegrity.VERIFIED:
-            title, message = "확인 완료", "원본 첨부 시점과 파일 내용이 일치합니다."
-            QMessageBox.information(self, title, message)
-        elif result.integrity is AttachmentIntegrity.MODIFIED:
-            QMessageBox.warning(
-                self,
-                "파일 변경 감지",
-                "첨부 후 파일 내용이 변경되어 SHA-256 체크섬이 일치하지 않습니다.",
-            )
-        else:
-            QMessageBox.warning(self, "파일 누락", "관리 폴더에서 파일을 찾지 못했습니다.")
+        service = self._attachment_service
+        attachment_id = self._selected_attachment_id
+        thread = QThread(self)
+        worker = OperationWorker(lambda canceled: service.verify(
+            attachment_id, cancel_requested=canceled, progress=worker.progress.emit,
+        ))
+        worker.moveToThread(thread)
+        progress = QProgressDialog("첨부파일 내용을 확인하고 있습니다…", "취소", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.NonModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.canceled.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
+        worker.progress.connect(lambda done, total: progress.setValue(min(100, int(done * 100 / max(1, total)))))
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._verification_succeeded)
+        worker.failed.connect(self._verification_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._verification_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._verification_thread = thread
+        self._verification_worker = worker
+        self._verification_progress = progress
+        self._set_attachment_actions_enabled(False)
+        self.add_attachment_button.setEnabled(False)
+        self.attachment_list.setAcceptDrops(False)
+        progress.show()
+        thread.start()
+
+    def _verification_succeeded(self, value: object) -> None:
+        if self._owner_shutting_down or not isinstance(value, AttachmentVerification):
+            return
+        result = value
+        selected_id = self._selected_attachment_id
         self._refresh_attachments()
+        if selected_id is not None:
+            self.select_attachment(selected_id)
+        if result.integrity is AttachmentIntegrity.VERIFIED:
+            message = "확인 완료: 원본 첨부 시점과 파일 내용이 일치합니다."
+        elif result.integrity is AttachmentIntegrity.MODIFIED:
+            message = "주의: 첨부 후 파일 내용이 변경되어 SHA-256 체크섬이 일치하지 않습니다."
+        else:
+            message = "파일 누락: 관리 폴더에서 파일을 찾지 못했습니다."
+        self.attachment_detail.setText(message)
+
+    def _verification_failed(self, error: object) -> None:
+        if not self._owner_shutting_down:
+            self.attachment_detail.setText(f"무결성 확인: {error}")
+
+    def _verification_finished(self) -> None:
+        if self._verification_progress is not None:
+            self._verification_progress.close()
+            self._verification_progress.deleteLater()
+        self._verification_progress = None
+        self._verification_worker = None
+        self._verification_thread = None
+        self.add_attachment_button.setEnabled(not self._read_only)
+        self.attachment_list.setAcceptDrops(not self._read_only)
+        self._set_attachment_actions_enabled(self._selected_attachment_id is not None)
+        if self._close_when_verification_finishes and not self._owner_shutting_down:
+            QDialog.reject(self)
+
+    def _defer_close_for_verification(self) -> bool:
+        if self._verification_thread is None or not self._verification_thread.isRunning():
+            return False
+        self._close_when_verification_finishes = True
+        if self._verification_worker is not None:
+            self._verification_worker.cancel()
+        if self._verification_progress is not None:
+            self._verification_progress.setLabelText("검사를 취소하고 마무리하고 있습니다…")
+        return True
 
     def _unlink_attachment(self) -> None:
         if self._selected_attachment_id is None or self._attachment_service is None:
@@ -1025,6 +1112,7 @@ class TaskRecordsDialog(QDialog):
         self.changed.emit()
 
     def _set_attachment_actions_enabled(self, enabled: bool) -> None:
+        enabled = enabled and self._verification_thread is None
         self.open_attachment_button.setEnabled(enabled)
         self.verify_attachment_button.setEnabled(enabled)
         self.unlink_attachment_button.setEnabled(enabled and not self._read_only)
@@ -1042,6 +1130,7 @@ class TaskRecordsDialog(QDialog):
 
 
 class WorkLogBrowserDialog(QDialog):
+    changed = Signal()
     SEARCH_BATCH_SIZE = 25
 
     def __init__(
@@ -1056,6 +1145,7 @@ class WorkLogBrowserDialog(QDialog):
         self._task_service = task_service
         self._record_service = record_service
         self._attachment_service = attachment_service
+        self._record_dialogs: list[TaskRecordsDialog] = []
         self._groups_by_key: dict[tuple[str, int], _RecordGroup] = {}
         self._selected_group_key: tuple[str, int] | None = None
         self._selected_task_context: tuple[int, datetime | None] | None = None
@@ -1064,6 +1154,7 @@ class WorkLogBrowserDialog(QDialog):
         self._completed_offset = 0
         self._log_offset = 0
         self.setWindowTitle("날짜별 업무일지")
+        self.setModal(False)
         self.resize(680, 560)
         self.setMinimumSize(500, 440)
 
@@ -1256,11 +1347,15 @@ class WorkLogBrowserDialog(QDialog):
             log.task_id for log in logs if log.task_id is not None
         }
         tasks_by_id = self._task_service.get_many_including_deleted(tuple(task_ids))
+        occurrences = self._task_service.occurrences_by_ids(tuple({
+            log.occurrence_id for log in logs if log.occurrence_id is not None
+        }))
         groups: dict[tuple[str, int], _RecordGroup] = {}
         for completed_task in completed:
             if completed_task.id is None:
                 continue
-            key = ("task", completed_task.id)
+            key = (("occurrence", completed_task.occurrence_id)
+                   if completed_task.occurrence_id is not None else ("task", completed_task.id))
             group = groups.setdefault(
                 key,
                 _RecordGroup(
@@ -1269,15 +1364,16 @@ class WorkLogBrowserDialog(QDialog):
                 ),
             )
             group.completed = completed_task
-            if completed_task.recurrence_rule:
-                group.occurrence_start = completed_task.starts_at
+            group.summary = completed_task.result_note
+            group.occurrence_start = completed_task.occurrence_start
         for log in logs:
             if log.task_id is None:
                 if log.id is None:
                     continue
                 key = ("log", log.id)
             else:
-                key = ("task", log.task_id)
+                key = (("occurrence", log.occurrence_id)
+                       if log.occurrence_id in occurrences else ("task", log.task_id))
             group = groups.setdefault(
                 key,
                 _RecordGroup(
@@ -1286,6 +1382,13 @@ class WorkLogBrowserDialog(QDialog):
                 ),
             )
             group.logs.append(log)
+            if group.completed is None:
+                occurrence = occurrences.get(log.occurrence_id) if log.occurrence_id is not None else None
+                if occurrence is not None:
+                    group.occurrence_start = occurrence.occurrence_start
+                    group.summary = occurrence.result_note
+                elif group.task is not None:
+                    group.summary = group.task.result_note
 
         search = self.search_edit.text().strip()
         self._filename_matches = (
@@ -1298,6 +1401,9 @@ class WorkLogBrowserDialog(QDialog):
 
         task_group_ids = tuple(key[1] for key in groups if key[0] == "task")
         work_log_counts = self._record_service.work_log_counts(task_group_ids)
+        occurrence_counts = self._record_service.occurrence_work_log_counts(
+            tuple(key[1] for key in groups if key[0] == "occurrence")
+        )
         ordered_groups = sorted(
             groups.values(),
             key=self._group_sort_key,
@@ -1310,11 +1416,16 @@ class WorkLogBrowserDialog(QDialog):
         selected_row = -1
         for row, group in enumerate(ordered_groups):
             title = group.task.title if group.task is not None else "연결되지 않은 기록"
+            if group.occurrence_start is not None and group.task is not None:
+                local_start = group.occurrence_start.astimezone(ZoneInfo(group.task.timezone))
+                title += f" · {local_start:%Y-%m-%d %H:%M} 회차"
             states: list[str] = []
             if group.completed is not None:
                 states.append("완료")
             if group.key[0] == "task":
                 count = work_log_counts.get(group.key[1], 0)
+            elif group.key[0] == "occurrence":
+                count = occurrence_counts.get(group.key[1], 0)
             else:
                 count = len(group.logs)
             group.work_log_count = count
@@ -1326,10 +1437,11 @@ class WorkLogBrowserDialog(QDialog):
             self.list_widget.addItem(item)
             if group.key == selected_key:
                 selected_row = row
+        noun = "항목" if any(key[0] == "occurrence" for key in groups) else "업무"
         self.result_count_label.setText(
-            f"검색 결과 {len(groups):,}개 업무"
+            f"검색 결과 {len(groups):,}개 {noun}"
             if searching
-            else f"이 날짜의 기록 {len(groups):,}개 업무"
+            else f"이 날짜의 기록 {len(groups):,}개 {noun}"
         )
         if selected_row >= 0:
             self.list_widget.setCurrentRow(selected_row)
@@ -1363,11 +1475,8 @@ class WorkLogBrowserDialog(QDialog):
                 locations.add("제목")
             if contains_term(task.description):
                 locations.add("설명")
-            occurrence_start = group.occurrence_start
-            if task.id is not None:
-                summary = self._task_service.result_note(task.id, occurrence_start)
-                if contains_term(summary):
-                    locations.add("완료 요약")
+            if contains_term(group.summary):
+                locations.add("완료 요약")
         for log in group.logs:
             if contains_term(log.content):
                 locations.add("업무일지")
@@ -1412,7 +1521,10 @@ class WorkLogBrowserDialog(QDialog):
             title = task.title
             summary = self._task_service.result_note(task.id, occurrence_start)
             status = "완료" if group.completed is not None else "업무 기록"
-            logs = list(self._record_service.work_logs(task_id=task.id, limit=20))
+            logs = list(self._record_service.work_logs(
+                task_id=task.id, limit=20, occurrence_start=occurrence_start,
+                occurrence_only=occurrence_start is not None,
+            ))
             work_log_count = group.work_log_count
             if self._attachment_service is not None:
                 attachments = self._attachment_service.attachments_for_task(task.id)
@@ -1467,6 +1579,12 @@ class WorkLogBrowserDialog(QDialog):
         if self._selected_task_context is None:
             return
         task_id, occurrence_start = self._selected_task_context
+        for existing in self._record_dialogs:
+            if existing._task_id == task_id and existing._occurrence_start == occurrence_start:
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
         try:
             task = self._task_service.get(task_id)
         except LookupError:
@@ -1480,6 +1598,26 @@ class WorkLogBrowserDialog(QDialog):
             initial_tab="result",
             parent=self,
         )
+        self._record_dialogs.append(dialog)
         dialog.changed.connect(self._refresh)
-        dialog.exec()
-        self._refresh()
+        dialog.changed.connect(self.changed.emit)
+
+        def finished(_result: int) -> None:
+            if dialog in self._record_dialogs:
+                self._record_dialogs.remove(dialog)
+            dialog.deleteLater()
+            if self.isVisible():
+                self._refresh()
+
+        dialog.finished.connect(finished)
+        dialog.show()
+
+    def done(self, result: int) -> None:
+        self._search_timer.stop()
+        for dialog in tuple(self._record_dialogs):
+            dialog.shutdown()
+        super().done(result)
+
+    def shutdown(self) -> None:
+        """Stop nested file imports before the main window releases its database."""
+        self.reject()

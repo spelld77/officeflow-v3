@@ -120,6 +120,10 @@ class TaskListModel(QAbstractListModel):
     def set_tasks(self, tasks: list[Task]) -> None:
         self.set_page(TaskPage(tuple(tasks), len(tasks), 0, None))
 
+    @property
+    def loaded_group_counts(self) -> dict[TaskGroup, int]:
+        return {group: len(state.items) for group, state in self._groups.items()}
+
     def set_snoozed_reminders(
         self, reminders: Mapping[tuple[int, datetime | None], datetime]
     ) -> None:

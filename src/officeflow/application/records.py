@@ -70,6 +70,8 @@ class RecordRepository(Protocol):
 
     def count_work_logs(self, task_ids: tuple[int, ...]) -> dict[int, int]: ...
 
+    def count_occurrence_work_logs(self, occurrence_ids: tuple[int, ...]) -> dict[int, int]: ...
+
     def add_work_log(self, work_log: WorkLog) -> WorkLog: ...
 
     def update_work_log(self, work_log: WorkLog) -> WorkLog: ...
@@ -176,6 +178,9 @@ class RecordService:
             return {}
         self._task_service.get_many_including_deleted(task_ids)
         return self._repository.count_work_logs(task_ids)
+
+    def occurrence_work_log_counts(self, occurrence_ids: tuple[int, ...]) -> dict[int, int]:
+        return self._repository.count_occurrence_work_logs(occurrence_ids)
 
     def add_work_log(
         self,

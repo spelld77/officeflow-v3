@@ -72,6 +72,8 @@ def validate_recurrence_rule(rule: str, starts_at: datetime) -> str:
     if starts_at.tzinfo is None:
         raise RecurrenceValidationError("반복 일정의 시작 시각에 시간대가 필요합니다.")
     try:
+        if int(_rule_fields(normalized).get("INTERVAL", "1")) < 1:
+            raise ValueError("반복 간격은 양수여야 합니다.")
         parsed: Any = rrulestr(normalized, dtstart=starts_at)
         parsed.after(starts_at - timedelta(microseconds=1), inc=True)
     except (TypeError, ValueError, OverflowError) as error:
@@ -141,6 +143,36 @@ def next_recurrence_start(
 ) -> datetime | None:
     normalized = validate_recurrence_rule(rule, template_start)
     zone = ZoneInfo(timezone)
+    fields = _rule_fields(normalized)
+    periods = {"DAILY": 86_400, "WEEKLY": 604_800, "HOURLY": 3_600,
+               "MINUTELY": 60, "SECONDLY": 1}
+    if set(fields) <= {"FREQ", "INTERVAL", "COUNT", "UNTIL", "WKST"} and fields.get("FREQ") in periods:
+        interval = int(fields.get("INTERVAL", "1"))
+        if interval > 0:
+            # dateutil normalizes DTSTART to whole seconds as RFC 5545 does.
+            start = template_start.astimezone(zone).replace(microsecond=0)
+            local_after = after.astimezone(zone)
+            count = int(fields["COUNT"]) if "COUNT" in fields else None
+            until = recurrence_until_utc(normalized)
+            try:
+                period = timedelta(seconds=periods[fields["FREQ"]] * interval)
+            except OverflowError:
+                first = start.astimezone(UTC)
+                return first if ((count is None or count > 0) and (until is None or first <= until)
+                                 and (first > after or (inclusive and first == after))) else None
+            elapsed = local_after.replace(tzinfo=None) - start.replace(tzinfo=None)
+            index = max(0, elapsed // period)
+            while count is None or index < count:
+                try:
+                    result = (start + index * period).astimezone(UTC)
+                except OverflowError:
+                    return None
+                if until is not None and result > until:
+                    return None
+                if result > after or (inclusive and result == after):
+                    return result
+                index += 1
+            return None
     parsed: Any = rrulestr(normalized, dtstart=template_start.astimezone(zone))
     result = parsed.after(after.astimezone(zone), inc=inclusive)
     return result.astimezone(UTC) if result is not None else None

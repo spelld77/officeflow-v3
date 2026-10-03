@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+import pytest
 from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -62,7 +63,7 @@ def test_help_button_opens_packaged_user_guide(
     window._help_button.click()
 
     assert opened == [True]
-    assert window._version_label.text() == "OfficeFlow 3.0.5"
+    assert window._version_label.text() == "OfficeFlow 3.0.6"
 
 
 class FakeTrayIcon:
@@ -635,6 +636,98 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
     )
 
 
+@pytest.mark.parametrize("unclean", [False, True])
+def test_restart_restores_unhandled_popup_once_after_normal_or_unclean_exit(
+    qtbot: QtBot, monkeypatch, unclean: bool
+) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    repository = InMemoryReminderRepository(task_repository)
+    previous = ReminderService(repository, task_service)
+    now = datetime.now(UTC).replace(microsecond=0)
+    task = task_service.create(TaskDraft(title="종료 전에 처리하지 않은 알림", starts_at=now))
+    assert task.id is not None
+    previous.replace_rules(
+        task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),), now=now
+    )
+    original = previous.poll_due(now=now)[0]
+    presentations: list[bool] = []
+    original_present = main_window_module.ReminderDialog.present
+
+    def present(dialog) -> None:
+        presentations.append(True)
+        original_present(dialog)
+
+    monkeypatch.setattr(main_window_module.ReminderDialog, "present", present)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: None)
+    window = MainWindow(
+        AppSettings(), task_service,
+        reminder_service=ReminderService(repository, task_service),
+        previous_unclean_shutdown=unclean,
+    )
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
+        assert window._reminder_dialog is not None
+        assert window._reminder_dialog.alert_list.count() == 1
+        assert "놓친 알림" in window._reminder_dialog.caption.text()
+        assert window._reminder_dialog.alert_list.item(0).data(Qt.ItemDataRole.UserRole) == original.delivery.id
+        assert window._reminder_recovery_pending is False
+        for _ in range(3):
+            window._check_reminders()
+        assert presentations == [True]
+        assert len(repository.deliveries) == 1
+        qtbot.mouseClick(window._reminder_dialog.acknowledge_button, Qt.MouseButton.LeftButton)
+        assert window._reminder_dialog is None
+        assert original.delivery.id is not None
+        assert repository.deliveries[original.delivery.id].status is ReminderDeliveryStatus.ACKNOWLEDGED
+        window._check_reminders()
+        assert presentations == [True]
+    finally:
+        window.shutdown()
+
+
+def test_failed_reminder_display_retries_persisted_delivery_without_restart(
+    qtbot: QtBot, monkeypatch
+) -> None:
+    task_repository = InMemoryTaskRepository()
+    task_service = TaskService(task_repository)
+    repository = InMemoryReminderRepository(task_repository)
+    reminders = ReminderService(repository, task_service)
+    now = datetime.now(UTC).replace(microsecond=0)
+    task = task_service.create(TaskDraft(title="알림 표시 실패 후 복구", starts_at=now))
+    assert task.id is not None
+    reminders.replace_rules(
+        task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),), now=now
+    )
+    attempts: list[bool] = []
+    original_present = main_window_module.ReminderDialog.present
+
+    def fail_once(dialog) -> None:
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("알림창 표시 실패")
+        original_present(dialog)
+
+    monkeypatch.setattr(main_window_module.ReminderDialog, "present", fail_once)
+    window = MainWindow(AppSettings(), task_service, reminder_service=reminders)
+    qtbot.addWidget(window)
+    try:
+        window._check_reminders()
+        assert window._reminder_recovery_pending is True
+        assert len(repository.deliveries) == 1
+        window._check_reminders()
+        assert window._reminder_recovery_pending is False
+        assert window._reminder_dialog is not None and window._reminder_dialog.isVisible()
+        assert window._reminder_dialog.alert_list.count() == 1
+        window._check_reminders()
+        assert attempts == [True, True]
+        assert len(repository.deliveries) == 1
+    finally:
+        window.shutdown()
+
+
 def test_reminder_actions_immediately_refresh_current_view(qtbot: QtBot) -> None:
     task_repository = InMemoryTaskRepository()
     task_service = TaskService(task_repository)
@@ -972,7 +1065,9 @@ def test_calendar_stays_usable_at_minimum_window_size(
     assert window._calendar_page.calendar.width() >= 460
     assert window._calendar_page.day_list.isVisible()
     assert window._calendar_page.day_list.minimumHeight() >= 104
-    assert window._calendar_page.edit_button.text() == "수정"
+    assert window._calendar_page.records_button.text() == "기록"
+    assert window._calendar_page.attachments_button.text() == "첨부"
+    assert window._calendar_page.more_button.text() == "⋯"
     assert window._calendar_page.calendar_splitter.count() == 2
     assert all(size > 0 for size in window._calendar_page.calendar_splitter.sizes())
 

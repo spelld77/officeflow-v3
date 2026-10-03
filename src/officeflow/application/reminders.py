@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -78,6 +80,10 @@ class ReminderRepository(Protocol):
         self, due_at: datetime
     ) -> tuple[tuple[ReminderDelivery, ReminderTarget], ...]: ...
 
+    def list_unhandled_reminder_targets(
+        self, *, fired_since: datetime, due_at: datetime
+    ) -> tuple[tuple[ReminderDelivery, ReminderTarget], ...]: ...
+
     def list_active_snoozed_deliveries(self) -> tuple[ReminderDelivery, ...]: ...
 
 
@@ -85,6 +91,7 @@ class ReminderService:
     def __init__(self, repository: ReminderRepository, task_service: TaskService) -> None:
         self._repository = repository
         self._task_service = task_service
+        self.poll_pending = False
 
     def rules_for_task(self, task_id: int) -> tuple[ReminderRuleInput, ...]:
         return tuple(
@@ -147,14 +154,53 @@ class ReminderService:
         now: datetime | None = None,
         grace_minutes: int = 120,
         recovery_threshold_seconds: int = 90,
+        recover_unhandled: bool = False,
+        max_candidates: int = 200,
+        max_poll_seconds: float = 0.25,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[ReminderAlert, ...]:
+        """Recover persisted, unhandled deliveries only on startup or display retry.
+
+        Normal timer polls remain deduplicated. Recovery does not create a new
+        delivery or reset its timestamps, so the configured window still applies.
+        """
         current = now or datetime.now(UTC)
         if current.tzinfo is None:
             raise ValueError("알림 조회 시각에 시간대 정보가 필요합니다.")
         if not 1 <= grace_minutes <= 43_200:
             raise ValueError("놓친 알림 복구 범위는 1분에서 30일 사이여야 합니다.")
+        if max_candidates < 1 or max_poll_seconds <= 0:
+            raise ValueError("알림 검사 예산은 양수여야 합니다.")
+        self.poll_pending = False
+        started = monotonic()
+        calculations = 0
+
+        def exhausted() -> bool:
+            return (calculations >= max_candidates or monotonic() - started >= max_poll_seconds
+                    or (cancel_requested is not None and cancel_requested()))
         window_start = current - timedelta(minutes=grace_minutes)
         alerts: list[ReminderAlert] = []
+        if cancel_requested is not None and cancel_requested():
+            self.poll_pending = True
+            return ()
+
+        if recover_unhandled:
+            for delivery, target in self._repository.list_unhandled_reminder_targets(
+                fired_since=window_start, due_at=current
+            ):
+                if delivery.occurrence_start is not None and self._occurrence_is_closed(
+                    delivery.task_id, delivery.occurrence_start
+                ):
+                    self._repository.save_reminder_delivery(delivery.acknowledge(now=current))
+                    continue
+                alerts.append(
+                    ReminderAlert(
+                        delivery=delivery,
+                        reminder=target.reminder,
+                        task=target.task,
+                        recovered=True,
+                    )
+                )
 
         for delivery, target in self._repository.list_snoozed_reminder_targets(current):
             if delivery.occurrence_start is not None and self._occurrence_is_closed(
@@ -172,9 +218,11 @@ class ReminderService:
                 )
             )
 
-        while True:
+        while not exhausted():
             unscheduled = self._repository.list_unscheduled_reminder_targets(limit=100)
             for target in unscheduled:
+                if exhausted():
+                    break
                 reminder_id = target.reminder.id
                 if reminder_id is None:
                     continue
@@ -183,6 +231,7 @@ class ReminderService:
                     after=window_start,
                     inclusive=True,
                 )
+                calculations += 1
                 self._repository.save_reminder_schedule(
                     reminder_id,
                     candidate[1] if candidate is not None else None,
@@ -191,16 +240,23 @@ class ReminderService:
             if len(unscheduled) < 100:
                 break
 
-        while True:
+        while not exhausted():
             due_targets = self._repository.list_due_reminder_targets(current, limit=200)
             for target in due_targets:
+                if exhausted():
+                    break
                 reminder_id = target.reminder.id
                 task_id = target.task.id
                 if reminder_id is None or task_id is None:
                     continue
                 occurrence_start = target.reminder.next_occurrence_start
                 scheduled_at = target.reminder.next_fire_at
-                while scheduled_at is not None and scheduled_at <= current:
+                if scheduled_at is not None and scheduled_at < window_start:
+                    # Seek to the recovery window, rather than walking months of misses.
+                    candidate = self._next_candidate(target, after=window_start, inclusive=True)
+                    calculations += 1
+                    occurrence_start, scheduled_at = candidate if candidate is not None else (None, None)
+                while scheduled_at is not None and scheduled_at <= current and not exhausted():
                     if scheduled_at >= window_start and not (
                         occurrence_start is not None
                         and self._occurrence_is_closed(task_id, occurrence_start)
@@ -235,6 +291,7 @@ class ReminderService:
                         after=scheduled_at,
                         inclusive=False,
                     )
+                    calculations += 1
                     if candidate is None:
                         occurrence_start = None
                         scheduled_at = None
@@ -247,6 +304,10 @@ class ReminderService:
                 )
             if len(due_targets) < 200:
                 break
+        self.poll_pending = bool(
+            self._repository.list_unscheduled_reminder_targets(limit=1)
+            or self._repository.list_due_reminder_targets(current, limit=1)
+        )
         return tuple(sorted(alerts, key=lambda alert: alert.delivery.scheduled_at))
 
     def snooze(
@@ -335,7 +396,7 @@ class ReminderService:
 
         duration = task.ends_at - task.starts_at if task.ends_at is not None else timedelta(0)
         relation_delta = duration if reminder.relation is ReminderRelation.END else timedelta(0)
-        daylight_saving_margin = timedelta(hours=2)
+        daylight_saving_margin = timedelta(hours=2) if offset_minutes else timedelta(0)
         occurrence_cursor = after - offset - relation_delta - daylight_saving_margin
         occurrence_start = next_recurrence_start(
             task.recurrence_rule,

@@ -218,6 +218,16 @@ class SqlAlchemyRecordRepository:
             WorkLogRecord.task_id.in_(matching_attachment_tasks(search)),
         )
 
+    def count_occurrence_work_logs(self, occurrence_ids: tuple[int, ...]) -> dict[int, int]:
+        if not occurrence_ids:
+            return {}
+        statement = select(WorkLogRecord.occurrence_id, func.count(WorkLogRecord.id)).where(
+            WorkLogRecord.occurrence_id.in_(occurrence_ids)
+        ).group_by(WorkLogRecord.occurrence_id)
+        with self._sessions.transaction() as session:
+            return {int(key): int(count) for key, count in session.execute(statement)
+                    if key is not None}
+
     def add_work_log(self, work_log: WorkLog) -> WorkLog:
         with self._sessions.transaction() as session:
             if work_log.task_id is not None and session.get(TaskRecord, work_log.task_id) is None:

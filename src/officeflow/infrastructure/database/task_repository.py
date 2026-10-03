@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -33,6 +35,7 @@ from officeflow.infrastructure.database.models import (
     AttachmentRecord,
     TaskOccurrenceRecord,
     TaskRecord,
+    WorkLogRecord,
 )
 from officeflow.infrastructure.database.search import (
     attachment_match_summaries,
@@ -45,6 +48,11 @@ from officeflow.infrastructure.database.session import SessionFactory
 class SqlAlchemyTaskRepository:
     def __init__(self, sessions: SessionFactory) -> None:
         self._sessions = sessions
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[SqlAlchemyTaskRepository]:
+        with self._sessions.read_snapshot() as sessions:
+            yield SqlAlchemyTaskRepository(sessions)
 
     def add(self, task: Task) -> Task:
         record = self._to_record(task)
@@ -202,6 +210,98 @@ class SqlAlchemyTaskRepository:
             else task
             for task in items
         )
+
+    def completed_history_page(self, query: TaskQuery) -> TaskPage:
+        """Page persisted completions, including late/edited recurring occurrences.
+
+        Count and page in SQL; never expand recurrence rules or load all history.
+        """
+        regular: list[Any] = [
+            TaskRecord.deleted_at.is_(None),
+            TaskRecord.status == TaskStatus.COMPLETED.value,
+            TaskRecord.completed_at.is_not(None),
+        ]
+        recurring: list[Any] = [
+            TaskRecord.deleted_at.is_(None),
+            TaskOccurrenceRecord.status == OccurrenceStatus.COMPLETED.value,
+            TaskOccurrenceRecord.completed_at.is_not(None),
+        ]
+        for predicates, completed_column in (
+            (regular, TaskRecord.completed_at),
+            (recurring, TaskOccurrenceRecord.completed_at),
+        ):
+            if query.completed_after is not None:
+                predicates.append(completed_column >= query.completed_after)
+            if query.completed_before is not None:
+                predicates.append(completed_column < query.completed_before)
+        search = query.search.strip()
+        if search:
+            regular.append(self._search_predicate(search))
+            # Each occurrence's result/logs must not match its siblings' results.
+            content = func.lower(
+                TaskRecord.title + literal("\n") + TaskRecord.description
+                + literal("\n") + TaskOccurrenceRecord.result_note
+            )
+            log_matches: Any = (
+                select(literal_column("rowid"))
+                .select_from(text("work_log_search"))
+                .where(text("work_log_search MATCH :history_fts").bindparams(
+                    history_fts=fts_prefix_query(search)
+                ))
+            )
+            recurring.append(or_(
+                and_(*(func.instr(content, term.lower()) > 0 for term in search.split())),
+                TaskRecord.id.in_(matching_attachment_tasks(search)),
+                select(WorkLogRecord.id).where(
+                    WorkLogRecord.occurrence_id == TaskOccurrenceRecord.id,
+                    WorkLogRecord.id.in_(log_matches),
+                ).exists(),
+            ))
+        keys = union_all(
+            select(
+                TaskRecord.id.label("task_id"), literal(None).label("occurrence_id"),
+                TaskRecord.completed_at.label("completed_at"),
+            ).where(*regular),
+            select(
+                TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.id,
+                TaskOccurrenceRecord.completed_at,
+            ).join(TaskRecord, TaskRecord.id == TaskOccurrenceRecord.task_id).where(*recurring),
+        ).subquery()
+        statement = select(keys).order_by(
+            keys.c.completed_at.desc(), keys.c.task_id.desc(), keys.c.occurrence_id.desc(),
+        ).offset(query.offset)
+        if query.limit is not None:
+            statement = statement.limit(query.limit)
+        with self._sessions.transaction() as session:
+            total = int(session.scalar(select(func.count()).select_from(keys)) or 0)
+            rows = session.execute(statement).all()
+            task_ids = tuple({int(row.task_id) for row in rows})
+            tasks = {
+                record.id: self._to_domain(record, has_attachments=bool(attached))
+                for record, attached in session.execute(
+                    select(TaskRecord, self._attachment_exists()).where(TaskRecord.id.in_(task_ids))
+                )
+            }
+            occurrence_ids = tuple(row.occurrence_id for row in rows if row.occurrence_id is not None)
+            occurrences = {
+                record.id: self._occurrence_to_domain(record)
+                for record in session.scalars(select(TaskOccurrenceRecord).where(
+                    TaskOccurrenceRecord.id.in_(occurrence_ids)
+                ))
+            }
+            items: list[Task] = []
+            for row in rows:
+                task = tasks[row.task_id]
+                if row.occurrence_id is not None:
+                    occurrence = occurrences[row.occurrence_id]
+                    task = replace(
+                        task, status=TaskStatus.COMPLETED, starts_at=occurrence.starts_at,
+                        ends_at=occurrence.ends_at, result_note=occurrence.result_note,
+                        completed_at=occurrence.completed_at, occurrence_id=occurrence.id,
+                        occurrence_start=occurrence.occurrence_start,
+                    )
+                items.append(task)
+        return TaskPage(self._with_matches(tuple(items), search), total, query.offset, query.limit)
 
     def list_overlapping(
         self,
@@ -362,6 +462,17 @@ class SqlAlchemyTaskRepository:
         with self._sessions.transaction() as session:
             record = session.get(TaskOccurrenceRecord, occurrence_id)
             return self._occurrence_to_domain(record) if record is not None else None
+
+    def get_occurrences_by_ids(self, occurrence_ids: tuple[int, ...]) -> dict[int, TaskOccurrence]:
+        if not occurrence_ids:
+            return {}
+        with self._sessions.transaction() as session:
+            return {
+                record.id: self._occurrence_to_domain(record)
+                for record in session.scalars(select(TaskOccurrenceRecord).where(
+                    TaskOccurrenceRecord.id.in_(occurrence_ids)
+                ))
+            }
 
     def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence:
         statement = select(TaskOccurrenceRecord).where(

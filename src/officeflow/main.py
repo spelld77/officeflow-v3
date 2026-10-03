@@ -53,23 +53,32 @@ def build_application(
     previous_unclean_shutdown: bool = False,
     on_clean_shutdown: Callable[[], None] | None = None,
     hourly_notifications_enabled: bool = False,
+    restore_failure_handler: Callable[[BackupError], str] | None = None,
 ) -> tuple[QApplication, MainWindow]:
+    app = application or QApplication(argv or sys.argv)
     paths = AppPaths.discover()
     paths.ensure_directories()
     configure_logging(paths.log_dir)
     backup_manager = BackupManager(paths)
-    try:
-        backup_manager.apply_pending_restore()
-    except BackupError:
-        logger.exception("예약된 백업 복원을 적용하지 못했습니다.")
+    def apply_restore() -> None:
+        if backup_manager.restore_is_pending:
+            def restore(progress: Callable[[str], None]) -> None:
+                progress("예약한 백업을 검증하고 복원하고 있습니다. 자료 보호를 위해 종료하지 마세요…")
+                backup_manager.apply_pending_restore()
+            DatabaseUpgradeDialog(restore, message="예약한 백업을 복원하고 있습니다…").run_upgrade()
+        else:
+            backup_manager.apply_pending_restore()
+    prepare_pending_restore(backup_manager, on_failure=restore_failure_handler, apply_operation=apply_restore)
 
     settings_store = JsonSettingsStore(paths.settings_file)
     settings = settings_store.load()
-    app = application or QApplication(argv or sys.argv)
     if needs_attachment_search_upgrade(paths.database_file):
         DatabaseUpgradeDialog(lambda progress: upgrade_database(paths.database_file, progress=progress)).run_upgrade()
     else:
         upgrade_database(paths.database_file)
+    recovery_warnings = backup_manager.recover_attachment_deletions()
+    for warning in recovery_warnings:
+        logger.warning(warning)
     engine = create_database_engine(paths.database_file)
     sessions = SessionFactory(engine)
     task_service = TaskService(SqlAlchemyTaskRepository(sessions), timezone=settings.timezone)
@@ -114,7 +123,60 @@ def build_application(
         previous_unclean_shutdown=previous_unclean_shutdown,
         hourly_notifications_enabled=hourly_notifications_enabled,
     )
+    if backup_manager.restore_warnings or recovery_warnings:
+        window.statusBar().showMessage(
+            "데이터 복구·정리 확인 필요: " + " · ".join(backup_manager.restore_warnings + recovery_warnings),
+            15_000,
+        )
     return app, window
+
+
+def prepare_pending_restore(
+    manager: BackupManager, *, on_failure: Callable[[BackupError], str] | None = None,
+    apply_operation: Callable[[], object] | None = None,
+) -> None:
+    """Never open the working DB after an unacknowledged restore failure."""
+    while True:
+        try:
+            (apply_operation or manager.apply_pending_restore)()
+            return
+        except BackupError as error:
+            logger.exception("예약된 백업 복원을 적용하지 못했습니다.")
+            if manager.restore_is_incomplete:
+                raise
+            choice = (on_failure or _restore_failure_choice)(error)
+            if choice == "retry":
+                continue
+            if choice == "cancel":
+                retained = manager.cancel_pending_restore()
+                manager.restore_warnings += (
+                    f"복원 예약을 취소하고 현재 자료를 사용합니다. 복원 파일 보존: {retained}",
+                )
+                return
+            raise BackupError("복원을 완료하지 못해 프로그램 시작을 중단했습니다. 현재 자료와 복원 예약은 보존됩니다.") from error
+
+
+def _restore_failure_choice(error: BackupError) -> str:
+    box = QMessageBox()
+    box.setWindowTitle("OfficeFlow · 예약된 복원 실패")
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText("백업 복원을 적용하지 못했습니다.\n현재 자료로 조용히 시작하지 않고 선택을 기다립니다.")
+    box.setInformativeText(str(error))
+    retry = box.addButton("복원 다시 시도", QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton("예약 취소 후 현재 자료 사용", QMessageBox.ButtonRole.ActionRole)
+    stop = box.addButton("시작 중단", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(stop)
+    box.setEscapeButton(stop)
+    app = QApplication.instance()
+    previous = app.quitOnLastWindowClosed() if isinstance(app, QApplication) else None
+    if isinstance(app, QApplication):
+        app.setQuitOnLastWindowClosed(False)
+    try:
+        box.exec()
+    finally:
+        if isinstance(app, QApplication) and previous is not None:
+            app.setQuitOnLastWindowClosed(previous)
+    return "retry" if box.clickedButton() == retry else "cancel" if box.clickedButton() == cancel else "exit"
 
 
 def main() -> int:

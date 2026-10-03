@@ -188,3 +188,21 @@ def test_dense_calendar_uses_exact_count_summary(qtbot: QtBot) -> None:
     assert page.summary_label.isVisible()
     assert page.calendar._task_hits == []
     assert any(day == date(2026, 9, 17) for _rect, day in page.calendar._more_hits)
+
+
+def test_short_calendar_uses_counts_without_bars_spilling_into_next_row(qtbot: QtBot) -> None:
+    scheduled = _task(
+        "작은 달력의 일정", datetime(2026, 9, 16, 15, tzinfo=UTC),
+        datetime(2026, 9, 17, 15, tzinfo=UTC),
+    )
+    calendar = MonthCalendarWidget(timezone="Asia/Seoul")
+    qtbot.addWidget(calendar)
+    calendar.setMinimumHeight(168)
+    calendar.resize(700, 168)
+    calendar.set_month(2026, 9)
+    calendar.set_tasks((scheduled,))
+    calendar.show()
+    calendar.grab()
+    assert calendar._task_hits == []
+    assert any(day == date(2026, 9, 17) for _rect, day in calendar._more_hits)
+    assert all(rect.bottom() < calendar.height() for rect, _day in calendar._more_hits)

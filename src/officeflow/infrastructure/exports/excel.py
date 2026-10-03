@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterable
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook, load_workbook  # type: ignore[import-untyped]
+from openpyxl.cell import WriteOnlyCell  # type: ignore[import-untyped]
 from openpyxl.styles import (  # type: ignore[import-untyped]
     Alignment,
     Border,
@@ -15,7 +18,11 @@ from openpyxl.styles import (  # type: ignore[import-untyped]
     PatternFill,
     Side,
 )
-from openpyxl.worksheet.table import Table, TableStyleInfo  # type: ignore[import-untyped]
+from openpyxl.worksheet.table import (  # type: ignore[import-untyped]
+    Table,
+    TableColumn,
+    TableStyleInfo,
+)
 
 from officeflow.application.exporting import ExportCanceledError
 from officeflow.domain.enums import TaskPriority, TaskStatus
@@ -60,6 +67,16 @@ class ExcelTaskExporter:
         *,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> Path:
+        return self.export_stream(tasks, destination, cancel_requested=cancel_requested)
+
+    def export_stream(
+        self,
+        tasks: Iterable[Task],
+        destination: Path,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        progress: Callable[[int], None] | None = None,
+    ) -> Path:
         target = destination.resolve()
         if target.suffix.casefold() != ".xlsx":
             raise ValueError("Excel 내보내기 파일은 .xlsx 확장자여야 합니다.")
@@ -70,10 +87,17 @@ class ExcelTaskExporter:
         os.close(handle)
         temporary = Path(temporary_name)
         try:
-            workbook = self._build_workbook(tasks, cancel_requested)
-            workbook.save(temporary)
-            workbook.close()
-            self._verify(temporary, len(tasks))
+            workbook, count = self._build_workbook(tasks, cancel_requested, progress)
+            try:
+                workbook.save(temporary)
+                self._verify(temporary, count, cancel_requested)
+            finally:
+                for sheet in workbook.worksheets:
+                    with suppress(FileNotFoundError):
+                        if not sheet.closed:
+                            sheet.close()
+                        sheet._writer.cleanup()
+                workbook.close()
             if cancel_requested is not None and cancel_requested():
                 raise ExportCanceledError("Excel 내보내기를 취소했습니다.")
             os.replace(temporary, target)
@@ -83,54 +107,88 @@ class ExcelTaskExporter:
 
     def _build_workbook(
         self,
-        tasks: tuple[Task, ...],
+        tasks: Iterable[Task],
         cancel_requested: Callable[[], bool] | None,
-    ) -> Workbook:
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "업무"
+        progress: Callable[[int], None] | None = None,
+    ) -> tuple[Workbook, int]:
+        workbook = Workbook(write_only=True)
+        sheet = workbook.create_sheet("업무")
         sheet.sheet_view.showGridLines = False
         sheet.sheet_properties.tabColor = "274C77"
-
-        sheet.cell(1, 1, "OfficeFlow 업무 목록")
-        sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(_HEADERS))
-        sheet.cell(1, 1).font = Font(name="Arial", size=14, bold=True, color="1F2937")
-        sheet.cell(2, 1, f"내보낸 업무: {len(tasks)}개")
-        sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(_HEADERS))
-        sheet.cell(2, 1).font = Font(name="Arial", size=10, italic=True, color="64748B")
-
+        widths = (9, 30, 42, 10, 10, 19, 19, 9, 30, 9, 42, 9, 19, 19)
+        for index, width in enumerate(widths, start=1):
+            sheet.column_dimensions[chr(64 + index)].width = width
+        sheet.sheet_format.defaultRowHeight = 34
+        sheet.row_dimensions[1].height = 24
+        sheet.row_dimensions[4].height = 24
+        sheet.freeze_panes = "A5"
+        sheet.print_title_rows = "4:4"
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        title = WriteOnlyCell(sheet, "OfficeFlow 업무 목록")
+        title.font = Font(name="Arial", size=14, bold=True, color="1F2937")
+        sheet.append([title])
+        sheet.append(["업무 목록 · 시작/종료 시각은 각 업무의 현지 시각"])
+        sheet.append([])
         header_fill = PatternFill("solid", fgColor="274C77")
         header_font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
         separator = Side(style="thin", color="FFFFFF")
-        for column, header in enumerate(_HEADERS, start=1):
-            cell = sheet.cell(4, column, header)
+        headers = []
+        for header in _HEADERS:
+            cell = WriteOnlyCell(sheet, header)
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = Border(right=separator)
-
-        for row, task in enumerate(tasks, start=5):
-            if cancel_requested is not None and cancel_requested():
-                raise ExportCanceledError("Excel 내보내기를 취소했습니다.")
-            values = self._task_values(task)
-            for column, item_value in enumerate(values, start=1):
-                cell = sheet.cell(row, column, item_value)
-                if isinstance(item_value, str):
-                    cell.data_type = "s"
-                cell.font = Font(name="Arial", size=10, color="1F2937")
-                cell.alignment = Alignment(
-                    vertical="top",
-                    wrap_text=column in {2, 3, 9, 11},
-                )
-                if column in {6, 7, 13, 14} and isinstance(item_value, datetime):
-                    cell.number_format = (
-                        "yyyy-mm-dd" if task.all_day and column in {6, 7} else "yyyy-mm-dd hh:mm"
-                    )
-            sheet.row_dimensions[row].height = 34
-
-        last_row = max(5, 4 + len(tasks))
-        if tasks:
-            table = Table(displayName="OfficeFlowTasks", ref=f"A4:N{last_row}")
+            headers.append(cell)
+        sheet.append(headers)
+        count = 0
+        iterator = iter(tasks)
+        font = Font(name="Arial", size=10, color="1F2937")
+        try:
+            for task in iterator:
+                if cancel_requested is not None and cancel_requested():
+                    raise ExportCanceledError("Excel 내보내기를 취소했습니다.")
+                if count >= 1_048_572:
+                    raise ValueError("Excel 한 시트에 저장 가능한 업무 개수를 초과했습니다.")
+                cells = []
+                for column, value in enumerate(self._task_values(task), start=1):
+                    cell = WriteOnlyCell(sheet, value)
+                    if isinstance(value, str):
+                        cell.data_type = "s"
+                    cell.font = font
+                    cell.alignment = Alignment(vertical="top", wrap_text=column in {2, 3, 9, 11})
+                    if column in {6, 7, 13, 14} and isinstance(value, datetime):
+                        cell.number_format = (
+                            "yyyy-mm-dd"
+                            if task.all_day and column in {6, 7}
+                            else "yyyy-mm-dd hh:mm"
+                        )
+                    cells.append(cell)
+                sheet.append(cells)
+                count += 1
+                if progress is not None and count % 100 == 0:
+                    progress(count)
+        except BaseException:
+            # write-only worksheets own XML temp files even before Workbook.save.
+            sheet.close()
+            sheet._writer.cleanup()
+            workbook.close()
+            raise
+        finally:
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close()
+        last_row = 4 + count
+        if count:
+            table = Table(
+                displayName="OfficeFlowTasks",
+                ref=f"A4:N{last_row}",
+                tableColumns=[
+                    TableColumn(id=index, name=header) for index, header in enumerate(_HEADERS, 1)
+                ],
+            )
             table.tableStyleInfo = TableStyleInfo(
                 name="TableStyleMedium2",
                 showFirstColumn=False,
@@ -138,23 +196,15 @@ class ExcelTaskExporter:
                 showRowStripes=True,
                 showColumnStripes=False,
             )
-            sheet.add_table(table)
-        else:
-            for column in range(1, len(_HEADERS) + 1):
-                sheet.cell(5, column, "")
-
-        widths = (9, 30, 42, 10, 10, 19, 19, 9, 30, 9, 42, 9, 19, 19)
-        for index, width in enumerate(widths, start=1):
-            sheet.column_dimensions[chr(64 + index)].width = width
-        sheet.row_dimensions[1].height = 24
-        sheet.row_dimensions[4].height = 24
-        sheet.freeze_panes = "A5"
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", message="In write-only mode you must add table columns manually"
+                )
+                sheet.add_table(table)
         sheet.auto_filter.ref = f"A4:N{last_row}"
-        sheet.print_title_rows = "4:4"
-        sheet.sheet_properties.pageSetUpPr.fitToPage = True
-        sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 0
-        return workbook
+        if progress is not None:
+            progress(count)
+        return workbook, count
 
     @staticmethod
     def _task_values(task: Task) -> tuple[object, ...]:
@@ -181,19 +231,26 @@ class ExcelTaskExporter:
         )
 
     @staticmethod
-    def _verify(path: Path, expected_rows: int) -> None:
+    def _verify(
+        path: Path, expected_rows: int, cancel_requested: Callable[[], bool] | None = None
+    ) -> None:
         workbook = load_workbook(path, read_only=True, data_only=False)
         try:
             if workbook.sheetnames != ["업무"]:
                 raise OSError("Excel 파일의 시트 구성이 올바르지 않습니다.")
             sheet = workbook["업무"]
-            actual_rows = max(0, sheet.max_row - 4)
-            if expected_rows == 0:
-                actual_rows = 0
-            if actual_rows != expected_rows:
-                raise OSError("Excel 파일의 업무 개수 검증에 실패했습니다.")
-            actual_headers = tuple(sheet.cell(4, index).value for index in range(1, 15))
+            rows = sheet.iter_rows(values_only=True)
+            for _ in range(3):
+                next(rows, ())
+            actual_headers = tuple(next(rows, ()))
             if actual_headers != _HEADERS:
                 raise OSError("Excel 파일의 열 구성이 올바르지 않습니다.")
+            actual_rows = 0
+            for _row in rows:
+                if cancel_requested is not None and cancel_requested():
+                    raise ExportCanceledError("Excel 검증을 취소했습니다.")
+                actual_rows += 1
+            if actual_rows != expected_rows:
+                raise OSError("Excel 파일의 업무 개수 검증에 실패했습니다.")
         finally:
             workbook.close()

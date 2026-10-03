@@ -203,6 +203,11 @@ QPushButton[calendarPrimary="true"] {
     border-color: #AFC5F5;
     font-weight: 600;
 }
+QPushButton[calendarAction="true"] {
+    min-width: 0px;
+    padding: 5px 8px;
+    font-size: 13px;
+}
 QListWidget#calendarDayList, QListWidget#reminderList {
     background: #F8FAFD;
     border: 1px solid #E1E6EF;

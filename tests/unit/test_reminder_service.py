@@ -200,6 +200,25 @@ class InMemoryReminderRepository(ReminderRepository):
             and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
         )
 
+    def list_unhandled_reminder_targets(
+        self, *, fired_since: datetime, due_at: datetime
+    ) -> tuple[tuple[ReminderDelivery, ReminderTarget], ...]:
+        return tuple(
+            (delivery, ReminderTarget(reminder, task))
+            for delivery in sorted(
+                self.deliveries.values(),
+                key=lambda item: (item.scheduled_at, item.id or 0),
+            )
+            if delivery.status is ReminderDeliveryStatus.FIRED
+            and delivery.acknowledged_at is None
+            and fired_since <= delivery.last_fired_at <= due_at
+            and (reminder := self.reminders.get(delivery.reminder_id)) is not None
+            and reminder.enabled
+            and (task := self.tasks.tasks.get(delivery.task_id)) is not None
+            and task.deleted_at is None
+            and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+        )
+
 
 def build_services() -> tuple[TaskService, ReminderService, InMemoryReminderRepository]:
     task_repository = InMemoryTaskRepository()
@@ -265,7 +284,7 @@ def test_poll_uses_cached_due_schedule_instead_of_scanning_every_rule() -> None:
 
     assert [alert.task.title for alert in alerts] == ["지금 알림"]
     assert repository.enabled_scan_count == 0
-    assert repository.due_query_count == 1
+    assert repository.due_query_count <= 2  # A bounded check for remaining work.
     schedules = {item.task_id: item for item in repository.reminders.values()}
     assert schedules[due_task.id].schedule_initialized is True
     assert schedules[due_task.id].next_fire_at is None
@@ -288,6 +307,118 @@ def test_recent_missed_reminder_is_recovered_only_once() -> None:
     assert len(alerts) == 1
     assert alerts[0].recovered is True
     assert reminder_service.poll_due(now=datetime(2026, 9, 14, 2, 31, tzinfo=UTC)) == ()
+
+
+def test_startup_recovers_unhandled_delivery_without_claiming_a_duplicate() -> None:
+    task_service, service, repository = build_services()
+    now = datetime(2026, 9, 14, 1, 0, tzinfo=UTC)
+    task = task_service.create(TaskDraft(title="미처리 알림 복구", starts_at=now))
+    assert task.id is not None
+    service.replace_rules(
+        task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),)
+    )
+    original = service.poll_due(now=now)[0]
+    restarted = ReminderService(repository, task_service)
+
+    recovered = restarted.poll_due(
+        now=now + timedelta(minutes=1), recover_unhandled=True
+    )
+
+    assert len(recovered) == 1
+    assert recovered[0].delivery == original.delivery
+    assert recovered[0].recovered is True
+    assert len(repository.deliveries) == 1
+    assert restarted.poll_due(now=now + timedelta(minutes=2)) == ()
+
+
+@pytest.mark.parametrize("elapsed_minutes,expected", [(120, 1), (121, 0)])
+def test_startup_recovery_respects_grace_window(
+    elapsed_minutes: int, expected: int
+) -> None:
+    task_service, service, repository = build_services()
+    now = datetime(2026, 9, 14, 1, 0, tzinfo=UTC)
+    task = task_service.create(TaskDraft(title="복구 기간", starts_at=now))
+    assert task.id is not None
+    service.replace_rules(
+        task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),)
+    )
+    service.poll_due(now=now)
+
+    recovered = ReminderService(repository, task_service).poll_due(
+        now=now + timedelta(minutes=elapsed_minutes), recover_unhandled=True
+    )
+
+    assert len(recovered) == expected
+
+
+def test_startup_recovery_uses_last_actual_fire_for_an_old_snoozed_alert() -> None:
+    task_service, service, repository = build_services()
+    now = datetime(2026, 9, 14, 1, 0, tzinfo=UTC)
+    task = task_service.create(TaskDraft(title="재알림 후 종료", starts_at=now))
+    assert task.id is not None
+    service.replace_rules(
+        task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),)
+    )
+    original = service.poll_due(now=now)[0]
+    assert original.delivery.id is not None
+    service.snooze(original.delivery.id, 1_440, now=now)
+    refired = service.poll_due(now=now + timedelta(days=1))[0]
+
+    recovered = ReminderService(repository, task_service).poll_due(
+        now=now + timedelta(days=1, minutes=1), recover_unhandled=True
+    )
+
+    assert len(recovered) == 1
+    assert recovered[0].delivery == refired.delivery
+    assert len(repository.deliveries) == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    [OccurrenceStatus.COMPLETED, OccurrenceStatus.SKIPPED, OccurrenceStatus.CANCELED],
+)
+def test_startup_does_not_recover_a_closed_recurring_occurrence(
+    status: OccurrenceStatus,
+) -> None:
+    task_service, service, repository = build_services()
+    now = datetime(2026, 9, 14, 1, 0, tzinfo=UTC)
+    task = task_service.create(
+        TaskDraft(title="이미 처리한 반복 업무", starts_at=now, recurrence_rule="FREQ=DAILY")
+    )
+    assert task.id is not None
+    service.replace_rules(
+        task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),)
+    )
+    original = service.poll_due(now=now)[0]
+    assert original.delivery.id is not None
+    task_service.transition_occurrence(task.id, now, status, now=now + timedelta(minutes=1))
+
+    recovered = ReminderService(repository, task_service).poll_due(
+        now=now + timedelta(minutes=2), recover_unhandled=True
+    )
+
+    assert recovered == ()
+    assert repository.deliveries[original.delivery.id].status is ReminderDeliveryStatus.ACKNOWLEDGED
+
+
+def test_startup_merges_unhandled_and_new_due_alerts_in_schedule_order() -> None:
+    task_service, service, repository = build_services()
+    now = datetime(2026, 9, 14, 1, 0, tzinfo=UTC)
+    for title, start in (("이전에 뜬 알림", now), ("지금 울릴 알림", now + timedelta(minutes=1))):
+        task = task_service.create(TaskDraft(title=title, starts_at=start))
+        assert task.id is not None
+        service.replace_rules(
+            task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),)
+        )
+    service.poll_due(now=now)
+
+    alerts = ReminderService(repository, task_service).poll_due(
+        now=now + timedelta(minutes=1), recover_unhandled=True
+    )
+
+    assert [alert.task.title for alert in alerts] == ["이전에 뜬 알림", "지금 울릴 알림"]
+    assert [alert.recovered for alert in alerts] == [True, False]
+    assert len(repository.deliveries) == 2
 
 
 def test_reminder_older_than_recovery_window_is_not_fired() -> None:

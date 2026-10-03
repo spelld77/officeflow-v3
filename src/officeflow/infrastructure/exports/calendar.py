@@ -86,18 +86,23 @@ class ICalendarTaskExporter:
                 lines.append(f"DTEND;TZID={task.timezone}:{end:%Y%m%dT%H%M%S}")
         if task.recurrence_rule:
             lines.append(f"RRULE:{task.recurrence_rule}")
-        if task.description:
-            lines.append(f"DESCRIPTION:{_escape_text(task.description)}")
+        description = task.description
+        if task.status is TaskStatus.COMPLETED:
+            description = "\n\n".join(part for part in (
+                description, "업무 상태: 완료",
+                f"완료 요약: {task.result_note}" if task.result_note else "",
+            ) if part)
+        if description:
+            lines.append(f"DESCRIPTION:{_escape_text(description)}")
         if task.result_note:
-            lines.append(f"X-OFFICEFLOW-RESULT:{_escape_text(task.result_note)}")
+            lines.append(f"X-OFFICEFLOW-RESULT;VALUE=TEXT:{_escape_text(task.result_note)}")
         lines.append(f"STATUS:{_calendar_status(task.status)}")
+        lines.append(f"X-OFFICEFLOW-TASK-STATUS:{task.status.value}")
         lines.append("END:VEVENT")
         return lines
 
 
 def _calendar_status(status: TaskStatus) -> str:
-    if status is TaskStatus.COMPLETED:
-        return "COMPLETED"
     if status in {TaskStatus.CANCELED, TaskStatus.ARCHIVED}:
         return "CANCELLED"
     if status is TaskStatus.PENDING:

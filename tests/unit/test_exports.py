@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+from icalendar import Calendar
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 
 from officeflow.application.exporting import (
     CalendarExportOptions,
     CalendarExportScope,
+    ExportCanceledError,
     ExportService,
 )
 from officeflow.application.tasks import TaskPage, TaskQuery
@@ -101,6 +104,66 @@ def test_ics_export_preserves_multiday_end_and_recurrence(tmp_path) -> None:
     assert text.count("BEGIN:VEVENT") == 2
 
 
+@pytest.mark.parametrize("status", list(TaskStatus))
+def test_ics_event_status_is_valid_and_business_status_is_preserved(tmp_path, status) -> None:
+    start = datetime(2026, 10, 1, 0, tzinfo=UTC)
+    task = replace(_task(task_id=31, title="내보낼 일정", all_day=False, starts_at=start,
+                         ends_at=start + timedelta(hours=1)),
+                   status=status, result_note="처리결과; 쉼표, 줄바꿈\n" + "긴 한글 결과 " * 30,
+                   completed_at=start if status is TaskStatus.COMPLETED else None)
+    path = tmp_path / "validated.ics"
+    ICalendarTaskExporter().export((task,), path)
+    payload = path.read_bytes()
+    parsed = Calendar.from_ical(payload)
+    events = parsed.walk("VEVENT")
+    assert len(events) == 1
+    event = events[0]
+    assert not event.errors
+    assert str(event["STATUS"]) in {"TENTATIVE", "CONFIRMED", "CANCELLED"}
+    assert str(event["X-OFFICEFLOW-TASK-STATUS"]) == status.value
+    assert str(event["UID"]) == "task-31@officeflow.local"
+    assert event.decoded("DTSTART") == task.starts_at
+    assert event.decoded("DTEND") == task.ends_at
+    assert str(event["X-OFFICEFLOW-RESULT"]).replace("\r\n", "\n") == task.result_note
+    description = str(event["DESCRIPTION"]).replace("\r\n", "\n")
+    assert task.description in description
+    if status is TaskStatus.COMPLETED:
+        assert str(event["STATUS"]) == "CONFIRMED"
+        assert "업무 상태: 완료" in description
+        assert task.result_note in description
+    assert all(len(line) <= 75 for line in payload.split(b"\r\n"))
+
+
+def test_ics_parser_preserves_all_day_range_and_repeat_rule(tmp_path) -> None:
+    start = datetime(2026, 9, 14, 15, tzinfo=UTC)
+    task = _task(task_id=32, title="기간 반복", all_day=True, starts_at=start,
+                 ends_at=start + timedelta(days=3), recurrence_rule="FREQ=WEEKLY;COUNT=5")
+    path = tmp_path / "range.ics"
+    ICalendarTaskExporter().export((task,), path)
+    event = Calendar.from_ical(path.read_bytes()).walk("VEVENT")[0]
+    assert event.decoded("DTSTART") == date(2026, 9, 15)
+    assert event.decoded("DTEND") == date(2026, 9, 18)
+    assert event["RRULE"]["FREQ"] == ["WEEKLY"]
+    assert event["RRULE"]["COUNT"] == [5]
+
+
+def test_ics_cancel_after_serialization_preserves_existing_target(tmp_path) -> None:
+    start = datetime(2026, 10, 1, 0, tzinfo=UTC)
+    task = _task(task_id=33, title="기존 파일 보존", all_day=False, starts_at=start,
+                 ends_at=start + timedelta(hours=1))
+    destination = tmp_path / "existing.ics"
+    destination.write_bytes(b"original content")
+    calls = 0
+    def cancel():
+        nonlocal calls
+        calls += 1
+        return calls == 2
+    with pytest.raises(ExportCanceledError):
+        ICalendarTaskExporter().export((task,), destination, cancel_requested=cancel)
+    assert destination.read_bytes() == b"original content"
+    assert list(tmp_path.glob("*.part.ics")) == []
+
+
 def test_export_cancellation_leaves_no_partial_file(tmp_path) -> None:
     start = datetime(2026, 9, 15, tzinfo=UTC)
     task = _task(
@@ -142,12 +205,19 @@ def test_export_service_removes_page_limit_and_calendar_omits_unscheduled(tmp_pa
             self.queries.append(query)
             return TaskPage((scheduled, unscheduled), 2, query.offset, query.limit)
 
+        def export_tasks(self, query, *, cancel_requested=None):
+            yield from self.query(replace(query, offset=0, limit=500)).items
+
     class ExporterStub:
         def __init__(self) -> None:
             self.tasks: tuple[Task, ...] = ()
 
         def export(self, tasks, destination, *, cancel_requested=None):
             self.tasks = tasks
+            return destination
+
+        def export_stream(self, tasks, destination, *, cancel_requested=None, progress=None):
+            self.tasks = tuple(tasks)
             return destination
 
     task_service = TaskServiceStub()
@@ -159,7 +229,7 @@ def test_export_service_removes_page_limit_and_calendar_omits_unscheduled(tmp_pa
     service.export_calendar(tmp_path / "schedule.ics")
 
     assert task_service.queries[0].search == "일정"
-    assert task_service.queries[0].limit is None
+    assert task_service.queries[0].limit == 500
     assert excel.tasks == (scheduled, unscheduled)
     assert calendar.tasks == (scheduled,)
 

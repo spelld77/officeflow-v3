@@ -5,10 +5,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
@@ -30,10 +29,15 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.attachments import AttachmentOperationError, AttachmentService
-from officeflow.application.exporting import CalendarExportResult, ExportService
+from officeflow.application.exporting import (
+    CalendarExportResult,
+    ExportCanceledError,
+    ExportService,
+)
 from officeflow.application.tasks import TaskQuery, TaskService
 from officeflow.domain.attachment import Attachment
 from officeflow.infrastructure.backup import (
+    BackupCanceledError,
     BackupError,
     BackupInfo,
     BackupManager,
@@ -41,32 +45,8 @@ from officeflow.infrastructure.backup import (
     DataUsageSnapshot,
     OrphanAttachmentFile,
 )
+from officeflow.presentation.background import OperationWorker, finish_thread
 from officeflow.presentation.calendar_export_dialog import CalendarExportDialog
-
-
-class OperationWorker(QObject):
-    succeeded = Signal(object)
-    failed = Signal(object)
-    finished = Signal()
-
-    def __init__(self, operation: Callable[[Callable[[], bool]], object]) -> None:
-        super().__init__()
-        self._operation = operation
-        self._canceled = Event()
-
-    def cancel(self) -> None:
-        self._canceled.set()
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            result = self._operation(self._canceled.is_set)
-        except Exception as error:
-            self.failed.emit(error)
-        else:
-            self.succeeded.emit(result)
-        finally:
-            self.finished.emit()
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,10 +584,13 @@ class DataManagementDialog(QDialog):
             f"첨부파일  {self._format_bytes(result.stored_attachment_bytes)} "
             f"({result.stored_attachment_count:,}개 저장 / {result.linked_attachment_count:,}개 연결 / "
             f"{result.detached_attachment_count:,}개 정리 대기)\n"
+            f"삭제 복구 대기  {self._format_bytes(result.quarantine_bytes)} ({result.quarantine_file_count:,}개 파일)\n"
             f"백업  {self._format_bytes(result.backup_bytes)} ({result.backup_count:,}개)"
         )
         self._update_backup_summary(result)
         issues: list[str] = []
+        if result.quarantine_file_count:
+            issues.append(f"삭제 복구 대기 {result.quarantine_file_count:,}개 파일 (재실행 시 복구 재시도, 임의 삭제 금지)")
         if result.missing_attachment_count:
             issues.append(f"파일 누락 {result.missing_attachment_count:,}개")
         if result.orphan_attachment_count:
@@ -715,6 +698,10 @@ class DataManagementDialog(QDialog):
                 self._query, destination, cancel_requested=canceled
             ),
             lambda result: f"Excel 내보내기 완료: {result}",
+            progress_operation=lambda canceled, report: self._export_service.export_excel(
+                self._query, destination, cancel_requested=canceled,
+                progress=lambda count: report(count, 0),
+            ),
         )
 
     def _export_ics(self) -> None:
@@ -848,21 +835,25 @@ class DataManagementDialog(QDialog):
         success_message: Callable[[Any], str],
         *,
         show_progress: bool = True,
+        progress_operation: Callable[[Callable[[], bool], Callable[[int, int], None]], object] | None = None,
     ) -> None:
         if self._thread is not None:
             self.status_label.setText("다른 데이터 작업이 진행 중입니다.")
             return
         thread = QThread(self)
-        worker = OperationWorker(operation)
+        worker = OperationWorker(operation if progress_operation is None else
+                                 lambda canceled: progress_operation(canceled, worker.progress.emit))
+        worker.progress.connect(self._operation_progress)
         worker.moveToThread(thread)
         progress: QProgressDialog | None = None
         if show_progress:
             progress = QProgressDialog(label, "취소", 0, 0, self)
             progress.setWindowTitle("데이터 작업")
+            progress.setWindowModality(Qt.WindowModality.NonModal)
             progress.setMinimumDuration(0)
             progress.setAutoClose(False)
             progress.setAutoReset(False)
-            progress.canceled.connect(worker.cancel)
+            progress.canceled.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
         thread.started.connect(worker.run)
         worker.succeeded.connect(lambda result: self._operation_succeeded(result, success_message))
         worker.failed.connect(self._operation_failed)
@@ -875,6 +866,14 @@ class DataManagementDialog(QDialog):
         self._progress = progress
         thread.start()
 
+    def _operation_progress(self, done: int, _total: int) -> None:
+        if self._owner_shutting_down:
+            return
+        message = f"Excel 업무 {done:,}개 작성 · 완료 후 파일을 검증합니다…"
+        self.status_label.setText(message)
+        if self._progress is not None:
+            self._progress.setLabelText(message)
+
     def _operation_succeeded(self, result: object, message: Callable[[Any], str]) -> None:
         if self._owner_shutting_down:
             return
@@ -885,6 +884,9 @@ class DataManagementDialog(QDialog):
     def _operation_failed(self, error: object) -> None:
         if self._owner_shutting_down:
             return
+        if isinstance(error, (BackupCanceledError, ExportCanceledError)):
+            self.status_label.setText(str(error))
+            return
         self.status_label.setText(f"작업 실패: {error}")
         QMessageBox.critical(self, "데이터 작업 실패", str(error))
 
@@ -893,6 +895,7 @@ class DataManagementDialog(QDialog):
             return
         if self._progress is not None:
             self._progress.close()
+            self._progress.deleteLater()
         self._progress = None
         self._worker = None
         self._thread = None
@@ -918,7 +921,10 @@ class DataManagementDialog(QDialog):
     def _backup_message(result: object) -> str:
         if not isinstance(result, BackupInfo):
             return "백업이 완료되었습니다."
-        return f"백업 완료: {result.path} (첨부파일 {result.attachment_count}개)"
+        message = f"백업 완료: {result.path} (첨부파일 {result.attachment_count}개)"
+        if result.missing_attachments:
+            message += f" · 주의: 기존 누락 첨부 {len(result.missing_attachments)}개는 백업에 없습니다."
+        return message
 
     def _restore_message(self, result: object) -> str:
         if not isinstance(result, BackupManifest):
@@ -927,6 +933,8 @@ class DataManagementDialog(QDialog):
             "백업 검증을 통과했습니다. OfficeFlow를 완전히 종료한 뒤 다시 실행하면 "
             f"DB {sum(result.table_counts.values())}건과 첨부 {len(result.attachments)}개를 복원합니다."
         )
+        if result.missing_attachments:
+            message += f"\n주의: 누락된 첨부 {len(result.missing_attachments)}개는 이 백업으로 복원할 수 없습니다."
         QMessageBox.information(self, "복원 예약 완료", message)
         return message
 
@@ -943,7 +951,13 @@ class DataManagementDialog(QDialog):
             self._worker.cancel()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait()
+            finish_thread(self._thread, parent=self)
+        self._thread = None
+        self._worker = None
+        if self._progress is not None:
+            self._progress.close()
+            self._progress.deleteLater()
+        self._progress = None
         super().reject()
 
     def accept(self) -> None:

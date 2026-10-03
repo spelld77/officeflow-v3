@@ -23,6 +23,8 @@ from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRep
 
 def _database(path, values: tuple[str, ...]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_file():
+        upgrade_database(path)
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY, value TEXT)")
         connection.execute("DELETE FROM sample")

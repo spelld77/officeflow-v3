@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import builtins
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
@@ -193,6 +195,8 @@ class TaskSummary:
 
 
 class TaskRepository(Protocol):
+    def read_snapshot(self) -> AbstractContextManager[TaskRepository]: ...
+
     def add(self, task: Task) -> Task: ...
 
     def update(self, task: Task) -> Task: ...
@@ -242,6 +246,10 @@ class TaskRepository(Protocol):
 
     def get_occurrence_by_id(self, occurrence_id: int) -> TaskOccurrence | None: ...
 
+    def get_occurrences_by_ids(self, occurrence_ids: tuple[int, ...]) -> dict[int, TaskOccurrence]: ...
+
+    def completed_history_page(self, query: TaskQuery) -> TaskPage: ...
+
     def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence: ...
 
     def list_occurrences(
@@ -254,6 +262,23 @@ class TaskRepository(Protocol):
 
 class TaskService:
     CALENDAR_PREVIEW_LIMIT = 60
+
+    def export_tasks(
+        self, query: TaskQuery, *, cancel_requested: Callable[[], bool] | None = None,
+    ) -> Iterator[Task]:
+        """Stream a stable snapshot in bounded pages, including Today projections."""
+        current = datetime.now(UTC)
+        with self._repository.read_snapshot() as repository:
+            reader = TaskService(repository, timezone=self._timezone)
+            offset = 0
+            while True:
+                if cancel_requested is not None and cancel_requested():
+                    return
+                page = reader.query(replace(query, offset=offset, limit=500), now=current)
+                yield from page.items
+                offset += len(page.items)
+                if not page.has_more or not page.items:
+                    break
     CALENDAR_SUMMARY_THRESHOLD = 120
 
     def __init__(self, repository: TaskRepository, *, timezone: str = "Asia/Seoul") -> None:
@@ -455,13 +480,11 @@ class TaskService:
 
     def completed_on(self, day: date) -> builtins.list[Task]:
         """Return regular and recurring tasks completed on a local calendar day."""
-        zone = ZoneInfo(self._timezone)
-        local_noon = datetime.combine(day, time(hour=12), tzinfo=zone).astimezone(UTC)
-        page = self.query(
-            TaskQuery(view=TaskView.TODAY, group=TaskGroup.COMPLETED, limit=None),
-            now=local_noon,
-        )
+        page = self.completed_search_page(search="", date_from=day, date_to=day, limit=None)
         return list(page.items)
+
+    def occurrences_by_ids(self, occurrence_ids: tuple[int, ...]) -> dict[int, TaskOccurrence]:
+        return self._repository.get_occurrences_by_ids(occurrence_ids)
 
     def completed_search_page(
         self,
@@ -470,7 +493,7 @@ class TaskService:
         date_from: date | None = None,
         date_to: date | None = None,
         offset: int = 0,
-        limit: int = 25,
+        limit: int | None = 25,
     ) -> TaskPage:
         zone = ZoneInfo(self._timezone)
         completed_after = (
@@ -485,7 +508,9 @@ class TaskService:
             if date_to is not None
             else None
         )
-        return self.query(
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise ValueError("검색 시작일은 종료일보다 늦을 수 없습니다.")
+        return self._repository.completed_history_page(
             TaskQuery(
                 view=TaskView.COMPLETED,
                 search=search,
@@ -713,6 +738,11 @@ class TaskService:
         task: Task,
         occurrence_start: datetime,
     ) -> TaskOccurrence:
+        if task.id is not None:
+            saved = self._repository.get_occurrence(task.id, occurrence_start)
+            if saved is not None:
+                # Persisted history remains addressable after its template is edited.
+                return saved
         if task.id is None or not task.recurrence_rule or task.starts_at is None:
             raise ValueError("반복 업무의 발생 건만 개별 처리할 수 있습니다.")
         expected = next_recurrence_start(
@@ -724,9 +754,6 @@ class TaskService:
         )
         if expected != occurrence_start:
             raise ValueError("반복 규칙에 포함되지 않은 발생 시각입니다.")
-        occurrence = self._repository.get_occurrence(task.id, occurrence_start)
-        if occurrence is not None:
-            return occurrence
         duration = task.ends_at - task.starts_at if task.ends_at is not None else None
         return TaskOccurrence(
             id=None,
@@ -782,16 +809,6 @@ class TaskService:
         day_start: datetime,
         day_end: datetime,
     ) -> TaskPage:
-        fetch_limit = (
-            None if query.limit is None else query.offset + query.limit
-        )
-        regular_query = replace(query, offset=0, limit=fetch_limit)
-        regular = self._repository.query(
-            regular_query,
-            current=current,
-            day_start=day_start,
-            day_end=day_end,
-        )
         zone = ZoneInfo(self._timezone)
         day = day_start.astimezone(zone).date()
         recurring = [
@@ -805,7 +822,26 @@ class TaskService:
                 is query.group
             )
         ]
-        combined = self._sort_tasks([*regular.items, *recurring], query.sort)
+        if not recurring:
+            return self._repository.query(
+                query, current=current, day_start=day_start, day_end=day_end,
+            )
+        fetch_limit = None if query.limit is None else query.offset + query.limit
+        regular = self._repository.query(
+            replace(query, offset=0, limit=None if fetch_limit is None else min(500, fetch_limit)),
+            current=current, day_start=day_start, day_end=day_end,
+        )
+        regular_items = list(regular.items)
+        # Each repository request is bounded even after many "more" clicks.
+        while fetch_limit is not None and len(regular_items) < min(fetch_limit, regular.total):
+            page = self._repository.query(
+                replace(query, offset=len(regular_items), limit=min(500, fetch_limit - len(regular_items))),
+                current=current, day_start=day_start, day_end=day_end,
+            )
+            if not page.items:
+                break
+            regular_items.extend(page.items)
+        combined = self._sort_tasks([*regular_items, *recurring], query.sort)
         end = None if query.limit is None else query.offset + query.limit
         return TaskPage(
             items=tuple(combined[query.offset : end]),
@@ -940,14 +976,16 @@ class TaskService:
         if section is not TaskGroup.IN_PROGRESS:
             return self.query(replace(query, group=section), now=now)
 
-        fetch_limit = None if query.limit is None else query.offset + query.limit
-        base = replace(query, offset=0, limit=fetch_limit)
-        active = self.query(replace(base, group=TaskGroup.IN_PROGRESS), now=now)
-        upcoming = self.query(replace(base, group=TaskGroup.UPCOMING), now=now)
-        combined = [*active.items, *upcoming.items]
-        end = None if query.limit is None else query.offset + query.limit
+        active = self.query(replace(query, group=TaskGroup.IN_PROGRESS), now=now)
+        remaining = None if query.limit is None else query.limit - len(active.items)
+        upcoming = self.query(replace(
+            query, group=TaskGroup.UPCOMING,
+            offset=max(0, query.offset - active.total),
+            limit=remaining if remaining is None or remaining > 0 else 1,
+        ), now=now)
+        combined = (*active.items, *(upcoming.items if remaining != 0 else ()))
         return TaskPage(
-            items=tuple(combined[query.offset : end]),
+            items=combined,
             total=active.total + upcoming.total,
             offset=query.offset,
             limit=query.limit,

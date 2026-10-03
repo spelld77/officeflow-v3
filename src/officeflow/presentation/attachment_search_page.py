@@ -41,6 +41,7 @@ from officeflow.application.attachment_search import (
     AttachmentSearchService,
 )
 from officeflow.domain.enums import TaskStatus
+from officeflow.presentation.background import finish_thread
 
 STATUS_LABELS = {
     TaskStatus.ACTIVE: "진행",
@@ -504,4 +505,4 @@ class AttachmentSearchPageWidget(QFrame):
         self.deactivate()
         if self._worker is not None:
             self._worker.cancelled.set()
-            self._worker.wait()
+            finish_thread(self._worker, parent=self, label="첨부 검색을 마무리하고 있습니다…")
