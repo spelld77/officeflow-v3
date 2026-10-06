@@ -17,13 +17,29 @@
 - [x] 격리 EXE 실행 및 설치·재설치·제거·데이터 보존 검증
 - [x] 새 폴더의 Python ZIP 런타임 진단 8/8·실행과 빈 DB·0011 스키마·무결성 검증
 - [x] 868개 산출물 파일의 버전·체크섬·사용자 자료 및 개발 캐시 제외 검증
-- [ ] main 커밋·push, 주석 태그 v3.0.7
-- [ ] GitHub 정식 릴리스와 5개 자산 공개
-- [ ] 공개 자산 상태·크기·SHA-256과 원격 커밋·태그 확인
+- [x] main 커밋·push, 주석 태그 v3.0.7
+- [x] GitHub 정식 릴리스와 5개 자산 공개
+- [x] 공개 자산 상태·크기·SHA-256과 원격 커밋·태그 확인
 
 ## 공개 결과
 
-공개 성공 후 소스 커밋·태그·공개 시각·릴리스 ID와 자산 검증 결과를 기록한다.
+- 기능 소스 커밋: `157cb46e6da9beb58039e1f79d634a69fc0cefc7` (릴리스 소스 커밋에 포함)
+- 릴리스 소스 커밋: `fd71c8723bc0feee4bb4e92c754a47c6a2a08be1`
+- 주석 태그: `v3.0.7` → 위 릴리스 소스 커밋; 태그 객체 `7f0f9f58ad4a0d046958ef65836a7ee93856bbab`
+- 공개 주소: <https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.7>
+- 공개 시각: 2026-10-07 00:39:30 한국 / 2026-10-06 15:39:30 UTC
+- GitHub 릴리스 ID: `404891611`; `draft=false`, `prerelease=false`, 최신 정식 릴리스 확인
+- 모든 공개 자산의 상태가 `uploaded`이며 서버 크기·SHA-256이 로컬 검증본과 일치함
+
+| 공개 자산 | 바이트 | SHA-256 |
+| --- | ---: | --- |
+| `OfficeFlow-3.0.7-Setup.exe` | 44,380,236 | `a1bb5104b16edb50e37d265ff79227467c0007749dbeadf02907e3724734a84c` |
+| `OfficeFlow-Python-3.0.7.zip` | 261,695 | `c896f996b02a31cafcbe1bf6e2d01faf0faf61fbbbf5dacd538dab1d4a50c27a` |
+| `OfficeFlow-Python-3.0.7.zip.sha256.txt` | 95 | `977544606eafab19a5ea463ec315a9cf642c99af5c91cd865a908c39ebc5b16e` |
+| `SHA256SUMS.txt` | 104,266 | `adab68da175e5a67afcacd8737c7c4e061fbc31cb09c0ab9d2001fc208430ba1` |
+| `release-manifest.json` | 165,789 | `42ea38ced40e78d800cd8952241ef0e48d4f403a24eafa1f18f58c6677262326` |
+
+공개 완료 기록은 문서 후속 커밋으로 남기고 `v3.0.7` 태그는 배포 소스 커밋에 고정한다.
 설치 파일과 Python ZIP은 Git 저장소가 아니라 릴리스 자산에 올린다. 이전 공개 버전은 변경하지 않는다.
 
 ## 배포 전 추가 안전 보완
