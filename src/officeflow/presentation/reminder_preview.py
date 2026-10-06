@@ -12,6 +12,7 @@ from PySide6.QtCore import (
     Qt,
     QThread,
     Signal,
+    Slot,
 )
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from officeflow.application.reminder_preview import (
     ReminderPreviewItem,
@@ -113,6 +115,7 @@ class ReminderPreviewController(QObject):
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
         self._generation = 0
+        self._active_request: tuple[int, date, date] | None = None
         self._request: tuple[int, tuple[date, date, str, datetime, int, float], datetime] | None = (
             None
         )
@@ -155,41 +158,56 @@ class ReminderPreviewController(QObject):
             )
         )
         self._thread, self._worker = thread, worker
+        self._active_request = (generation, start, end)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-
-        def succeeded(result: ReminderPreviewResult) -> None:
-            if generation == self._generation and not self._closing:
-                self.ready.emit(result)
-                self.rangeReady.emit((start, end), result)
-
-        worker.succeeded.connect(succeeded)
-        worker.failed.connect(
-            lambda error: (
-                self.failed.emit(error)
-                if generation == self._generation and not self._closing
-                else None
-            )
-        )
+        # Plain Python closures run in the sender's worker thread in PySide.
+        # Context-bound queued slots keep all UI-facing signals and lifecycle
+        # updates on this controller's (GUI) thread, including failure paths.
+        worker.succeeded.connect(self._on_succeeded, Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(self._on_failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-
-        def finished() -> None:
-            self._thread = None
-            self._worker = None
-            thread.deleteLater()
-            self._start()
-
-        thread.finished.connect(finished)
+        thread.finished.connect(self._on_finished, Qt.ConnectionType.QueuedConnection)
         thread.start()
+
+    @Slot(object)
+    def _on_succeeded(self, result: ReminderPreviewResult) -> None:
+        active = self._active_request
+        if active is not None and active[0] == self._generation and not self._closing:
+            self.ready.emit(result)
+            self.rangeReady.emit((active[1], active[2]), result)
+
+    @Slot(object)
+    def _on_failed(self, error: object) -> None:
+        active = self._active_request
+        if active is not None and active[0] == self._generation and not self._closing:
+            self.failed.emit(error)
+
+    @Slot()
+    def _on_finished(self) -> None:
+        thread = self._thread
+        # finished is emitted before native-thread/deferred-delete cleanup has
+        # fully returned. Keep the Python worker owner until the thread joins.
+        if thread is not None:
+            thread.wait()
+        self._thread = None
+        self._worker = None
+        self._active_request = None
+        if thread is not None:
+            thread.deleteLater()
+        self._start()
 
     def shutdown(self) -> None:
         self._closing = True
         self._request = None
         if self._worker:
             self._worker.cancel()
-        if self._thread:
-            finish_thread(self._thread)
+        thread = self._thread
+        if thread:
+            finish_thread(thread)
+            if isValid(thread):
+                thread.wait()
 
 
 class ReminderPreviewWidget(QWidget):

@@ -1,8 +1,8 @@
-# OfficeFlow 3.0.4 사용자 안내
+# OfficeFlow 3.0.7 사용자 안내
 
 ## 설치와 첫 실행
 
-`OfficeFlow-3.0.4-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며 기본 설치 위치는
+`OfficeFlow-3.0.7-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며 기본 설치 위치는
 `%LOCALAPPDATA%\Programs\OfficeFlow`다. 시작 메뉴 바로가기는 기본으로 만들고, 바탕 화면
 바로가기와 Windows 로그인 시 자동 시작은 설치 화면에서 선택할 수 있다.
 
@@ -13,7 +13,7 @@
 ### Python 실행 모드
 
 회사 보안 정책이 서명되지 않은 실행 파일을 제한하지만 Python 실행은 허용하는 경우
-`OfficeFlow-Python-3.0.4.zip`을 별도 폴더에 압축 해제해 사용할 수 있다. Python 3.12
+`OfficeFlow-Python-3.0.7.zip`을 별도 폴더에 압축 해제해 사용할 수 있다. Python 3.12
 64비트를 설치한 뒤 최초 한 번 `setup-officeflow-python.cmd`를 실행하고, 이후에는
 `run-officeflow-python.cmd`로 실행한다. 문제가 있으면 `diagnose-officeflow-python.cmd`로
 환경을 점검한다.
@@ -22,6 +22,10 @@ Python 실행 모드도 설치형과 동일한 `%LOCALAPPDATA%\OfficeFlow`의 DB
 설치형과 Python형을 동시에 실행하지 말고, 전환 전에는 트레이에서 OfficeFlow를 완전히
 종료한다. Python 배포 폴더를 옮겼다면 설정 스크립트를 다시 실행하고 자동 시작 설정을
 껐다가 켠다.
+
+3.0.7의 첫 실행은 기존 DB 보호 사본을 만든 뒤 첨부 순서 스키마 0011로 업그레이드한다.
+기존 업무·일지·첨부는 보존되지만 새 DB·백업은 3.0.7 이상에서 사용해야 한다.
+보호 사본은 DB만 포함하므로 업데이트 전 전체 백업도 권장한다. 이전 버전으로 되돌릴 때는 업데이트 전 자료가 필요하다.
 
 ## 핵심 사용 흐름
 
