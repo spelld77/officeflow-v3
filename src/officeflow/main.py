@@ -13,6 +13,7 @@ from officeflow.application.attachment_search import AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.records import RecordService
+from officeflow.application.reminder_preview import ReminderPreviewService
 from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import TaskService
 from officeflow.bootstrap.logging import configure_logging
@@ -28,13 +29,14 @@ from officeflow.infrastructure.database.attachment_search_repository import (
     SqlAlchemyAttachmentSearchRepository,
 )
 from officeflow.infrastructure.database.migrate import (
-    needs_attachment_search_upgrade,
+    needs_database_upgrade,
     upgrade_database,
 )
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
+from officeflow.infrastructure.database.task_saving import task_save_service
 from officeflow.infrastructure.exports.calendar import ICalendarTaskExporter
 from officeflow.infrastructure.exports.excel import ExcelTaskExporter
 from officeflow.infrastructure.settings.store import JsonSettingsStore
@@ -72,8 +74,11 @@ def build_application(
 
     settings_store = JsonSettingsStore(paths.settings_file)
     settings = settings_store.load()
-    if needs_attachment_search_upgrade(paths.database_file):
-        DatabaseUpgradeDialog(lambda progress: upgrade_database(paths.database_file, progress=progress)).run_upgrade()
+    if needs_database_upgrade(paths.database_file):
+        DatabaseUpgradeDialog(
+            lambda progress: upgrade_database(paths.database_file, progress=progress),
+            message="기존 자료를 보호하고 데이터베이스를 준비하고 있습니다…",
+        ).run_upgrade()
     else:
         upgrade_database(paths.database_file)
     recovery_warnings = backup_manager.recover_attachment_deletions()
@@ -110,6 +115,8 @@ def build_application(
         settings=settings,
         task_service=task_service,
         reminder_service=reminder_service,
+        task_save_service=task_save_service(sessions, settings.timezone),
+        reminder_preview_service=ReminderPreviewService(SqlAlchemyReminderRepository(sessions), reminder_service),
         record_service=record_service,
         attachment_service=attachment_service,
         attachment_search_service=AttachmentSearchService(

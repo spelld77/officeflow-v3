@@ -54,9 +54,16 @@ from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.hourly_notifications import HourlyState
 from officeflow.application.records import RecordService
+from officeflow.application.reminder_preview import (
+    ReminderPreviewItem,
+    ReminderPreviewResult,
+    ReminderPreviewService,
+)
 from officeflow.application.reminders import ReminderAlert, ReminderService
+from officeflow.application.task_saving import ReminderEdit, TaskSaveService
 from officeflow.application.tasks import (
     ScheduledTask,
+    TaskDraft,
     TaskGroup,
     TaskPage,
     TaskQuery,
@@ -66,7 +73,7 @@ from officeflow.application.tasks import (
 )
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.hourly_notification import HourlySettings
-from officeflow.domain.reminder import ReminderRuleInput
+from officeflow.domain.reminder import Reminder, ReminderDelivery, ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
 from officeflow.infrastructure.backup import BackupInfo, BackupManager
 from officeflow.infrastructure.settings.store import (
@@ -80,6 +87,7 @@ from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.attachment_search_page import AttachmentSearchPageWidget
 from officeflow.presentation.background import OperationWorker, finish_thread
 from officeflow.presentation.data_dialog import DataManagementDialog
+from officeflow.presentation.dates import WEEKDAYS, format_datetime
 from officeflow.presentation.help import open_user_help
 from officeflow.presentation.hourly_notification_controller import (
     HourlyNotificationController,
@@ -93,6 +101,11 @@ from officeflow.presentation.record_dialog import (
     WorkLogBrowserDialog,
 )
 from officeflow.presentation.reminder_dialog import ReminderDialog
+from officeflow.presentation.reminder_preview import (
+    ReminderPreviewController,
+    ReminderPreviewWidget,
+)
+from officeflow.presentation.reminder_settings import ReminderSettingsDialog, reminder_summary
 from officeflow.presentation.settings_dialog import SettingsDialog
 from officeflow.presentation.task_editor import TaskEditorDialog
 from officeflow.presentation.task_list import (
@@ -157,11 +170,23 @@ class MainWindow(QMainWindow):
         hourly_notifications_enabled: bool = False,
         hourly_notification_clock: NotificationClock | None = None,
         view_clock: Callable[[], datetime] | None = None,
+        task_save_service: TaskSaveService | None = None,
+        reminder_preview_service: ReminderPreviewService | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
         self._task_service = task_service
         self._reminder_service = reminder_service
+        self._task_save_service = task_save_service
+        self._preview_result = ReminderPreviewResult((), True)
+        self._preview_controller = ReminderPreviewController(reminder_preview_service, self) if reminder_preview_service else None
+        self._day_preview_controller = ReminderPreviewController(reminder_preview_service, self) if reminder_preview_service else None
+        self._preview_limit = 5000
+        if self._day_preview_controller:
+            self._day_preview_controller.rangeReady.connect(self._apply_day_reminder_preview)
+        if self._preview_controller:
+            self._preview_controller.ready.connect(self._apply_reminder_preview)
+            self._preview_controller.failed.connect(lambda error: self.statusBar().showMessage(f"알림 미리보기 조회 실패: {error}", 8000))
         self._record_service = record_service
         self._attachment_service = attachment_service
         self._attachment_search_service = attachment_search_service
@@ -369,6 +394,7 @@ class MainWindow(QMainWindow):
         self._calendar_page = CalendarPage(timezone=self._settings.timezone)
         self._calendar_page.monthChanged.connect(self._refresh_calendar)
         self._calendar_page.dateSelected.connect(self._refresh_calendar_day)
+        self._calendar_page.alarmMoreRequested.connect(self._reload_day_reminder_preview)
         self._calendar_page.taskSelected.connect(self._on_calendar_task_selected)
         self._calendar_page.taskActivated.connect(self._open_calendar_task)
         self._calendar_page.attachmentsRequested.connect(self._open_calendar_attachments)
@@ -472,6 +498,13 @@ class MainWindow(QMainWindow):
         self._quick_add_button.clicked.connect(self._quick_add_task)
         quick_add.addWidget(self._quick_add_button)
         self._content_layout.addLayout(quick_add)
+        self._today_reminders = ReminderPreviewWidget(self._settings.timezone)
+        self._today_reminders.recordRequested.connect(self._open_preview_record)
+        self._today_reminders.selected.connect(self._select_preview_detail)
+        self._today_reminders.settingsRequested.connect(self._open_reminder_settings)
+        self._today_reminders.reloadRequested.connect(self._reload_today_reminder_preview)
+        self._today_reminders.setVisible(self._preview_controller is not None)
+        self._content_layout.addWidget(self._today_reminders)
 
         self._task_model = TaskListModel()
         self._task_list = QListView()
@@ -585,7 +618,7 @@ class MainWindow(QMainWindow):
         self._pinned_filter.setCheckable(True)
         self._pinned_filter.setFixedWidth(58)
 
-        self._attachment_filter = QPushButton("첨부")
+        self._attachment_filter = QPushButton("첨부", bar)
         self._attachment_filter.setObjectName("attachmentFilter")
         self._attachment_filter.setCheckable(True)
         self._attachment_filter.setVisible(self._attachment_service is not None)
@@ -659,6 +692,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._detail_title)
         layout.addWidget(self._detail_status)
         layout.addWidget(self._detail_schedule)
+        self._detail_reminders_button = QPushButton("알림 설정…")
+        self._detail_reminders_button.setEnabled(False)
+        self._detail_reminders_button.clicked.connect(lambda: self._open_reminder_settings(self._task_service.get(self._selected_task_id)) if self._selected_task_id else None)
+        layout.addWidget(self._detail_reminders_button)
         self._matched_file_button = QPushButton("일치한 첨부파일 열기")
         self._matched_file_button.hide()
         self._matched_file_button.clicked.connect(self._open_matched_file)
@@ -791,12 +828,15 @@ class MainWindow(QMainWindow):
         self._refresh_calendar()
 
     def _refresh_tasks(self, *, preserve_state: bool = False) -> None:
+        self._synchronize_reminder_dialog()
+        self._today_reminders.setVisible(self._preview_controller is not None and self._current_view is TaskView.TODAY)
         if self._file_search_active and self._file_page is not None:
             self._file_page.refresh()
             return
         if self._calendar_active:
             self._refresh_calendar()
             return
+        self._request_reminder_preview()
         try:
             selected_id = self._selected_task_id
             selected_start = self._selected_occurrence_start
@@ -810,7 +850,7 @@ class MainWindow(QMainWindow):
             loaded_groups = self._task_model.loaded_group_counts if preserve_state else {}
             if self._current_view is TaskView.TODAY:
                 local_day = current.astimezone(ZoneInfo(self._settings.timezone)).date()
-                self._page_title.setText(f"오늘 · {local_day.month}월 {local_day.day}일")
+                self._page_title.setText(f"오늘 · {local_day.month}월 {local_day.day}일({WEEKDAYS[local_day.weekday()]})")
                 pages = {
                     group: self._refresh_page(
                         group, max(TaskListModel.PAGE_SIZE, loaded_groups.get(group, 0)), current
@@ -921,6 +961,7 @@ class MainWindow(QMainWindow):
         if self._calendar_active:
             # Repaint the today marker without navigating away from the chosen date.
             self._calendar_page.calendar.update()
+            self._request_reminder_preview()
             self._view_refreshed_at = current
             return
         self._refresh_tasks(preserve_state=True)
@@ -947,7 +988,8 @@ class MainWindow(QMainWindow):
                 search=self._search.text(),
             )
             self._calendar_page.set_overview(overview)
-            day_loaded = self._refresh_calendar_day(self._calendar_page.selected_date)
+            self._request_reminder_preview()
+            day_loaded = self._refresh_calendar_day(self._calendar_page.selected_date, request_preview=False)
             mode = " · 요약 표시" if overview.summary_mode else ""
             if day_loaded:
                 self.statusBar().showMessage(f"캘린더 일정 {overview.total}개{mode}", 1800)
@@ -955,7 +997,7 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to refresh calendar")
             self.statusBar().showMessage(f"캘린더를 불러오지 못했습니다: {error}", 5000)
 
-    def _refresh_calendar_day(self, selected_date: date) -> bool:
+    def _refresh_calendar_day(self, selected_date: date, *, request_preview: bool = True) -> bool:
         try:
             tasks = self._task_service.calendar_schedule(
                 selected_date,
@@ -963,6 +1005,9 @@ class MainWindow(QMainWindow):
                 search=self._search.text(),
             )
             self._calendar_page.set_day_tasks(tasks)
+            self._calendar_page.set_reminder_preview(self._preview_result)
+            if self._day_preview_controller and request_preview:
+                self._day_preview_controller.request(selected_date, selected_date, self._settings.timezone, self._view_clock())
             return True
         except Exception as error:
             logger.exception("Failed to refresh calendar day")
@@ -1085,10 +1130,12 @@ class MainWindow(QMainWindow):
             else:
                 self._refresh_tasks()
 
-    def _keep_file_dialog(self, dialog: QDialog) -> None:
+    def _keep_file_dialog(self, dialog: QDialog, *, always_on_top: bool = False) -> None:
         """Keep record/file windows alive without blocking independent reminders."""
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
+        if always_on_top:
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         dialog.setStyleSheet(LIGHT_STYLESHEET)
         self._file_dialogs.append(dialog)
         if isinstance(dialog, TaskRecordsDialog):
@@ -1369,6 +1416,9 @@ class MainWindow(QMainWindow):
             records.triggered.connect(self._open_selected_records)
         edit = menu.addAction("업무 수정")
         edit.triggered.connect(self._open_selected_task)
+        if self._reminder_service:
+            alarms = menu.addAction("알림 설정…")
+            alarms.triggered.connect(lambda: self._open_reminder_settings(task))
         menu.addSeparator()
         delete = menu.addAction("휴지통으로 이동")
         delete.triggered.connect(self._move_selected_to_trash)
@@ -1878,6 +1928,12 @@ class MainWindow(QMainWindow):
             )
 
     def _open_editor(self, task: Task | None, *, initial_date: date | None = None) -> None:
+        for existing in self._file_dialogs:
+            if isinstance(existing, TaskEditorDialog) and ((existing._task is None and task is None) or (existing._task is not None and task is not None and existing._task.id == task.id)):
+                existing.raise_()
+                existing.activateWindow()
+                return
+        reminders = self._reminder_service.reminders_for_task(task.id) if self._reminder_service and task and task.id else ()
         reminder_rules = (
             self._reminder_service.rules_for_task(task.id)
             if self._reminder_service is not None and task is not None and task.id is not None
@@ -1887,38 +1943,105 @@ class MainWindow(QMainWindow):
             timezone=self._settings.timezone,
             task=task,
             reminder_rules=reminder_rules,
+            reminders=reminders,
+            deliveries=self._reminder_service.task_deliveries(task.id) if self._reminder_service and task and task.id else (),
+            on_save=lambda editor: self._save_editor(editor, task, reminders),
             initial_date=initial_date,
             parent=self,
         )
         editor.setStyleSheet(LIGHT_STYLESHEET)
-        if editor.exec() != TaskEditorDialog.DialogCode.Accepted:
-            return
-        try:
+        self._keep_file_dialog(editor)
+
+    def _save_editor(self, editor: TaskEditorDialog, task: Task | None, reminders: tuple[Reminder, ...]) -> None:
+        if self._task_save_service:
+            saved = self._task_save_service.save(editor.draft(), task_id=task.id if task else None,
+                edits=editor.reminder_edits(), expected_task=task, expected_rules=reminders, now=self._view_clock())
+        else:
             saved = (
                 self._task_service.create(editor.draft())
                 if task is None or task.id is None
                 else self._task_service.update(task.id, editor.draft())
             )
-        except (TaskValidationError, ValueError) as error:
-            self._show_error("입력 내용을 확인하세요.", error)
-            return
-        except Exception as error:
-            self._show_error("업무를 저장하지 못했습니다.", error)
-            return
+            if self._reminder_service and saved.id:
+                self._reminder_service.replace_rules(saved.id, editor.draft().reminder_rules, now=self._view_clock())
         self._selected_task_id = saved.id
         self._selected_occurrence_start = None
-        if self._reminder_service is not None and saved.id is not None:
-            try:
-                self._reminder_service.replace_rules(
-                    saved.id,
-                    editor.draft().reminder_rules,
-                    now=datetime.now(UTC),
-                )
-            except Exception as error:
-                self._show_error("알림 규칙을 저장하지 못했습니다.", error)
-                return
         self._refresh_tasks()
         self.statusBar().showMessage("업무를 저장했습니다.", 2500)
+
+    def _open_reminder_settings(self, task: Task) -> None:
+        if not self._reminder_service or not task.id:
+            return
+        for dialog in self._file_dialogs:
+            if isinstance(dialog, ReminderSettingsDialog) and dialog._task.id == task.id:
+                dialog.raise_()
+                return
+        task = self._task_service.get(task.id)
+        assert task.id is not None
+        task_id = task.id
+        reminder_service = self._reminder_service
+        rules = self._reminder_service.reminders_for_task(task.id)
+        edits = tuple(ReminderEdit(ReminderRuleInput(r.relation, r.offset_minutes, r.absolute_at, r.enabled), r.id) for r in rules)
+        def save(edits: tuple[ReminderEdit, ...]) -> None:
+            draft = TaskDraft(title=task.title, description=task.description, priority=task.priority, status=task.status,
+                is_pinned=task.is_pinned, all_day=task.all_day, starts_at=task.starts_at, ends_at=task.ends_at,
+                timezone=task.timezone, recurrence_rule=task.recurrence_rule, reminder_rules=tuple(e.rule for e in edits))
+            if self._task_save_service:
+                self._task_save_service.save(draft, task_id=task.id, edits=edits, expected_task=task, expected_rules=rules, now=self._view_clock())
+            else:
+                reminder_service.replace_rules(task_id, draft.reminder_rules, now=self._view_clock())
+            self._refresh_tasks(preserve_state=True)
+        self._keep_file_dialog(ReminderSettingsDialog(task, edits, save=save, deliveries=reminder_service.task_deliveries(task_id), parent=self))
+
+    def _request_reminder_preview(self) -> None:
+        if not self._preview_controller or self._shutdown_done:
+            return
+        now = self._view_clock()
+        if self._calendar_active:
+            start, end = self._calendar_page.visible_date_range
+            self._preview_controller.request(start, end - timedelta(days=1), self._settings.timezone, now)
+            if self._day_preview_controller:
+                day = self._calendar_page.selected_date
+                self._day_preview_controller.request(day, day, self._settings.timezone, now)
+        elif self._current_view is TaskView.TODAY and not self._file_search_active:
+            today = now.astimezone(ZoneInfo(self._settings.timezone)).date()
+            self._preview_controller.request(today, today, self._settings.timezone, now)
+
+    def _apply_reminder_preview(self, result: ReminderPreviewResult) -> None:
+        if self._shutdown_done:
+            return
+        self._preview_result = result
+        if self._calendar_active:
+            self._calendar_page.set_reminder_preview(result)
+        else:
+            today = self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
+            self._today_reminders.set_result(ReminderPreviewResult(result.for_date(today, self._settings.timezone), result.complete))
+
+    def _open_preview_record(self, item: ReminderPreviewItem) -> None:
+        self._show_task_records(item.task, occurrence_start=item.occurrence_start if item.task.recurrence_rule else None)
+
+    def _select_preview_detail(self, item: ReminderPreviewItem) -> None:
+        self._selected_task_id = item.task.id
+        self._selected_occurrence_start = item.occurrence_start if item.task.recurrence_rule else None
+        self._update_detail(item.task)
+        self._detail_schedule.setText(self._detail_schedule.text() + "\n선택 알림: " + format_datetime(item.effective_at, self._settings.timezone) + " · " + item.status)
+        self._apply_responsive_layout()
+
+    def _apply_day_reminder_preview(self, date_range: tuple[date, date], result: ReminderPreviewResult) -> None:
+        if not self._shutdown_done and self._calendar_active and date_range[0] == self._calendar_page.selected_date:
+            self._calendar_page.set_day_reminder_preview(date_range[0], result)
+
+    def _reload_day_reminder_preview(self) -> None:
+        if self._day_preview_controller:
+            self._preview_limit = min(100000, self._preview_limit * 2)
+            day = self._calendar_page.selected_date
+            self._day_preview_controller.request(day, day, self._settings.timezone, self._view_clock(), limit=self._preview_limit, seconds=5.0)
+
+    def _reload_today_reminder_preview(self) -> None:
+        if self._preview_controller:
+            self._preview_limit = min(100000, self._preview_limit * 2)
+            day = self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
+            self._preview_controller.request(day, day, self._settings.timezone, self._view_clock(), limit=self._preview_limit, seconds=5.0)
 
     def _open_calendar_new(self, selected_date: date) -> None:
         self._open_editor(None, initial_date=selected_date)
@@ -1967,6 +2090,8 @@ class MainWindow(QMainWindow):
         self._apply_responsive_layout()
 
     def _update_detail(self, task: Task | None) -> None:
+        self._detail_reminders_button.setVisible(self._reminder_service is not None and task is not None and task.deleted_at is None)
+        self._detail_reminders_button.setEnabled(task is not None and task.deleted_at is None)
         self._matched_file_button.setVisible(task is not None and task.matched_attachment_id is not None)
         self._matched_file_button.setProperty("attachmentId", task.matched_attachment_id if task else None)
         self._matched_file_button.setToolTip(task.matched_attachment_name if task else "")
@@ -2016,7 +2141,7 @@ class MainWindow(QMainWindow):
         if deleted and task.deleted_at is not None:
             deleted_local = task.deleted_at.astimezone(ZoneInfo(self._settings.timezone))
             self._detail_schedule.setText(
-                f"{self._detail_schedule.text()}\n삭제: {deleted_local:%Y.%m.%d %H:%M}"
+                f"{self._detail_schedule.text()}\n삭제: {format_datetime(deleted_local, self._settings.timezone)}"
             )
         if task.has_attachments:
             self._detail_schedule.setText(f"{self._detail_schedule.text()}\n첨부파일 있음")
@@ -2033,9 +2158,8 @@ class MainWindow(QMainWindow):
                 logger.exception("업무 알림 규칙을 읽지 못했습니다.")
             else:
                 if reminder_rules:
-                    reminder_text = " · ".join(
-                        self._format_reminder_rule(rule) for rule in reminder_rules
-                    )
+                    edits = tuple(ReminderEdit(rule, r.id) for rule, r in zip(reminder_rules, self._reminder_service.reminders_for_task(task.id), strict=True))
+                    reminder_text = reminder_summary(edits, task, self._view_clock(), self._reminder_service.task_deliveries(task.id))
                     self._detail_schedule.setText(
                         f"{self._detail_schedule.text()}\n알림: {reminder_text}"
                     )
@@ -2150,6 +2274,8 @@ class MainWindow(QMainWindow):
             self._refresh_snoozed_indicators()
             if alerts:
                 self._present_reminder_alerts(alerts)
+                self._request_reminder_preview()
+            self._synchronize_reminder_dialog()
             # Clear only after presentation succeeds. A failed display or poll
             # must retry the persisted FIRED deliveries on the next timer tick.
             self._reminder_recovery_pending = False
@@ -2159,6 +2285,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("알림 확인 중 문제가 발생했습니다.", 4000)
 
     def _present_reminder_alerts(self, alerts: tuple[ReminderAlert, ...]) -> None:
+        if self._reminder_service:
+            alerts = tuple(a for a in alerts if a.delivery.id is not None and self._reminder_service.alert_is_active(a.delivery.id))
+        if not alerts:
+            return
         self._show_system_reminder(alerts)
         if self._reminder_dialog is not None:
             self._reminder_dialog.add_alerts(alerts)
@@ -2235,9 +2365,67 @@ class MainWindow(QMainWindow):
             8_000,
         )
 
-    def _handle_reminder_action(self, delivery_id: int, action: str) -> None:
+    def _confirm_reminder_completion(self, alert: ReminderAlert) -> None:
+        delivery_id = alert.delivery.id
+        assert delivery_id is not None
+        for dialog in self._file_dialogs:
+            if (isinstance(dialog, QMessageBox) and dialog.isVisible()
+                    and dialog.property("reminderCompletionId") == delivery_id):
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+        occurrence_only = bool(alert.task.recurrence_rule and alert.occurrence_start)
+        title = "이번 회차 완료" if occurrence_only else "업무 전체 완료" if alert.task.recurrence_rule else "업무 완료"
+        scope = (alert.task.recurrence_rule, alert.occurrence_start)
+        explanation = (
+            "이번 반복 회차를 완료하고 이 회차의 남은 알림·재알림을 중단합니다.\n다음 반복 회차의 알림은 유지됩니다."
+            if occurrence_only else
+            "업무 자체를 완료하고 이 업무의 남은 알림·재알림을 모두 중단합니다."
+        )
+        if alert.task.recurrence_rule and not occurrence_only:
+            explanation += "\n날짜 지정 알림은 특정 회차에 연결되어 있지 않아 이후 반복 알림도 모두 멈춥니다."
+        box = QMessageBox(
+            QMessageBox.Icon.Question, title, f"{alert.task.title}\n\n{explanation}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            self._reminder_dialog or self,
+        )
+        box.setProperty("reminderCompletionId", delivery_id)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setInformativeText("다음 알림을 계속 받으려면 취소 후 '이번 알림 확인'을 눌러 주세요.")
+        box.button(QMessageBox.StandardButton.Yes).setText(title)
+        box.button(QMessageBox.StandardButton.No).setText("취소")
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setEscapeButton(QMessageBox.StandardButton.No)
+        popup = self._reminder_dialog
+        if popup is not None:
+            popup.finished.connect(box.reject)
+            box.finished.connect(lambda _result: popup.finished.disconnect(box.reject))
+        box.finished.connect(
+            lambda result: self._handle_reminder_action(delivery_id, "complete", confirmed_scope=scope)
+            if result == QMessageBox.StandardButton.Yes else None
+        )
+        self._keep_file_dialog(box, always_on_top=True)
+        box.raise_()
+        box.activateWindow()
+
+    def _handle_reminder_action(
+        self, delivery_id: int, action: str, *,
+        confirmed_scope: tuple[str | None, datetime | None] | None = None,
+    ) -> None:
         if self._reminder_service is None:
             return
+        alert = self._reminder_service.alert_for_delivery(delivery_id)
+        if alert is None:
+            self._synchronize_reminder_dialog()
+            self.statusBar().showMessage("이미 처리되거나 변경된 알림입니다. 최신 상태를 반영했습니다.", 5000)
+            return
+        if action == "complete":
+            if confirmed_scope is None:
+                self._confirm_reminder_completion(alert)
+                return
+            if confirmed_scope != (alert.task.recurrence_rule, alert.occurrence_start):
+                self.statusBar().showMessage("업무의 반복 범위가 변경되었습니다. 확인 후 다시 완료해 주세요.", 5000)
+                return
         snoozed_until: datetime | None = None
         action_name = action
         try:
@@ -2260,13 +2448,14 @@ class MainWindow(QMainWindow):
             self._reminder_dialog.remove_delivery(delivery_id)
         self._refresh_tasks()
         messages = {
-            "complete": "업무를 완료했습니다.",
-            "defer": "업무를 대기로 전환했습니다.",
-            "acknowledge": "알림을 확인했습니다.",
+            "complete": "이번 반복 회차를 완료했습니다. 다음 회차의 알림은 유지됩니다."
+                if alert.task.recurrence_rule and alert.occurrence_start else "업무를 완료하고 남은 알림을 중단했습니다.",
+            "defer": "업무를 대기로 전환했습니다. 다음 예약 알림은 유지됩니다.",
+            "acknowledge": "이번 알림만 확인했습니다. 업무 상태와 다른 알림은 유지됩니다.",
         }
         if action_name == "snooze" and snoozed_until is not None:
             local_due = snoozed_until.astimezone(ZoneInfo(self._settings.timezone))
-            message = f"다시 알림이 {local_due:%m월 %d일 %H:%M}로 설정되었습니다."
+            message = f"다시 알림이 {format_datetime(local_due, self._settings.timezone)}로 설정되었습니다."
             self.statusBar().showMessage(message, 10_000)
             if self._tray_icon is not None and self._tray_icon.isVisible():
                 self._tray_icon.showMessage(
@@ -2280,6 +2469,28 @@ class MainWindow(QMainWindow):
 
     def _clear_reminder_dialog(self) -> None:
         self._reminder_dialog = None
+
+    def _synchronize_reminder_dialog(self) -> None:
+        if self._reminder_dialog and self._reminder_service:
+            for delivery_id in tuple(self._reminder_dialog._alerts):
+                if not self._reminder_service.alert_is_active(delivery_id):
+                    self._reminder_dialog.remove_delivery(delivery_id)
+        if self._reminder_service:
+            histories: dict[int, tuple[ReminderDelivery, ...]] = {}
+            for dialog in tuple(self._file_dialogs):
+                if not isinstance(dialog, (TaskEditorDialog, ReminderSettingsDialog)):
+                    continue
+                task = dialog._task
+                if task is None or task.id is None:
+                    continue
+                try:
+                    if task.id not in histories:
+                        histories[task.id] = self._reminder_service.task_deliveries(task.id)
+                    # Only display metadata changes. Never replace the unsaved
+                    # task/rule draft after a popup acknowledges or snoozes it.
+                    dialog.update_delivery_states(histories[task.id])
+                except Exception:
+                    logger.exception("열린 알림 설정의 발생 상태를 갱신하지 못했습니다.")
 
     def _setup_desktop_integration(self) -> None:
         application = QApplication.instance()
@@ -2391,6 +2602,11 @@ class MainWindow(QMainWindow):
         self._automatic_backup_timer.stop()
         self._view_timer.stop()
         self._hourly_controller.shutdown()
+        if self._preview_controller:
+            self._preview_controller.shutdown()
+        if self._day_preview_controller:
+            self._day_preview_controller.shutdown()
+        self._today_reminders.shutdown()
         self._reminder_timer.stop()
         if self._settings_dialog is not None:
             self._settings_dialog.close()
@@ -2425,15 +2641,14 @@ class MainWindow(QMainWindow):
         if self._on_shutdown is not None:
             self._on_shutdown()
 
-    @staticmethod
-    def _format_reminder_rule(rule: ReminderRuleInput) -> str:
+    def _format_reminder_rule(self, rule: ReminderRuleInput) -> str:
         relation = {
             ReminderRelation.START: "시작",
             ReminderRelation.END: "종료",
             ReminderRelation.ABSOLUTE: "지정",
         }[rule.relation]
         if rule.absolute_at is not None:
-            return f"{relation} {rule.absolute_at:%Y-%m-%d %H:%M}"
+            return f"{relation} {format_datetime(rule.absolute_at, self._settings.timezone)}"
         offset = rule.offset_minutes or 0
         if offset == 0:
             timing = "시각"
@@ -2482,6 +2697,7 @@ class MainWindow(QMainWindow):
             and self._selected_task_id is not None
         )
         self._calendar_page.set_compact(compact_navigation)
+        self._today_reminders.set_compact(self.height() < 650)
 
         if compact_navigation:
             self._sidebar.setFixedWidth(88)

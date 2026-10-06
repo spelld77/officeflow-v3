@@ -77,6 +77,13 @@ def test_reminder_dialog_stays_on_top_and_emits_custom_snooze(qtbot: QtBot) -> N
     assert dialog.alert_list.count() == 1
     assert "놓친 알림" in dialog.caption.text()
     assert dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+    assert dialog.acknowledge_button.text() == "이번 알림 확인"
+    assert dialog.acknowledge_button.objectName() == "primaryButton"
+    assert dialog.acknowledge_button.isDefault()
+    assert dialog.complete_button.text() == "업무 완료…"
+    assert not dialog.complete_button.autoDefault()
+    assert dialog.defer_button.text() == "업무 대기로"
+    assert "남은 알림" in dialog.complete_button.toolTip()
     assert dialog.snooze_minutes.value() == 10
     dialog.snooze_minutes.setValue(45)
     with qtbot.waitSignal(dialog.snoozeRequested) as blocker:
@@ -84,5 +91,11 @@ def test_reminder_dialog_stays_on_top_and_emits_custom_snooze(qtbot: QtBot) -> N
 
     assert blocker.args == [11, 45]
 
+    dialog.alert_list.setFocus()
+    with qtbot.waitSignal(dialog.actionRequested) as blocker:
+        qtbot.keyClick(dialog, Qt.Key.Key_Return)
+    assert blocker.args == [11, "acknowledge"]
+
     dialog.close()
     assert dialog.isVisible()
+    dialog.dismiss_for_shutdown()

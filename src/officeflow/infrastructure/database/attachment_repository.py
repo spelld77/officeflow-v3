@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from officeflow.domain.attachment import Attachment
+from officeflow.domain.attachment import Attachment, AttachmentMove
 from officeflow.infrastructure.database.models import AttachmentRecord, TaskRecord
 from officeflow.infrastructure.database.search import attachment_match_summaries
 from officeflow.infrastructure.database.session import SessionFactory
@@ -21,7 +21,7 @@ class SqlAlchemyAttachmentRepository:
                 AttachmentRecord.task_id == task_id,
                 AttachmentRecord.detached_at.is_(None),
             )
-            .order_by(AttachmentRecord.created_at.desc(), AttachmentRecord.id.desc())
+            .order_by(AttachmentRecord.sort_order, AttachmentRecord.created_at.desc(), AttachmentRecord.id.desc())
         )
         with self._sessions.transaction() as session:
             return tuple(self._to_domain(record) for record in session.scalars(statement).all())
@@ -58,6 +58,7 @@ class SqlAlchemyAttachmentRepository:
 
     def add_attachment(self, attachment: Attachment) -> Attachment:
         with self._sessions.transaction() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             task = session.get(TaskRecord, attachment.task_id)
             if task is None or task.deleted_at is not None:
                 raise LookupError(f"업무 {attachment.task_id}을(를) 찾을 수 없습니다.")
@@ -71,11 +72,41 @@ class SqlAlchemyAttachmentRepository:
                 created_at=attachment.created_at,
                 missing_at=attachment.missing_at,
                 detached_at=attachment.detached_at,
+                sort_order=(session.scalar(select(func.max(AttachmentRecord.sort_order)).where(
+                    AttachmentRecord.task_id == attachment.task_id
+                )) or 0) + 10,
             )
             session.add(record)
             session.flush()
             attachment_id = record.id
         return self._get_required(attachment_id)
+
+    def move_attachment(self, task_id: int, attachment_id: int, movement: AttachmentMove) -> tuple[Attachment, ...]:
+        with self._sessions.transaction() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            task = session.get(TaskRecord, task_id)
+            if task is None or task.deleted_at is not None:
+                raise LookupError("휴지통 또는 없는 업무의 첨부 순서는 변경할 수 없습니다.")
+            records = list(session.scalars(select(AttachmentRecord).where(
+                AttachmentRecord.task_id == task_id, AttachmentRecord.detached_at.is_(None)
+            ).order_by(AttachmentRecord.sort_order, AttachmentRecord.created_at.desc(), AttachmentRecord.id.desc())))
+            row = next((i for i, item in enumerate(records) if item.id == attachment_id), None)
+            if row is None:
+                raise LookupError("이 업무에 연결된 첨부파일을 찾을 수 없습니다.")
+            slots = [item.sort_order for item in records]
+            if any(slot <= 0 for slot in slots) or len(set(slots)) != len(slots):
+                raise ValueError("첨부 순서 정보가 올바르지 않습니다. 데이터 상태를 확인하세요.")
+            target = {
+                AttachmentMove.UP: max(0, row - 1),
+                AttachmentMove.DOWN: min(len(records) - 1, row + 1),
+                AttachmentMove.FIRST: 0,
+                AttachmentMove.LAST: len(records) - 1,
+            }[movement]
+            records.insert(target, records.pop(row))
+            for item, slot in zip(records, slots, strict=True):
+                item.sort_order = slot
+            session.flush()
+            return tuple(self._to_domain(item) for item in records)
 
     def set_missing_at(
         self,
@@ -135,4 +166,5 @@ class SqlAlchemyAttachmentRepository:
             created_at=record.created_at,
             missing_at=record.missing_at,
             detached_at=record.detached_at,
+            sort_order=record.sort_order,
         )

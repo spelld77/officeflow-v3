@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
 from typing import cast
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QDate, QEvent, QObject, Qt, QTime
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,9 +15,13 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QTimeEdit,
@@ -24,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.task_saving import ReminderEdit
 from officeflow.application.tasks import TaskDraft
 from officeflow.domain.enums import ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.recurrence import (
@@ -31,8 +37,10 @@ from officeflow.domain.recurrence import (
     RecurrenceSpec,
     parse_simple_recurrence,
 )
-from officeflow.domain.reminder import ReminderRuleInput
+from officeflow.domain.reminder import Reminder, ReminderDelivery, ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
+from officeflow.presentation.dates import date_with_weekday
+from officeflow.presentation.reminder_settings import ReminderSettingsDialog, reminder_summary
 
 
 class TaskEditorDialog(QDialog):
@@ -42,6 +50,9 @@ class TaskEditorDialog(QDialog):
         timezone: str,
         task: Task | None = None,
         reminder_rules: tuple[ReminderRuleInput, ...] = (),
+        reminders: tuple[Reminder, ...] = (),
+        deliveries: tuple[ReminderDelivery, ...] = (),
+        on_save: Callable[[TaskEditorDialog], None] | None = None,
         initial_date: date | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -49,17 +60,29 @@ class TaskEditorDialog(QDialog):
         self._timezone = timezone
         self._task = task
         self._draft: TaskDraft | None = None
+        self._on_save = on_save
+        self._deliveries = deliveries
+        self._reminder_edits: tuple[ReminderEdit, ...] = ()
+        self._reminder_settings: ReminderSettingsDialog | None = None
+        self._date_rows: dict[QWidget, QWidget] = {}
         self._custom_recurrence_rule: str | None = None
-        self._custom_start_reminder: ReminderRuleInput | None = None
-        self._custom_end_reminder: ReminderRuleInput | None = None
-        self._preserved_reminders: tuple[ReminderRuleInput, ...] = ()
 
         self.setWindowTitle("업무 수정" if task else "새 업무")
-        self.setModal(True)
+        self.setModal(False)
         self.resize(520, 600)
         self.setMinimumSize(460, 520)
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 12)
+        scroll = QScrollArea()
+        scroll.setObjectName("taskEditorScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content.setObjectName("taskEditorBody")
+        root = QVBoxLayout(content)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
         root.setContentsMargins(22, 20, 22, 18)
         root.setSpacing(14)
 
@@ -125,16 +148,24 @@ class TaskEditorDialog(QDialog):
         )
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.schedule_form.addRow("시작일", self.start_date_edit)
+        self._date_rows[self.start_date_edit] = date_with_weekday(self.start_date_edit)
+        self.schedule_form.addRow("시작일", self._date_rows[self.start_date_edit])
 
         self.start_time_edit = QTimeEdit(QTime(default_start.hour, default_start.minute))
         self.start_time_edit.setDisplayFormat("HH:mm")
         self.schedule_form.addRow("시작 시각", self.start_time_edit)
 
-        self.start_reminder_combo = QComboBox()
-        self.start_reminder_combo.setObjectName("taskStartReminderCombo")
-        self._add_reminder_options(self.start_reminder_combo, include_all_day_suggestion=True)
-        self.schedule_form.addRow("시작 알림", self.start_reminder_combo)
+        self.reminder_summary = QLabel()
+        self.reminder_summary.setWordWrap(True)
+        self.reminder_settings_button = QPushButton("설정…")
+        self.reminder_settings_button.setObjectName("taskReminderSettings")
+        reminder_row = QWidget()
+        reminder_layout = QHBoxLayout(reminder_row)
+        reminder_layout.setContentsMargins(0, 0, 0, 0)
+        reminder_layout.addWidget(self.reminder_summary, 1)
+        reminder_layout.addWidget(self.reminder_settings_button)
+        self.schedule_form.addRow("알림", reminder_row)
+        self.reminder_settings_button.clicked.connect(self._open_reminder_settings)
 
         self.advanced_schedule_check = QCheckBox("종료·반복 등 추가 설정 보기")
         self.advanced_schedule_check.setObjectName("advancedScheduleCheck")
@@ -147,16 +178,13 @@ class TaskEditorDialog(QDialog):
         self.end_date_edit = QDateEdit(QDate(default_end.year, default_end.month, default_end.day))
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.schedule_form.addRow("종료일", self.end_date_edit)
+        self._date_rows[self.end_date_edit] = date_with_weekday(self.end_date_edit)
+        self.schedule_form.addRow("종료일", self._date_rows[self.end_date_edit])
 
         self.end_time_edit = QTimeEdit(QTime(default_end.hour, default_end.minute))
         self.end_time_edit.setDisplayFormat("HH:mm")
         self.schedule_form.addRow("종료 시각", self.end_time_edit)
 
-        self.end_reminder_combo = QComboBox()
-        self.end_reminder_combo.setObjectName("taskEndReminderCombo")
-        self._add_reminder_options(self.end_reminder_combo)
-        self.schedule_form.addRow("종료 알림", self.end_reminder_combo)
 
         self.repeat_combo = QComboBox()
         self.repeat_combo.setObjectName("taskRepeatCombo")
@@ -184,7 +212,8 @@ class TaskEditorDialog(QDialog):
         self.repeat_until_date.setObjectName("taskRepeatUntilDate")
         self.repeat_until_date.setCalendarPopup(True)
         self.repeat_until_date.setDisplayFormat("yyyy-MM-dd")
-        self.schedule_form.addRow("반복 종료", self.repeat_until_date)
+        self._date_rows[self.repeat_until_date] = date_with_weekday(self.repeat_until_date)
+        self.schedule_form.addRow("반복 종료", self._date_rows[self.repeat_until_date])
 
         self._schedule_value_edits = (
             self.start_date_edit,
@@ -202,7 +231,7 @@ class TaskEditorDialog(QDialog):
         self.error_label.setStyleSheet("color: #C62828; font-weight: 600;")
         self.error_label.setWordWrap(True)
         self.error_label.hide()
-        root.addWidget(self.error_label)
+        outer.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -214,7 +243,7 @@ class TaskEditorDialog(QDialog):
         self.cancel_button.setText("취소")
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        outer.addWidget(buttons)
 
         self.schedule_combo.currentIndexChanged.connect(self._update_schedule_visibility)
         self.all_day_check.toggled.connect(self._update_schedule_visibility)
@@ -226,13 +255,9 @@ class TaskEditorDialog(QDialog):
 
         if task is not None:
             self._populate(task)
-            self._populate_reminders(reminder_rules)
         else:
             self.schedule_combo.setCurrentIndex(1)
             self.all_day_check.setChecked(False)
-            self.start_reminder_combo.setCurrentIndex(
-                self.start_reminder_combo.findData(0)
-            )
             if initial_date is not None:
                 selected = QDate(initial_date.year, initial_date.month, initial_date.day)
                 self.start_date_edit.setDate(selected)
@@ -243,6 +268,24 @@ class TaskEditorDialog(QDialog):
                 )
         self._update_schedule_visibility()
         self._update_recurrence_visibility()
+        if reminders:
+            self._reminder_edits = tuple(ReminderEdit(ReminderRuleInput(r.relation, r.offset_minutes, r.absolute_at, r.enabled), r.id) for r in reminders)
+        elif task:
+            self._reminder_edits = tuple(ReminderEdit(r) for r in reminder_rules)
+        else:
+            self._reminder_edits = (ReminderEdit(ReminderRuleInput(ReminderRelation.START, offset_minutes=0)),)
+        self._refresh_reminder_summary()
+        for edit in self._schedule_value_edits:
+            if isinstance(edit, QDateEdit):
+                edit.dateChanged.connect(self._refresh_reminder_summary)
+            elif isinstance(edit, QTimeEdit):
+                edit.timeChanged.connect(self._refresh_reminder_summary)
+        self.schedule_combo.currentIndexChanged.connect(self._refresh_reminder_summary)
+        self.status_combo.currentIndexChanged.connect(self._refresh_reminder_summary)
+        self.repeat_combo.currentIndexChanged.connect(self._refresh_reminder_summary)
+        self.repeat_interval.valueChanged.connect(self._refresh_reminder_summary)
+        for check in (self.all_day_check, self.end_enabled_check, self.repeat_until_check):
+            check.toggled.connect(self._refresh_reminder_summary)
         self._configure_tab_order()
         self.title_edit.setFocus()
 
@@ -250,6 +293,65 @@ class TaskEditorDialog(QDialog):
         if self._draft is None:
             raise RuntimeError("대화상자가 아직 저장되지 않았습니다.")
         return self._draft
+
+    def showEvent(self, event: QShowEvent) -> None:
+        for edit in (*self._schedule_value_edits, self.title_edit, self.priority_combo, self.status_combo, self.schedule_combo, self.repeat_combo, self.repeat_interval):
+            edit.ensurePolished()
+            edit.setMinimumHeight(edit.sizeHint().height())
+        super().showEvent(event)
+
+    def reminder_edits(self) -> tuple[ReminderEdit, ...]:
+        return self._reminder_edits
+
+    def update_delivery_states(self, deliveries: tuple[ReminderDelivery, ...]) -> None:
+        if deliveries == self._deliveries:
+            return
+        self._deliveries = deliveries
+        if self._reminder_settings:
+            self._reminder_settings.update_delivery_states(deliveries)
+        self._refresh_reminder_summary()
+
+    def _preview_task(self) -> Task:
+        draft = self._build_draft()
+        return Task.create(title=draft.title or "새 업무", status=draft.status, starts_at=draft.starts_at,
+                           ends_at=draft.ends_at, all_day=draft.all_day, timezone=draft.timezone,
+                           recurrence_rule=draft.recurrence_rule)
+
+    def _refresh_reminder_summary(self) -> None:
+        try:
+            task = self._preview_task()
+            self.reminder_summary.setText(reminder_summary(self._reminder_edits, task, datetime.now(UTC), self._deliveries))
+            if self._reminder_settings:
+                self._reminder_settings.update_basis(task)
+        except ValueError:
+            self.reminder_summary.setText(f"설정 {len(self._reminder_edits)}개 · 일정 확인 필요")
+
+    def _open_reminder_settings(self) -> None:
+        if self._reminder_settings:
+            self._reminder_settings.raise_()
+            return
+        try:
+            dialog = ReminderSettingsDialog(self._preview_task(), self._reminder_edits, deliveries=self._deliveries, parent=self)
+        except ValueError as error:
+            self.error_label.setText(str(error))
+            self.error_label.show()
+            return
+        self._reminder_settings = dialog
+        self.save_button.setEnabled(False)
+        def finished(result: int) -> None:
+            if result == QDialog.DialogCode.Accepted:
+                self._reminder_edits = dialog.edits()
+            self._reminder_settings = None
+            self.save_button.setEnabled(True)
+            self._refresh_reminder_summary()
+            dialog.deleteLater()
+        dialog.finished.connect(finished)
+        dialog.show()
+
+    def done(self, result: int) -> None:
+        if self._reminder_settings:
+            self._reminder_settings.reject()
+        super().done(result)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched in self._schedule_value_edits and event.type() is QEvent.Type.KeyPress:
@@ -275,7 +377,14 @@ class TaskEditorDialog(QDialog):
                 timezone=self._draft.timezone,
                 recurrence_rule=self._draft.recurrence_rule,
             )
-        except (TaskValidationError, ValueError) as error:
+            for edit in self._reminder_edits:
+                if edit.rule.relation is ReminderRelation.START and self._draft.starts_at is None:
+                    raise ValueError("시작 기준 알림을 삭제하거나 날짜 직접 지정으로 변경하세요.")
+                if edit.rule.relation is ReminderRelation.END and self._draft.ends_at is None:
+                    raise ValueError("종료 기준 알림을 삭제하거나 날짜 직접 지정으로 변경하세요.")
+            if self._on_save:
+                self._on_save(self)
+        except Exception as error:
             self.error_label.setText(str(error))
             self.error_label.show()
             return
@@ -339,11 +448,7 @@ class TaskEditorDialog(QDialog):
                 interval=self.repeat_interval.value(),
                 until=until,
             ).to_rrule(self._timezone)
-        reminder_rules = (
-            self._build_reminder_rules(include_end=ends_at is not None)
-            if schedule_type != "none"
-            else ()
-        )
+        reminder_rules = tuple(edit.rule for edit in self._reminder_edits)
         return TaskDraft(
             title=self.title_edit.text(),
             description=self.description_edit.toPlainText(),
@@ -422,7 +527,6 @@ class TaskEditorDialog(QDialog):
         self._set_row_visible(self.all_day_check, has_schedule)
         self._set_row_visible(self.start_date_edit, has_schedule)
         self._set_row_visible(self.start_time_edit, is_timed)
-        self._set_row_visible(self.start_reminder_combo, has_schedule)
         self._set_row_visible(self.advanced_schedule_check, has_schedule)
         self.advanced_schedule_check.setText(
             "종료·반복 등 추가 설정 접기"
@@ -430,12 +534,13 @@ class TaskEditorDialog(QDialog):
             else "종료·반복 등 추가 설정 보기"
         )
         target_height = 720 if advanced else 600
+        if self.screen():
+            target_height = min(target_height, max(self.minimumHeight(), self.screen().availableGeometry().height() - 60))
         if self.height() != target_height:
             self.resize(self.width(), target_height)
         self._set_row_visible(self.end_enabled_check, advanced and is_timed and not is_range)
         self._set_row_visible(self.end_date_edit, advanced and is_range)
         self._set_row_visible(self.end_time_edit, advanced and is_timed and has_end)
-        self._set_row_visible(self.end_reminder_combo, advanced and has_end)
         self._set_row_visible(self.repeat_combo, advanced)
         self._update_recurrence_visibility()
 
@@ -453,9 +558,11 @@ class TaskEditorDialog(QDialog):
         )
 
     def _set_row_visible(self, field: QWidget, visible: bool) -> None:
-        label = self.schedule_form.labelForField(field)
+        row = self._date_rows.get(field, field)
+        label = self.schedule_form.labelForField(row)
         if label is not None:
             label.setVisible(visible)
+        row.setVisible(visible)
         field.setVisible(visible)
 
     def _keep_end_date_valid(self, start_date: QDate) -> None:
@@ -477,12 +584,11 @@ class TaskEditorDialog(QDialog):
             self.all_day_check,
             self.start_date_edit,
             self.start_time_edit,
-            self.start_reminder_combo,
+            self.reminder_settings_button,
             self.advanced_schedule_check,
             self.end_enabled_check,
             self.end_date_edit,
             self.end_time_edit,
-            self.end_reminder_combo,
             self.repeat_combo,
             self.repeat_interval,
             self.repeat_until_check,
@@ -498,76 +604,3 @@ class TaskEditorDialog(QDialog):
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
-
-    @staticmethod
-    def _add_reminder_options(
-        combo: QComboBox,
-        *,
-        include_all_day_suggestion: bool = False,
-    ) -> None:
-        combo.addItem("알림 없음", None)
-        combo.addItem("기준 시각", 0)
-        combo.addItem("5분 전", -5)
-        combo.addItem("10분 전", -10)
-        combo.addItem("30분 전", -30)
-        combo.addItem("1시간 전", -60)
-        combo.addItem("1일 전", -1_440)
-        if include_all_day_suggestion:
-            combo.addItem("당일 오전 9시 (종일 일정)", 540)
-
-    def _populate_reminders(self, rules: tuple[ReminderRuleInput, ...]) -> None:
-        preserved: list[ReminderRuleInput] = []
-        populated: set[ReminderRelation] = set()
-        for rule in rules:
-            if rule.relation not in {ReminderRelation.START, ReminderRelation.END}:
-                preserved.append(rule)
-                continue
-            if rule.relation in populated:
-                preserved.append(rule)
-                continue
-            combo = (
-                self.start_reminder_combo
-                if rule.relation is ReminderRelation.START
-                else self.end_reminder_combo
-            )
-            if rule.relation is ReminderRelation.END:
-                self.advanced_schedule_check.setChecked(True)
-            index = combo.findData(rule.offset_minutes)
-            if index >= 0:
-                combo.setCurrentIndex(index)
-            else:
-                combo.addItem("사용자 정의 알림 유지", "custom")
-                combo.setCurrentIndex(combo.count() - 1)
-                if rule.relation is ReminderRelation.START:
-                    self._custom_start_reminder = rule
-                else:
-                    self._custom_end_reminder = rule
-            populated.add(rule.relation)
-        self._preserved_reminders = tuple(preserved)
-
-    def _build_reminder_rules(
-        self,
-        *,
-        include_end: bool,
-    ) -> tuple[ReminderRuleInput, ...]:
-        rules: list[ReminderRuleInput] = list(self._preserved_reminders)
-        for relation, combo, custom in (
-            (
-                ReminderRelation.START,
-                self.start_reminder_combo,
-                self._custom_start_reminder,
-            ),
-            (
-                ReminderRelation.END,
-                self.end_reminder_combo,
-                self._custom_end_reminder,
-            ),
-        ):
-            if relation is ReminderRelation.END and not include_end:
-                continue
-            value = combo.currentData()
-            if value == "custom" and custom is not None:
-                rules.append(custom)
-            elif isinstance(value, int):
-                rules.append(ReminderRuleInput(relation=relation, offset_minutes=value))
-        return tuple(rules)

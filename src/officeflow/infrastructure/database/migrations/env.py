@@ -31,6 +31,8 @@ def run_migrations_online() -> None:
     )
     with connectable.connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        # sqlite3 legacy mode otherwise leaves DDL outside the version transaction.
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
         context.configure(
             connection=connection, target_metadata=target_metadata, render_as_batch=True
         )

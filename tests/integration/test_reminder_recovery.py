@@ -152,7 +152,7 @@ def test_delivery_claimed_before_poll_failure_is_recoverable_on_restart(
         def fail_schedule_save(*_args, **_kwargs) -> None:
             raise OSError("알림 이력을 저장한 뒤 다음 시각 저장 실패")
 
-        monkeypatch.setattr(repository, "save_reminder_schedule", fail_schedule_save)
+        monkeypatch.setattr(repository, "save_schedule_if_current", fail_schedule_save)
         with pytest.raises(OSError):
             reminders.poll_due(now=now)
         persisted = repository.list_unhandled_reminder_targets(fired_since=now, due_at=now)

@@ -620,7 +620,8 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
     assert delivery.snoozed_until is not None
     assert delivery.snoozed_until == delivery.updated_at + timedelta(minutes=35)
     local_due = delivery.snoozed_until.astimezone(ZoneInfo("Asia/Seoul"))
-    assert f"{local_due:%m월 %d일 %H:%M}" in window.statusBar().currentMessage()
+    from officeflow.presentation.dates import format_datetime
+    assert format_datetime(local_due, "Asia/Seoul") in window.statusBar().currentMessage()
     index = window._task_model.index_for_task(task.id)
     assert index.isValid()
     assert (
@@ -628,7 +629,7 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
         == delivery.snoozed_until
     )
     window._task_list.setCurrentIndex(index)
-    assert f"다시 알림: {local_due:%Y.%m.%d %H:%M}" in window._detail_schedule.text()
+    assert f"다시 알림: {format_datetime(local_due, 'Asia/Seoul')}" in window._detail_schedule.text()
     window._show_calendar()
     assert any(
         "재알림" in window._calendar_page.day_list.item(row).text()
@@ -755,6 +756,11 @@ def test_reminder_actions_immediately_refresh_current_view(qtbot: QtBot) -> None
     assert overdue.total == 1
     assert window._reminder_dialog is not None
     qtbot.mouseClick(window._reminder_dialog.complete_button, Qt.MouseButton.LeftButton)
+
+    assert task_service.get(task.id).status is TaskStatus.ACTIVE
+    box = next(d for d in window._file_dialogs if isinstance(d, QMessageBox))
+    assert box.defaultButton() is box.button(QMessageBox.StandardButton.No)
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Yes), Qt.MouseButton.LeftButton)
 
     assert not window._task_model.index_for_group(TaskGroup.OVERDUE).isValid()
     completed = window._task_model.entry_at(

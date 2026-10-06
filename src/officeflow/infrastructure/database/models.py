@@ -153,6 +153,7 @@ class AttachmentRecord(Base):
         Index("ix_attachments_task_missing", "task_id", "missing_at"),
         Index("ix_attachments_detached_created", "detached_at", "created_at"),
         Index("ix_attachments_created_id", "created_at", "id"),
+        Index("ix_attachments_task_order", "task_id", "sort_order", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -162,6 +163,7 @@ class AttachmentRecord(Base):
     relative_path: Mapped[str] = mapped_column(String(1000))
     size_bytes: Mapped[int] = mapped_column(Integer)
     checksum: Mapped[str | None] = mapped_column(String(64))
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
     missing_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     detached_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

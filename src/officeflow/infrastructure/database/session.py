@@ -33,6 +33,20 @@ class SessionFactory:
         self._factory = sessionmaker(bind=engine, expire_on_commit=False)
 
     @contextmanager
+    def write_unit_of_work(self) -> Iterator[SessionFactory]:
+        if isinstance(self._bind, Connection):
+            yield self
+            return
+        with self._bind.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                yield SessionFactory(connection)
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+    @contextmanager
     def read_snapshot(self) -> Iterator[SessionFactory]:
         if isinstance(self._bind, Connection):
             yield self

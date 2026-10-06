@@ -9,10 +9,15 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - 단계: Phase 8 완료
 - 버전: OfficeFlow 3.0.6
 - 구현 상태: 설치·업그레이드·제거 검증을 마친 Windows 데스크톱 앱
+- 미배포 소스 개선: 첨부 수동 순서, 한 업무의 여러 알림(최대 20개), 오늘/달력 알림 미리보기, 입력칸 내부 요일과 알림 확인·업무 완료 구분
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
 - 데이터 저장소: SQLite
 - 배포 형태: 단일 사용자용 설치 프로그램 또는 Python 3.12 실행 모드
+
+현재 `main`의 미배포 개선은 기존 공개 3.0.6 EXE·설치파일·Python ZIP에 포함되어 있지 않다.
+이 소스로 기존 DB를 실행하면 보호 사본을 만든 뒤 0011 스키마로 업그레이드한다.
+업그레이드된 DB·백업은 이 기능을 포함한 새 소스에서 사용하며, 기존 공개 3.0.6으로 되돌릴 때는 업데이트 전 자료가 필요하다.
 
 ## 제품 원칙
 
@@ -65,6 +70,9 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - [캘린더 기록·첨부 중심 UX 설계](docs/18-calendar-records-design.md)
 - [3.0.6 릴리스 체크리스트](docs/19-release-checklist.md)
 - [3.0.6 릴리스 노트](docs/release-notes-3.0.6.md)
+- [첨부 수동 순서 설계](docs/20-attachment-order-design.md)
+- [한 업무의 여러 알림·요일 표시 설계](docs/21-multiple-reminders-weekday-design.md)
+- [여러 알림·요일 표시 구현·검증 보고서](docs/phase-reports/multiple-reminders-weekday.md)
 - [Phase 8 완료 보고서](docs/phase-reports/phase-8.md)
 
 ## 설치

@@ -17,7 +17,9 @@ from sqlalchemy import (
     select,
     text,
     union_all,
+    update,
 )
+from sqlalchemy.orm import Session
 
 from officeflow.application.tasks import (
     CalendarRepositoryOverview,
@@ -33,6 +35,8 @@ from officeflow.domain.recurrence import recurrence_until_utc
 from officeflow.domain.task import Task
 from officeflow.infrastructure.database.models import (
     AttachmentRecord,
+    ReminderDeliveryRecord,
+    ReminderRecord,
     TaskOccurrenceRecord,
     TaskRecord,
     WorkLogRecord,
@@ -69,7 +73,13 @@ class SqlAlchemyTaskRepository:
             record = session.get(TaskRecord, task.id)
             if record is None or record.deleted_at is not None:
                 raise LookupError(f"업무 {task.id}을(를) 찾을 수 없습니다.")
+            reactivated = record.status not in {"active", "pending"} and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
             self._copy_to_record(task, record)
+            if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELED, TaskStatus.ARCHIVED}:
+                self._close_deliveries(session, task.id, task.updated_at,
+                    status="completed" if task.status is TaskStatus.COMPLETED else "acknowledged")
+            if reactivated:
+                self._reschedule_future_reminders(session, record, task.updated_at)
         return self.get_required(task.id)
 
     def get(self, task_id: int) -> Task | None:
@@ -118,6 +128,7 @@ class SqlAlchemyTaskRepository:
                 raise LookupError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
             record.deleted_at = deleted_at
             record.updated_at = deleted_at
+            self._close_deliveries(session, task_id, deleted_at)
         deleted = self.get_deleted(task_id)
         if deleted is None:
             raise LookupError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
@@ -130,6 +141,7 @@ class SqlAlchemyTaskRepository:
                 raise LookupError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
             record.deleted_at = None
             record.updated_at = restored_at
+            self._reschedule_future_reminders(session, record, restored_at)
         return self.get_required(task_id)
 
     def delete_permanently(self, task_id: int) -> tuple[str, ...]:
@@ -493,12 +505,35 @@ class SqlAlchemyTaskRepository:
             record.status = occurrence.status.value
             record.completed_at = occurrence.completed_at
             record.result_note = occurrence.result_note
+            if occurrence.status in {OccurrenceStatus.COMPLETED, OccurrenceStatus.SKIPPED, OccurrenceStatus.CANCELED}:
+                self._close_deliveries(session, occurrence.task_id, occurrence.completed_at or datetime.now().astimezone(),
+                    occurrence_start=occurrence.occurrence_start, status="completed" if occurrence.status is OccurrenceStatus.COMPLETED else "acknowledged")
             session.flush()
             occurrence_id = record.id
         saved = self.get_occurrence(occurrence.task_id, occurrence.occurrence_start)
         if saved is None:
             raise LookupError(f"반복 발생 건 {occurrence_id}을(를) 찾을 수 없습니다.")
         return saved
+
+    @staticmethod
+    def _close_deliveries(session: Session, task_id: int, now: datetime, *, occurrence_start: datetime | None = None, status: str = "acknowledged") -> None:
+        statement = update(ReminderDeliveryRecord).where(ReminderDeliveryRecord.task_id == task_id,
+            ReminderDeliveryRecord.status.in_(("fired", "snoozed")))
+        if occurrence_start is not None:
+            statement = statement.where(ReminderDeliveryRecord.occurrence_start == occurrence_start)
+        session.execute(statement.values(status=status, acknowledged_at=now, updated_at=now, snoozed_until=None))
+
+    @staticmethod
+    def _reschedule_future_reminders(session: Session, record: TaskRecord, now: datetime) -> None:
+        from officeflow.application.reminders import ReminderService, ReminderTarget
+        from officeflow.domain.enums import ReminderRelation
+        from officeflow.domain.reminder import Reminder
+        task = SqlAlchemyTaskRepository._to_domain(record)
+        for rule in session.scalars(select(ReminderRecord).where(ReminderRecord.task_id == record.id, ReminderRecord.enabled.is_(True))):
+            reminder = Reminder(rule.id, record.id, ReminderRelation(rule.relation), rule.offset_minutes, rule.absolute_at, rule.enabled)
+            candidate = ReminderService._next_candidate(ReminderTarget(reminder, task), after=now.replace(second=0, microsecond=0), inclusive=True)
+            rule.next_occurrence_start, rule.next_fire_at = candidate if candidate else (None, None)
+            rule.schedule_initialized = True
 
     def list_occurrences(
         self,

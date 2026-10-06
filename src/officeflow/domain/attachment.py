@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import StrEnum
 from pathlib import PurePosixPath
 
 
@@ -11,6 +12,13 @@ class AttachmentValidationError(ValueError):
 
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+class AttachmentMove(StrEnum):
+    UP = "up"
+    DOWN = "down"
+    FIRST = "first"
+    LAST = "last"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +33,7 @@ class Attachment:
     created_at: datetime
     missing_at: datetime | None = None
     detached_at: datetime | None = None
+    sort_order: int = 0
 
     @property
     def id_required(self) -> int:
@@ -51,6 +60,8 @@ class Attachment:
             raise AttachmentValidationError("첨부파일 상대 경로가 올바르지 않습니다.")
         if self.size_bytes < 0:
             raise AttachmentValidationError("첨부파일 크기는 0 이상이어야 합니다.")
+        if not isinstance(self.sort_order, int) or isinstance(self.sort_order, bool) or self.sort_order < 0:
+            raise AttachmentValidationError("첨부 순서는 0 이상의 정수여야 합니다.")
         checksum = self.checksum.lower() if self.checksum is not None else None
         if checksum is not None and not _SHA256_PATTERN.fullmatch(checksum):
             raise AttachmentValidationError("첨부파일 체크섬이 올바르지 않습니다.")

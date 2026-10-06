@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from PySide6.QtCore import QDate, Qt
 from pytestqt.qtbot import QtBot
 
+from officeflow.application.task_saving import ReminderEdit
 from officeflow.domain.enums import ReminderRelation
 from officeflow.domain.reminder import ReminderRuleInput
 from officeflow.domain.task import Task
@@ -87,10 +88,9 @@ def test_new_task_defaults_to_timed_schedule_without_end_or_repeat(qtbot: QtBot)
     assert editor.schedule_combo.currentData() == "day"
     assert not editor.all_day_check.isChecked()
     assert editor.start_time_edit.isVisible()
-    assert editor.start_reminder_combo.isVisible()
-    assert editor.start_reminder_combo.currentData() == 0
+    assert editor.reminder_settings_button.isVisible()
+    assert editor.reminder_edits()[0].rule.offset_minutes == 0
     assert editor.end_time_edit.isHidden()
-    assert editor.end_reminder_combo.isHidden()
     assert editor.repeat_combo.isHidden()
 
     editor.title_edit.setText("종료 없는 기본 업무")
@@ -116,16 +116,16 @@ def test_existing_task_without_reminders_keeps_reminders_disabled(qtbot: QtBot) 
     )
     qtbot.addWidget(editor)
 
-    assert editor.start_reminder_combo.currentData() is None
+    assert editor.reminder_edits() == ()
 
 
 def test_default_tab_flow_skips_collapsed_advanced_fields(qtbot: QtBot) -> None:
     editor = TaskEditorDialog(timezone="Asia/Seoul")
     qtbot.addWidget(editor)
     editor.show()
-    editor.start_reminder_combo.setFocus()
+    editor.reminder_settings_button.setFocus()
 
-    qtbot.keyPress(editor.start_reminder_combo, Qt.Key.Key_Tab)
+    qtbot.keyPress(editor.reminder_settings_button, Qt.Key.Key_Tab)
     assert editor.focusWidget() is editor.advanced_schedule_check
 
     qtbot.keyPress(editor.advanced_schedule_check, Qt.Key.Key_Tab)
@@ -136,10 +136,9 @@ def test_editor_builds_start_and_end_reminder_rules(qtbot: QtBot) -> None:
     editor = TaskEditorDialog(timezone="Asia/Seoul", initial_date=date(2026, 9, 14))
     qtbot.addWidget(editor)
     editor.title_edit.setText("알림 업무")
-    editor.start_reminder_combo.setCurrentIndex(editor.start_reminder_combo.findData(-10))
     editor.advanced_schedule_check.setChecked(True)
     editor.end_enabled_check.setChecked(True)
-    editor.end_reminder_combo.setCurrentIndex(editor.end_reminder_combo.findData(-30))
+    editor._reminder_edits = (ReminderEdit(ReminderRuleInput(ReminderRelation.START, offset_minutes=-10)), ReminderEdit(ReminderRuleInput(ReminderRelation.END, offset_minutes=-30)))
 
     editor._validate_and_accept()
 
@@ -169,7 +168,7 @@ def test_existing_advanced_schedule_is_expanded_for_editing(qtbot: QtBot) -> Non
     assert editor.advanced_schedule_check.isChecked()
     assert editor.end_enabled_check.isChecked()
     assert editor.end_time_edit.isVisible()
-    assert editor.end_reminder_combo.isVisible()
+    assert editor.reminder_settings_button.isVisible()
     assert editor.repeat_combo.isVisible()
 
 

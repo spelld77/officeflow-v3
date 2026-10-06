@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from officeflow.application.hourly_notifications import HourlyState
 from officeflow.presentation.app_icon import create_app_icon
+from officeflow.presentation.dates import WEEKDAYS, format_date
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
@@ -25,8 +26,8 @@ def format_next(value: datetime | None, current: datetime) -> str:
     if value.date() == current.date():
         return value.strftime("%H:%M")
     if value.date() == current.date() + timedelta(days=1):
-        return f"내일 {value:%H:%M}"
-    return value.strftime("%m/%d %H:%M")
+        return f"내일({WEEKDAYS[value.weekday()]}) {value:%H:%M}"
+    return f"{format_date(value.date(), short=True)} {value:%H:%M}"
 
 
 class HourlyNotificationDialog(QDialog):

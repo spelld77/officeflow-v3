@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from officeflow.application.reminders import ReminderAlert
 from officeflow.domain.enums import ReminderRelation
+from officeflow.presentation.dates import format_datetime
 
 
 class ReminderDialog(QDialog):
@@ -66,28 +67,34 @@ class ReminderDialog(QDialog):
         root.addWidget(self.detail)
 
         actions = QHBoxLayout()
-        self.complete_button = self._action_button("완료", "complete")
-        self.defer_button = self._action_button("대기", "defer")
+        self.complete_button = self._action_button("업무 완료…", "complete")
+        self.defer_button = self._action_button("업무 대기로", "defer")
+        self.defer_button.setToolTip("업무 상태만 대기로 바꿉니다. 다음 예약 알림은 계속 울립니다.")
         self.snooze_minutes = QSpinBox()
         self.snooze_minutes.setObjectName("snoozeMinutes")
         self.snooze_minutes.setRange(1, 1_440)
         self.snooze_minutes.setValue(10)
         self.snooze_minutes.setSuffix("분")
+        self.snooze_minutes.setMaximumWidth(100)
         self.snooze_minutes.setToolTip("1분에서 24시간 사이로 지정")
         self.snooze_button = QPushButton("다시 알림")
         self.snooze_button.setObjectName("snoozeButton")
+        self.snooze_button.setAutoDefault(False)
+        self.snooze_button.setToolTip("이번 알림만 미룹니다. 다른 예약 알림은 그대로 유지됩니다.")
         self.snooze_button.clicked.connect(self._emit_snooze)
-        self.acknowledge_button = self._action_button("확인", "acknowledge")
-        self.complete_button.setObjectName("primaryButton")
-        for button in (
-            self.complete_button,
-            self.defer_button,
-            self.snooze_minutes,
-            self.snooze_button,
-            self.acknowledge_button,
-        ):
-            actions.addWidget(button)
+        self.acknowledge_button = self._action_button("이번 알림 확인", "acknowledge")
+        self.acknowledge_button.setObjectName("primaryButton")
+        self.acknowledge_button.setDefault(True)
+        self.acknowledge_button.setToolTip("이번 알림만 닫습니다. 업무 상태와 다른 알림은 바뀌지 않습니다.")
+        actions.addWidget(self.acknowledge_button, 1)
+        actions.addWidget(self.snooze_minutes)
+        actions.addWidget(self.snooze_button, 1)
         root.addLayout(actions)
+        task_actions = QHBoxLayout()
+        task_actions.addWidget(self.complete_button)
+        task_actions.addWidget(self.defer_button)
+        task_actions.addStretch()
+        root.addLayout(task_actions)
 
         self.add_alerts(alerts)
         if self.alert_list.count():
@@ -134,19 +141,17 @@ class ReminderDialog(QDialog):
                 ReminderRelation.END: "종료",
                 ReminderRelation.ABSOLUTE: "지정",
             }[alert.reminder.relation]
-            scheduled = alert.delivery.scheduled_at.astimezone(self._timezone).strftime(
-                "%m-%d %H:%M"
-            )
+            scheduled = format_datetime(alert.delivery.snoozed_until or alert.delivery.scheduled_at, self._timezone.key, short=True)
             prefix = "놓친 알림 · " if alert.recovered else ""
             item = QListWidgetItem(f"{prefix}{alert.task.title} · {relation} {scheduled}")
             item.setData(Qt.ItemDataRole.UserRole, delivery_id)
             self.alert_list.addItem(item)
         if recovered:
             self.caption.setText(
-                f"최근 복구 범위 안에서 놓친 알림 {recovered}개입니다. 처리할 때까지 이 창은 유지됩니다."
+                f"놓친 알림 {recovered}개를 복구했습니다. 이번 알림만 확인하면 다음 예약은 유지됩니다."
             )
         elif not self.caption.text():
-            self.caption.setText("예정된 업무 시각입니다. 처리할 때까지 이 창은 유지됩니다.")
+            self.caption.setText("이번 알림만 확인하면 다음 예약은 유지됩니다. 업무 완료와 구분해 주세요.")
         if self.alert_list.currentRow() < 0 and self.alert_list.count():
             self.alert_list.setCurrentRow(0)
 
@@ -164,6 +169,7 @@ class ReminderDialog(QDialog):
 
     def _action_button(self, label: str, action: str) -> QPushButton:
         button = QPushButton(label)
+        button.setAutoDefault(False)
         button.clicked.connect(lambda _checked=False: self._emit_action(action))
         return button
 
@@ -194,8 +200,15 @@ class ReminderDialog(QDialog):
         if alert is None:
             self.detail.clear()
             return
-        schedule = alert.delivery.scheduled_at.astimezone(self._timezone).strftime(
-            "%Y-%m-%d %H:%M"
+        occurrence_only = bool(alert.task.recurrence_rule and alert.occurrence_start)
+        self.complete_button.setText(
+            "이번 회차 완료…" if occurrence_only
+            else "업무 전체 완료…" if alert.task.recurrence_rule else "업무 완료…"
         )
+        self.complete_button.setToolTip(
+            "이번 반복 회차를 완료하고 이 회차의 남은 알림을 중단합니다. 다음 회차는 유지됩니다."
+            if occurrence_only else "업무 자체를 완료하고 이 업무의 남은 알림과 재알림을 모두 중단합니다."
+        )
+        schedule = format_datetime(alert.delivery.scheduled_at, self._timezone.key)
         description = alert.task.description or "설명이 없습니다."
         self.detail.setText(f"예정 알림: {schedule}\n{description}")

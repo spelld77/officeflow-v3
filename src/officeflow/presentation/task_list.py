@@ -560,39 +560,42 @@ class TaskItemDelegate(QStyledItemDelegate):
 
 
 def format_task_schedule(task: Task) -> str:
+    from officeflow.presentation.dates import format_date, format_datetime
     if task.starts_at is None:
         return "일정 없음"
     zone = ZoneInfo(task.timezone)
     start = task.starts_at.astimezone(zone)
     if task.all_day:
         if task.ends_at is None:
-            return start.strftime("%Y.%m.%d · 종일")
+            return format_date(start.date()) + " · 종일"
         inclusive_end = (task.ends_at.astimezone(zone) - timedelta(microseconds=1)).date()
         if inclusive_end == start.date():
-            return start.strftime("%Y.%m.%d · 종일")
-        return f"{start:%Y.%m.%d}부터 {inclusive_end:%Y.%m.%d}까지 · 종일"
+            return format_date(start.date()) + " · 종일"
+        return f"{format_date(start.date())}부터 {format_date(inclusive_end)}까지 · 종일"
     if task.ends_at is None:
-        return start.strftime("%Y.%m.%d %H:%M")
+        return format_datetime(start, task.timezone)
     end = task.ends_at.astimezone(zone)
     if start.date() == end.date():
-        return f"{start:%Y.%m.%d %H:%M}부터 {end:%H:%M}까지"
-    return f"{start:%Y.%m.%d %H:%M}부터 {end:%Y.%m.%d %H:%M}까지"
+        return f"{format_datetime(start, task.timezone)}부터 {end:%H:%M}까지"
+    return f"{format_datetime(start, task.timezone)}부터 {format_datetime(end, task.timezone)}까지"
 
 
 def format_task_schedule_compact(task: Task) -> str:
+    from officeflow.presentation.dates import format_date, format_datetime
     if task.starts_at is None:
         return "일정 없음"
     zone = ZoneInfo(task.timezone)
     start = task.starts_at.astimezone(zone)
     today = datetime.now(zone).date()
     if task.all_day:
-        return "종일" if start.date() == today else start.strftime("%m.%d 종일")
-    return start.strftime("%H:%M" if start.date() == today else "%m.%d %H:%M")
+        return "종일" if start.date() == today else format_date(start.date(), short=True) + " 종일"
+    return start.strftime("%H:%M") if start.date() == today else format_datetime(start, task.timezone, short=True)
 
 
 def format_snoozed_time(value: datetime, timezone: str, *, long: bool = False) -> str:
+    from officeflow.presentation.dates import format_datetime
     local = value.astimezone(ZoneInfo(timezone))
     if long:
-        return local.strftime("%Y.%m.%d %H:%M")
+        return format_datetime(value, timezone)
     today = datetime.now(ZoneInfo(timezone)).date()
-    return local.strftime("%H:%M" if local.date() == today else "%m.%d %H:%M")
+    return local.strftime("%H:%M") if local.date() == today else format_datetime(value, timezone, short=True)

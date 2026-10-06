@@ -55,6 +55,7 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "scripts/diagnose_python_runtime.py",
             "packaging/windows/OfficeFlow-사용자안내.html",
             "src/officeflow/infrastructure/database/migrations/versions/0010_attachment_search.py",
+            "src/officeflow/infrastructure/database/migrations/versions/0011_attachment_sort_order.py",
             "src/officeflow/presentation/attachment_search_page.py",
             "src/officeflow/domain/hourly_notification.py",
             "src/officeflow/application/hourly_notifications.py",
@@ -63,6 +64,12 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "src/officeflow/presentation/hourly_notification_settings.py",
             "src/officeflow/presentation/notification_coordinator.py",
             "src/officeflow/presentation/background.py",
+            "src/officeflow/application/task_saving.py",
+            "src/officeflow/application/reminder_preview.py",
+            "src/officeflow/infrastructure/database/task_saving.py",
+            "src/officeflow/presentation/reminder_settings.py",
+            "src/officeflow/presentation/reminder_preview.py",
+            "src/officeflow/presentation/dates.py",
             "src/officeflow/infrastructure/attachments/coordination.py",
         )
         if any(f"{root_name}/{name}" not in names for name in required):
@@ -119,7 +126,7 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
     with closing(sqlite3.connect(database)) as connection:
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0010_attachment_search"
+            == "0011_attachment_sort_order"
         )
         assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM attachment_search").fetchone()[0] == 0

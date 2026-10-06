@@ -176,6 +176,12 @@ def test_task_reminder_actions_update_data_without_closing_record(
     alert = window._reminder_dialog
     assert alert is not None
     native_click(alert, getattr(alert, f"{action}_button"), qtbot)
+    if action == "complete":
+        assert env.tasks.get(task_id).status is TaskStatus.ACTIVE
+        confirmation = next(d for d in window._file_dialogs if isinstance(d, QMessageBox))
+        assert not confirmation.isModal()
+        assert confirmation.parentWidget() is alert
+        native_click(confirmation, confirmation.button(QMessageBox.StandardButton.Yes), qtbot)
     qtbot.waitUntil(lambda: window._reminder_dialog is None)
     assert record.isVisible()
     if action == "snooze":

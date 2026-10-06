@@ -16,7 +16,7 @@ from officeflow.application.attachments import (
     DuplicateAttachmentError,
 )
 from officeflow.application.tasks import TaskDraft, TaskService
-from officeflow.domain.attachment import Attachment, AttachmentValidationError
+from officeflow.domain.attachment import Attachment, AttachmentMove, AttachmentValidationError
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from tests.unit.test_task_service import InMemoryTaskRepository
 
@@ -29,11 +29,11 @@ class InMemoryAttachmentRepository(AttachmentRepository):
         self.fail_delete = False
 
     def list_attachments(self, task_id: int) -> tuple[Attachment, ...]:
-        return tuple(
+        return tuple(sorted((
             item
             for item in self.items.values()
             if item.task_id == task_id and item.detached_at is None
-        )
+        ), key=lambda item: (item.sort_order, item.id_required)))
 
     def get_attachment(self, attachment_id: int) -> Attachment | None:
         return self.items.get(attachment_id)
@@ -56,7 +56,8 @@ class InMemoryAttachmentRepository(AttachmentRepository):
     def add_attachment(self, attachment: Attachment) -> Attachment:
         if self.fail_add:
             raise RuntimeError("database unavailable")
-        saved = replace(attachment, id=self.next_id)
+        position = max((item.sort_order for item in self.items.values() if item.task_id == attachment.task_id), default=0) + 10
+        saved = replace(attachment, id=self.next_id, sort_order=position)
         self.items[self.next_id] = saved
         self.next_id += 1
         return saved
@@ -86,6 +87,16 @@ class InMemoryAttachmentRepository(AttachmentRepository):
         if self.fail_delete:
             raise RuntimeError("database unavailable")
         del self.items[attachment_id]
+
+    def move_attachment(self, task_id: int, attachment_id: int, movement: AttachmentMove) -> tuple[Attachment, ...]:
+        items = list(self.list_attachments(task_id))
+        index = next(i for i, item in enumerate(items) if item.id == attachment_id)
+        positions = [item.sort_order for item in items]
+        target = {AttachmentMove.UP: max(0, index - 1), AttachmentMove.DOWN: min(len(items) - 1, index + 1), AttachmentMove.FIRST: 0, AttachmentMove.LAST: len(items) - 1}[movement]
+        items.insert(target, items.pop(index))
+        for item, position in zip(items, positions, strict=True):
+            self.items[item.id_required] = replace(item, sort_order=position)
+        return self.list_attachments(task_id)
 
 
 def make_attachment_service(

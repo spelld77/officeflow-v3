@@ -21,8 +21,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.reminder_preview import ReminderPreviewItem, ReminderPreviewResult
 from officeflow.application.tasks import CalendarOverview, ScheduledTask
 from officeflow.domain.enums import TaskPriority, TaskStatus
+from officeflow.presentation.dates import WEEKDAYS
+from officeflow.presentation.reminder_preview import ReminderPreviewDelegate, preview_text
 from officeflow.presentation.task_list import format_snoozed_time
 
 WEEKDAY_LABELS = ("일", "월", "화", "수", "목", "금", "토")
@@ -143,6 +146,7 @@ class MonthCalendarWidget(QWidget):
     taskActivated = Signal(object)
     taskContextRequested = Signal(object, object)
     moreRequested = Signal(object)
+    alarmRequested = Signal(object)
 
     HEADER_HEIGHT = 26.0
     DATE_HEIGHT = 23.0
@@ -157,10 +161,13 @@ class MonthCalendarWidget(QWidget):
         self._selected_date = today
         self._tasks: tuple[ScheduledTask, ...] = ()
         self._day_counts: dict[date, int] = {}
+        self._alarm_counts: dict[date, int] = {}
+        self._alarms_complete = True
         self._summary_mode = False
         self._compact = False
         self._task_hits: list[tuple[QRectF, ScheduledTask]] = []
         self._more_hits: list[tuple[QRectF, date]] = []
+        self._alarm_hits: list[tuple[QRectF, date]] = []
         self.setObjectName("monthCalendar")
         self.setMinimumSize(QSize(460, 285))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -215,6 +222,11 @@ class MonthCalendarWidget(QWidget):
             self.updateGeometry()
             self.update()
 
+    def set_reminder_counts(self, counts: dict[date, int], *, complete: bool = True) -> None:
+        self._alarm_counts = counts
+        self._alarms_complete = complete
+        self.update()
+
     def sizeHint(self) -> QSize:
         return QSize(720, 430)
 
@@ -225,6 +237,7 @@ class MonthCalendarWidget(QWidget):
         painter.fillRect(self.rect(), QColor("#FFFFFF"))
         self._task_hits.clear()
         self._more_hits.clear()
+        self._alarm_hits.clear()
 
         column_width = self.width() / 7.0
         row_height = max(1.0, (self.height() - self.HEADER_HEIGHT) / 6.0)
@@ -273,6 +286,16 @@ class MonthCalendarWidget(QWidget):
             else:
                 painter.setPen(QColor("#364158"))
             painter.drawText(day_rect, Qt.AlignmentFlag.AlignCenter, str(day.day))
+            count = self._alarm_counts.get(day, 0)
+            if count or not self._alarms_complete:
+                text = f"알림 {count}{'' if self._alarms_complete else '+'}" if count else "알림 ?"
+                rect = QRectF(cell.left() + 34, cell.top() + 3, max(1, cell.width() - 38), 20)
+                if painter.fontMetrics().horizontalAdvance(text) > rect.width():
+                    text = f"알{count}{'' if self._alarms_complete else '+'}" if count else "알?"
+                painter.setPen(QColor("#7A4FAD"))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(rect.width())))
+                self._alarm_hits.append((rect, day))
 
         lane_limit = 2 if self._compact else 3
         count_only = self._summary_mode or row_height < self.DATE_HEIGHT + self.BAR_HEIGHT + 8
@@ -377,6 +400,12 @@ class MonthCalendarWidget(QWidget):
         if event.button() is not Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
         self.setFocus()
+        for rect, hit_day in self._alarm_hits:
+            if rect.contains(event.position()):
+                self._selected_date = hit_day
+                self.alarmRequested.emit(hit_day)
+                self.update()
+                return
         for rect, hit_day in reversed(self._more_hits):
             if rect.contains(event.position()):
                 self._selected_date = hit_day
@@ -399,6 +428,8 @@ class MonthCalendarWidget(QWidget):
             self.update()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if any(rect.contains(event.position()) for rect, _day in self._alarm_hits):
+            return
         task = self._task_at(event.position())
         if task is not None:
             self.taskActivated.emit(task)
@@ -497,12 +528,16 @@ class CalendarPage(QFrame):
     taskSelectionCleared = Signal()
     taskContextRequested = Signal(object, object)
     createRequested = Signal(object)
+    alarmMoreRequested = Signal()
 
     def __init__(self, *, timezone: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._timezone = timezone
         self._tasks: tuple[ScheduledTask, ...] = ()
         self._day_tasks: tuple[ScheduledTask, ...] = ()
+        self._reminder_preview = ReminderPreviewResult((), True)
+        self._day_alarm_override: tuple[date, ReminderPreviewResult] | None = None
+        self._focus_alarm_on_refresh = False
         self._selected_task: ScheduledTask | None = None
         self._snoozed_until: dict[tuple[int, datetime | None], datetime] = {}
         self._compact = False
@@ -567,9 +602,9 @@ class CalendarPage(QFrame):
         self.day_label = QLabel()
         self.day_label.setObjectName("calendarDayTitle")
         self.day_count = QLabel()
+        self.day_count.setMinimumWidth(0)
         self.day_count.setObjectName("calendarDayCount")
         day_header.addWidget(self.day_label)
-        day_header.addWidget(self.day_count)
         self.day_more_hint = QLabel("↓ 목록을 스크롤해 전체 일정을 확인하세요")
         self.day_more_hint.setObjectName("calendarDayMoreHint")
         self.day_more_hint.hide()
@@ -595,9 +630,17 @@ class CalendarPage(QFrame):
             button.setEnabled(False)
             day_header.addWidget(button)
         day_panel_layout.addLayout(day_header)
+        alarm_summary = QHBoxLayout()
+        alarm_summary.addWidget(self.day_count, 1)
+        self.alarm_more_button = QPushButton("알림 더 조회…")
+        self.alarm_more_button.hide()
+        self.alarm_more_button.clicked.connect(self.alarmMoreRequested.emit)
+        alarm_summary.addWidget(self.alarm_more_button)
+        day_panel_layout.addLayout(alarm_summary)
 
         self.day_list = QListWidget()
         self.day_list.setObjectName("calendarDayList")
+        self.day_list.setItemDelegate(ReminderPreviewDelegate(self._timezone, self.day_list))
         self.day_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.day_list.setAlternatingRowColors(True)
         self.day_list.setUniformItemSizes(True)
@@ -628,6 +671,7 @@ class CalendarPage(QFrame):
         self.calendar_splitter.splitterMoved.connect(self._remember_splitter_sizes)
         self.calendar.dateSelected.connect(self._select_date)
         self.calendar.moreRequested.connect(self._select_date)
+        self.calendar.alarmRequested.connect(self._select_alarm_date)
         self.calendar.dateActivated.connect(self.createRequested)
         self.calendar.taskSelected.connect(self._select_task)
         self.calendar.taskActivated.connect(self.taskActivated)
@@ -665,6 +709,18 @@ class CalendarPage(QFrame):
         self._day_tasks = tasks
         self._refresh_day_list()
 
+    def set_reminder_preview(self, result: ReminderPreviewResult) -> None:
+        self._reminder_preview = result
+        start, end = self.visible_date_range
+        counts = {start + timedelta(days=i): len(result.for_date(start + timedelta(days=i), self._timezone)) for i in range((end-start).days)}
+        self.calendar.set_reminder_counts(counts, complete=result.complete)
+        self._refresh_day_list(preserve_selection=True)
+
+    def set_day_reminder_preview(self, day: date, result: ReminderPreviewResult) -> None:
+        self._day_alarm_override = (day, result)
+        if day == self.selected_date:
+            self._refresh_day_list(preserve_selection=True)
+
     def set_snoozed_reminders(
         self, reminders: Mapping[tuple[int, datetime | None], datetime]
     ) -> None:
@@ -680,7 +736,7 @@ class CalendarPage(QFrame):
         self.day_panel.setMinimumHeight(170 if compact else 180)
         self._update_day_list_minimum_height()
         self.create_button.setVisible(not compact)
-        self._update_more_hint(len(self._day_tasks))
+        self._update_more_hint(self.day_list.count())
 
     def set_record_capabilities(self, *, records: bool, attachments: bool) -> None:
         self._records_available = records
@@ -740,7 +796,11 @@ class CalendarPage(QFrame):
     def _go_today(self) -> None:
         self._set_month_and_date(datetime.now(ZoneInfo(self._timezone)).date())
 
-    def _select_date(self, selected: date) -> None:
+    def _select_alarm_date(self, selected: date) -> None:
+        self._select_date(selected, focus_alarm=True)
+
+    def _select_date(self, selected: date, *, focus_alarm: bool = False) -> None:
+        self._focus_alarm_on_refresh = focus_alarm
         if (selected.year, selected.month) != self.calendar.displayed_month:
             self._set_month_and_date(selected)
             return
@@ -768,32 +828,63 @@ class CalendarPage(QFrame):
             (self._selected_task.id, self._selected_task.occurrence_start)
             if self._selected_task is not None else None
         )
-        items = self._day_tasks
+        result = self._day_alarm_override[1] if self._day_alarm_override and self._day_alarm_override[0] == self.selected_date else self._reminder_preview
+        alarms = result.for_date(self.selected_date, self._timezone)
+        items: tuple[ScheduledTask | ReminderPreviewItem, ...] = (*self._day_tasks, *alarms)
+        selected_data = self.day_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.day_list.currentItem() else None
+        previous_row = self.day_list.currentRow()
         scroll = self.day_list.verticalScrollBar().value()
         with QSignalBlocker(self.day_list):
             self.day_list.clear()
             for task in items:
-                item = QListWidgetItem(self._day_item_text(task))
+                text = "[알림] " + preview_text(task, self._timezone) if isinstance(task, ReminderPreviewItem) else self._day_item_text(task)
+                item = QListWidgetItem(text)
+                item.setToolTip(text)
+                if isinstance(task, ReminderPreviewItem) and task.snoozed_until:
+                    from officeflow.presentation.dates import format_datetime
+                    item.setToolTip(text + "\n다시 알림: " + format_datetime(task.snoozed_until, self._timezone))
                 item.setSizeHint(QSize(0, self._day_row_height()))
                 item.setData(Qt.ItemDataRole.UserRole, task)
-                if task.status is TaskStatus.COMPLETED:
+                if (isinstance(task, ReminderPreviewItem) and not task.is_pending) or task.status is TaskStatus.COMPLETED:
                     item.setForeground(QColor("#7D899E"))
                 self.day_list.addItem(item)
-                if (task.id, task.occurrence_start) == selected_key:
+                matched = task.key == selected_data.key if isinstance(task, ReminderPreviewItem) and isinstance(selected_data, ReminderPreviewItem) else not isinstance(task, ReminderPreviewItem) and (task.id, task.occurrence_start) == selected_key and not isinstance(selected_data, ReminderPreviewItem)
+                if matched:
                     self.day_list.setCurrentItem(item)
+            if self._focus_alarm_on_refresh and alarms:
+                selected_alarm = next((i for i in alarms if i.is_pending), alarms[0])
+                for row in range(self.day_list.count()):
+                    item = self.day_list.item(row)
+                    data = item.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(data, ReminderPreviewItem) and data.key == selected_alarm.key:
+                        self.day_list.setCurrentItem(item)
+                        self.day_list.doItemsLayout()
+                        self.day_list.scrollToItem(item)
+                        scroll = self.day_list.verticalScrollBar().value()
+                        self._focus_alarm_on_refresh = False
+                        break
         current = self.day_list.currentItem()
         if current is not None or not preserve_selection:
             self._on_day_item_changed(current, None)
         self.day_list.verticalScrollBar().setValue(scroll)
-        self.day_label.setText(f"{self.selected_date.month}월 {self.selected_date.day}일")
+        if current is not None and self.day_list.currentRow() != previous_row:
+            # Task and alarm rows arrive separately. Keep the selected alarm in
+            # view if newly loaded task rows move it below the viewport.
+            self.day_list.doItemsLayout()
+            self.day_list.scrollToItem(current)
+        self.day_label.setText(f"{self.selected_date.month}월 {self.selected_date.day}일({WEEKDAYS[self.selected_date.weekday()]})")
         has_many = len(items) >= 3
         has_overflow = len(items) > 3
         self.day_count.setText(f"총 {len(items)}개 일정" if items else "일정 없음")
+        if alarms or not result.complete:
+            self.day_count.setText(f"업무 {len(self._day_tasks)}개 · 알림 {len(alarms)}건{'' if result.complete else '+ (일부 조회)'} · 총 {len(items)}행")
+        self.alarm_more_button.setVisible(not result.complete)
         self.day_count.setProperty("hasMany", has_many)
         self.day_count.style().unpolish(self.day_count)
         self.day_count.style().polish(self.day_count)
         self.day_more_hint.setVisible(has_overflow)
         self._update_more_hint(len(items))
+        self.day_count.setToolTip(self.day_count.text())
         self.day_list.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn
             if has_overflow
@@ -828,7 +919,7 @@ class CalendarPage(QFrame):
         self, current: QListWidgetItem | None, _previous: QListWidgetItem | None
     ) -> None:
         task = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-        self._selected_task = task if isinstance(task, ScheduledTask) else None
+        self._selected_task = self._action_task(task)
         self._update_action_buttons()
         if self._selected_task is not None:
             self.taskSelected.emit(self._selected_task)
@@ -836,7 +927,7 @@ class CalendarPage(QFrame):
             self.taskSelectionCleared.emit()
 
     def _on_day_item_activated(self, item: QListWidgetItem) -> None:
-        task = item.data(Qt.ItemDataRole.UserRole)
+        task = self._action_task(item.data(Qt.ItemDataRole.UserRole))
         if isinstance(task, ScheduledTask):
             self.taskActivated.emit(task)
 
@@ -845,12 +936,21 @@ class CalendarPage(QFrame):
         if item is None:
             return
         self.day_list.setCurrentItem(item)
-        task = item.data(Qt.ItemDataRole.UserRole)
+        task = self._action_task(item.data(Qt.ItemDataRole.UserRole))
         if isinstance(task, ScheduledTask):
             self.taskContextRequested.emit(
                 task,
                 self.day_list.viewport().mapToGlobal(position),
             )
+
+    @staticmethod
+    def _action_task(value: object) -> ScheduledTask | None:
+        if isinstance(value, ScheduledTask):
+            return value
+        if isinstance(value, ReminderPreviewItem):
+            return ScheduledTask(value.task, value.occurrence_start or value.task.starts_at or value.effective_at,
+                value.task.ends_at, occurrence_start=value.occurrence_start if value.task.recurrence_rule else None)
+        return None
 
     def _activate_selected(self) -> None:
         if self._selected_task is not None:

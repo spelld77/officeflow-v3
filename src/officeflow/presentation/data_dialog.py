@@ -47,6 +47,7 @@ from officeflow.infrastructure.backup import (
 )
 from officeflow.presentation.background import OperationWorker, finish_thread
 from officeflow.presentation.calendar_export_dialog import CalendarExportDialog
+from officeflow.presentation.dates import format_date
 
 
 @dataclass(frozen=True, slots=True)
@@ -671,8 +672,8 @@ class DataManagementDialog(QDialog):
         ).astimezone()
         due_prefix = "백업 예정" if due_local > datetime.now().astimezone() else "백업 기한 경과"
         self.backup_schedule_label.setText(
-            f"최근 자동 백업 {latest_local:%Y-%m-%d %H:%M} · "
-            f"{due_prefix} {due_local:%Y-%m-%d %H:%M} 이후(15분 단위 확인)\n"
+            f"최근 자동 백업 {format_date(latest_local.date())} {latest_local:%H:%M} · "
+            f"{due_prefix} {format_date(due_local.date())} {due_local:%H:%M} 이후(15분 단위 확인)\n"
             "해당 시각에 PC가 꺼져 있으면 다음 OfficeFlow 실행 후 자동 백업합니다."
         )
 

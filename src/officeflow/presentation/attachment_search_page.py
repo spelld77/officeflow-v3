@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from threading import Event
+from typing import cast
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
@@ -42,6 +43,7 @@ from officeflow.application.attachment_search import (
 )
 from officeflow.domain.enums import TaskStatus
 from officeflow.presentation.background import finish_thread
+from officeflow.presentation.dates import date_with_weekday, format_date
 
 STATUS_LABELS = {
     TaskStatus.ACTIVE: "진행",
@@ -157,7 +159,7 @@ class AttachmentSearchDelegate(QStyledItemDelegate):
             if hit.size_bytes < 1024**2
             else f"{hit.size_bytes / 1024**2:.1f} MB"
         )
-        meta = f"{hit.task_title} · {'/'.join(flags)} · {hit.created_at.astimezone(self._zone):%m/%d} 첨부 · {size}"
+        meta = f"{hit.task_title} · {'/'.join(flags)} · {format_date(hit.created_at.astimezone(self._zone).date(), short=True)} 첨부 · {size}"
         painter.setPen(QColor("#58657D"))
         painter.drawText(
             rect.adjusted(0, rect.height() // 2, 0, 0),
@@ -243,7 +245,7 @@ class AttachmentSearchPageWidget(QFrame):
         for edit in (self.date_from, self.date_to):
             edit.setCalendarPopup(True)
             edit.setDisplayFormat("yyyy-MM-dd")
-            dates.addWidget(edit)
+            dates.addWidget(date_with_weekday(edit))
             edit.dateChanged.connect(self._conditions_changed)
         conditions.addLayout(dates)
         states = QHBoxLayout()
@@ -372,7 +374,7 @@ class AttachmentSearchPageWidget(QFrame):
         )
         self.more_conditions.setText(f"추가 조건 ({count})" if count else "추가 조건")
         scope = (
-            f"첨부일 {self.date_from.date().toString('yyyy-MM-dd')}~{self.date_to.date().toString('yyyy-MM-dd')}"
+            f"첨부일 {format_date(cast(date, self.date_from.date().toPython()))}~{format_date(cast(date, self.date_to.date().toPython()))}"
             if enabled
             else "전체 기간"
         )

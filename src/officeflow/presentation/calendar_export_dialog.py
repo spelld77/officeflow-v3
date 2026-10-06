@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from officeflow.application.exporting import CalendarExportOptions, CalendarExportScope
 from officeflow.application.tasks import TaskQuery
+from officeflow.presentation.dates import date_with_weekday
 
 
 class CalendarExportDialog(QDialog):
@@ -88,9 +89,9 @@ class CalendarExportDialog(QDialog):
         dates = QWidget()
         dates_layout = QHBoxLayout(dates)
         dates_layout.setContentsMargins(0, 0, 0, 0)
-        dates_layout.addWidget(self.date_from_edit)
+        dates_layout.addWidget(date_with_weekday(self.date_from_edit))
         dates_layout.addWidget(QLabel("~"))
-        dates_layout.addWidget(self.date_to_edit)
+        dates_layout.addWidget(date_with_weekday(self.date_to_edit))
         range_form.addRow("기간", dates)
         root.addWidget(self.range_widget)
 
@@ -166,4 +167,3 @@ class CalendarExportDialog(QDialog):
 
     def _sync_range_enabled(self) -> None:
         self.range_widget.setEnabled(self.date_range_radio.isChecked())
-

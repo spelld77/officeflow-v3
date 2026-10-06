@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from threading import RLock
 from typing import Protocol
 
 from officeflow.application.tasks import TaskService
-from officeflow.domain.attachment import Attachment
+from officeflow.domain.attachment import Attachment, AttachmentMove
 
 
 class AttachmentOperationError(RuntimeError):
@@ -75,6 +77,8 @@ class AttachmentRepository(Protocol):
 
     def delete_attachment(self, attachment_id: int) -> None: ...
 
+    def move_attachment(self, task_id: int, attachment_id: int, movement: AttachmentMove) -> tuple[Attachment, ...]: ...
+
 
 class AttachmentStorage(Protocol):
     def operation_lock(self) -> AbstractContextManager[bool]: ...
@@ -114,6 +118,40 @@ class AttachmentService:
         self._repository = repository
         self._storage = storage
         self._task_service = task_service
+        self._listeners: list[Callable[[int], None]] = []
+        self._listener_lock = RLock()
+
+    def subscribe(self, listener: Callable[[int], None]) -> Callable[[], None]:
+        """Listeners must marshal worker-thread notifications onto their UI thread."""
+        with self._listener_lock:
+            self._listeners.append(listener)
+
+        def unsubscribe() -> None:
+            with self._listener_lock:
+                if listener in self._listeners:
+                    self._listeners.remove(listener)
+
+        return unsubscribe
+
+    def _notify_changed(self, task_id: int) -> None:
+        with self._listener_lock:
+            listeners = tuple(self._listeners)
+        for listener in listeners:
+            try:
+                listener(task_id)
+            except Exception:
+                # A closed UI must never turn an already committed mutation into failure.
+                logging.getLogger(__name__).exception("첨부 목록 변경 알림을 전달하지 못했습니다.")
+
+    def attachment_metadata_for_task(self, task_id: int) -> tuple[Attachment, ...]:
+        self._task_service.get_including_deleted(task_id)
+        return self._repository.list_attachments(task_id)
+
+    def move_attachment(self, task_id: int, attachment_id: int, movement: AttachmentMove) -> tuple[Attachment, ...]:
+        self._task_service.get(task_id)
+        result = self._repository.move_attachment(task_id, attachment_id, AttachmentMove(movement))
+        self._notify_changed(task_id)
+        return result
 
     def attachments_for_task(
         self, task_id: int, *, now: datetime | None = None
@@ -185,7 +223,7 @@ class AttachmentService:
                     checksum=stored.checksum,
                     created_at=now or datetime.now(UTC),
                 )
-                return self._repository.add_attachment(attachment)
+                saved = self._repository.add_attachment(attachment)
         except Exception:
             try:
                 self._storage.remove(stored.relative_path)
@@ -194,6 +232,8 @@ class AttachmentService:
                     "첨부 정보 저장과 임시 파일 정리에 실패했습니다."
                 ) from cleanup_error
             raise
+        self._notify_changed(task_id)
+        return saved
 
     def path_for_open(self, attachment_id: int, *, now: datetime | None = None) -> Path:
         attachment = self._get_required(attachment_id)
@@ -259,6 +299,7 @@ class AttachmentService:
             raise AttachmentOperationError("이미 정리 대기 중인 첨부파일입니다.")
         retained_path = self._storage.resolve(attachment.relative_path, require_exists=False)
         self._repository.set_detached_at(attachment_id, now or datetime.now(UTC))
+        self._notify_changed(attachment.task_id)
         return retained_path
 
     def restore(self, attachment_id: int) -> Attachment:
@@ -266,11 +307,17 @@ class AttachmentService:
         if attachment.detached_at is None:
             return attachment
         self._task_service.get_including_deleted(attachment.task_id)
-        return self._repository.set_detached_at(attachment_id, None)
+        restored = self._repository.set_detached_at(attachment_id, None)
+        self._notify_changed(attachment.task_id)
+        return restored
 
     def delete_file(self, attachment_id: int) -> None:
-        with self._storage.operation_lock():
-            self._delete_file_locked(attachment_id)
+        task_id = self._get_required(attachment_id).task_id
+        try:
+            with self._storage.operation_lock():
+                self._delete_file_locked(attachment_id)
+        finally:
+            self._notify_changed(task_id)
 
     def _delete_file_locked(self, attachment_id: int) -> None:
         attachment = self._get_required(attachment_id)

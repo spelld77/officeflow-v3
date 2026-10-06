@@ -254,7 +254,7 @@ def test_work_log_browser_pages_search_results_and_filters_date_range(
     assert dialog.list_widget.count() == 4
     assert (
         dialog.result_count_label.text()
-        == "2026-08-10~2026-08-12 검색 결과 4개 업무"
+        == "2026-08-10(월)~2026-08-12(수) 검색 결과 4개 업무"
     )
 
 

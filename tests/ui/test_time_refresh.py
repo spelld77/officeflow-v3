@@ -16,16 +16,16 @@ def test_midnight_and_sleep_return_refresh_today_without_reminders(qtbot):
     window = MainWindow(AppSettings(), service, view_clock=lambda: clock[0])
     qtbot.addWidget(window)
     assert window._view_timer.isActive()
-    assert window._page_title.text() == "오늘 · 10월 2일"
+    assert window._page_title.text() == "오늘 · 10월 2일(금)"
     window.show()
     clock[0] += timedelta(hours=10)
     window._view_timer.timeout.emit()
-    assert window._page_title.text() == "오늘 · 10월 3일"
+    assert window._page_title.text() == "오늘 · 10월 3일(토)"
     assert window._task_model.total_task_count == 2
     assert window._task_model.loaded_group_counts[TaskGroup.OVERDUE] == 1
     assert window._task_model.index_for_task(yesterday.id).isValid()
     window._check_reminders()
-    assert window._page_title.text() == "오늘 · 10월 3일"
+    assert window._page_title.text() == "오늘 · 10월 3일(토)"
     window.shutdown()
     assert not window._view_timer.isActive()
 
@@ -94,7 +94,7 @@ def test_clock_backwards_refresh_and_calendar_date_are_preserved(qtbot):
     assert window._calendar_page.selected_date == selected
     assert window._calendar_page.calendar.displayed_month == month
     window._set_view(TaskView.TODAY)
-    assert window._page_title.text() == "오늘 · 10월 2일"
+    assert window._page_title.text() == "오늘 · 10월 2일(금)"
     window.shutdown()
 
 
@@ -150,8 +150,8 @@ def test_activating_window_after_hidden_interval_refreshes_immediately(qtbot):
     qtbot.addWidget(window)
     clock[0] += timedelta(days=1)
     window._view_timer.timeout.emit()
-    assert window._page_title.text() == "오늘 · 10월 2일"
+    assert window._page_title.text() == "오늘 · 10월 2일(금)"
     window.show()
     window.activateWindow()
-    qtbot.waitUntil(lambda: window._page_title.text() == "오늘 · 10월 3일", timeout=2000)
+    qtbot.waitUntil(lambda: window._page_title.text() == "오늘 · 10월 3일(토)", timeout=2000)
     window.shutdown()

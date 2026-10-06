@@ -12,6 +12,15 @@ QMainWindow, #appRoot {
 QDialog {
     background: #F4F6FA;
 }
+QWidget#taskEditorBody {
+    color: #172033;
+    background: #F4F6FA;
+}
+QScrollArea#taskEditorScroll,
+QScrollArea#taskEditorScroll QWidget#qt_scrollarea_viewport {
+    background: #F4F6FA;
+    border: none;
+}
 QMenu {
     color: #172033;
     background: #FFFFFF;
@@ -216,7 +225,7 @@ QListWidget#calendarDayList, QListWidget#reminderList {
     padding: 3px;
 }
 QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrowserList,
-QListWidget#attachmentList, QListWidget#attachmentCleanupList {
+QListWidget#attachmentList, QListWidget#attachmentCleanupList, QListWidget#reminderPreviewList, QListWidget#reminderSettingsList {
     color: #172033;
     background: #FFFFFF;
     selection-color: #172033;
@@ -239,13 +248,13 @@ QListWidget#attachmentList[dragActive="true"] {
 }
 QListWidget#checklistList::item, QListWidget#taskWorkLogList::item,
 QListWidget#workLogBrowserList::item, QListWidget#attachmentList::item,
-QListWidget#attachmentCleanupList::item {
+QListWidget#attachmentCleanupList::item, QListWidget#reminderSettingsList::item {
     border-radius: 5px;
     padding: 8px 10px;
 }
 QListWidget#checklistList::item:selected, QListWidget#taskWorkLogList::item:selected,
 QListWidget#workLogBrowserList::item:selected, QListWidget#attachmentList::item:selected,
-QListWidget#attachmentCleanupList::item:selected {
+QListWidget#attachmentCleanupList::item:selected, QListWidget#reminderSettingsList::item:selected {
     color: #172033;
     background: #DFE9FF;
 }
@@ -278,33 +287,37 @@ QTabBar::tab:selected {
     background: #FFFFFF;
     font-weight: 600;
 }
-QListWidget#calendarDayList::item, QListWidget#reminderList::item {
+QListWidget#calendarDayList::item, QListWidget#reminderList::item, QListWidget#reminderPreviewList::item {
     border-radius: 5px;
     padding: 6px 8px;
 }
-QListWidget#calendarDayList::item:selected, QListWidget#reminderList::item:selected {
+QListWidget#calendarDayList::item:selected, QListWidget#reminderList::item:selected, QListWidget#reminderPreviewList::item:selected {
     color: #172033;
     background: #DFE9FF;
 }
-QListWidget#calendarDayList QScrollBar:vertical {
+QListWidget#calendarDayList QScrollBar:vertical, QScrollArea#taskEditorScroll QScrollBar:vertical {
     width: 13px;
     background: #EDF1F7;
     border: none;
     border-radius: 6px;
     margin: 2px;
 }
-QListWidget#calendarDayList QScrollBar::handle:vertical {
+QListWidget#calendarDayList QScrollBar::handle:vertical, QScrollArea#taskEditorScroll QScrollBar::handle:vertical {
     min-height: 28px;
     background: #7FA3EF;
     border-radius: 5px;
 }
-QListWidget#calendarDayList QScrollBar::handle:vertical:hover {
+QListWidget#calendarDayList QScrollBar::handle:vertical:hover, QScrollArea#taskEditorScroll QScrollBar::handle:vertical:hover {
     background: #4F7FDF;
 }
 QListWidget#calendarDayList QScrollBar::add-line:vertical,
 QListWidget#calendarDayList QScrollBar::sub-line:vertical,
 QListWidget#calendarDayList QScrollBar::add-page:vertical,
-QListWidget#calendarDayList QScrollBar::sub-page:vertical {
+QListWidget#calendarDayList QScrollBar::sub-page:vertical,
+QScrollArea#taskEditorScroll QScrollBar::add-line:vertical,
+QScrollArea#taskEditorScroll QScrollBar::sub-line:vertical,
+QScrollArea#taskEditorScroll QScrollBar::add-page:vertical,
+QScrollArea#taskEditorScroll QScrollBar::sub-page:vertical {
     background: transparent;
     border: none;
     height: 0;

@@ -104,9 +104,32 @@ class ReminderService:
             for reminder in self._repository.list_reminders(task_id)
         )
 
+    def reminders_for_task(self, task_id: int) -> tuple[Reminder, ...]:
+        return self._repository.list_reminders(task_id)
+
+    def task_deliveries(self, task_id: int) -> tuple[ReminderDelivery, ...]:
+        query = getattr(self._repository, "task_deliveries", None)
+        return tuple(query(task_id)) if query else ()
+
     def active_snoozes(self) -> tuple[ReminderDelivery, ...]:
         """Return pending snoozes that should remain visible to the user."""
         return self._repository.list_active_snoozed_deliveries()
+
+    def alert_is_active(self, delivery_id: int) -> bool:
+        delivery = self._repository.get_reminder_delivery(delivery_id)
+        if delivery is None or delivery.status is not ReminderDeliveryStatus.FIRED:
+            return False
+        target = self._repository.get_reminder_target(delivery.reminder_id)
+        return bool(target and target.reminder.enabled and target.task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+            and not (target.task.recurrence_rule and delivery.occurrence_start and self._occurrence_is_closed(target.task.id, delivery.occurrence_start)))
+
+    def alert_for_delivery(self, delivery_id: int) -> ReminderAlert | None:
+        if not self.alert_is_active(delivery_id):
+            return None
+        delivery = self._repository.get_reminder_delivery(delivery_id)
+        assert delivery is not None
+        target = self._repository.get_reminder_target(delivery.reminder_id)
+        return ReminderAlert(delivery, target.reminder, target.task) if target else None
 
     def replace_rules(
         self,
@@ -116,6 +139,9 @@ class ReminderService:
         now: datetime | None = None,
     ) -> tuple[Reminder, ...]:
         task = self._task_service.get(task_id)
+        old = self._repository.list_reminders(task_id)
+        if len(rules) > 20 and (len(rules) > len(old) or {r.identity for r in rules} - {r.identity for r in old}):
+            raise ValueError("업무 하나에 알림을 최대 20개까지 설정할 수 있습니다.")
         for rule in rules:
             if rule.relation is ReminderRelation.START and task.starts_at is None:
                 raise ValueError("시작 알림에는 시작 일정이 필요합니다.")
@@ -127,6 +153,8 @@ class ReminderService:
         reminders = self._repository.replace_reminders(task_id, rules)
         for reminder in reminders:
             if reminder.id is None:
+                continue
+            if reminder.schedule_initialized:
                 continue
             candidate = None
             if reminder.enabled:
@@ -232,8 +260,8 @@ class ReminderService:
                     inclusive=True,
                 )
                 calculations += 1
-                self._repository.save_reminder_schedule(
-                    reminder_id,
+                self._save_target_schedule(
+                    target,
                     candidate[1] if candidate is not None else None,
                     candidate[0] if candidate is not None else None,
                 )
@@ -274,7 +302,8 @@ class ReminderService:
                             ),
                             now=current,
                         )
-                        claimed = self._repository.claim_reminder_delivery(delivery)
+                        claim = getattr(self._repository, "claim_current_delivery", None)
+                        claimed = claim(delivery, target) if claim else self._repository.claim_reminder_delivery(delivery)
                         if claimed is not None:
                             alerts.append(
                                 ReminderAlert(
@@ -297,8 +326,8 @@ class ReminderService:
                         scheduled_at = None
                     else:
                         occurrence_start, scheduled_at = candidate
-                self._repository.save_reminder_schedule(
-                    reminder_id,
+                self._save_target_schedule(
+                    target,
                     scheduled_at,
                     occurrence_start,
                 )
@@ -314,6 +343,8 @@ class ReminderService:
         self, delivery_id: int, minutes: int = 10, *, now: datetime | None = None
     ) -> ReminderDelivery:
         delivery = self._get_delivery(delivery_id)
+        if not self.alert_is_active(delivery_id):
+            raise ValueError("이미 처리되거나 변경된 알림입니다. 최신 상태를 확인하세요.")
         return self._repository.save_reminder_delivery(
             delivery.snooze(minutes, now=now or datetime.now(UTC))
         )
@@ -365,8 +396,8 @@ class ReminderService:
         scheduled = scheduled_at.astimezone(UTC).isoformat()
         return f"task:{task_id}|occurrence:{occurrence}|reminder:{reminder_id}|at:{scheduled}"
 
+    @staticmethod
     def _next_candidate(
-        self,
         target: ReminderTarget,
         *,
         after: datetime,
@@ -389,7 +420,7 @@ class ReminderService:
         if base is None:
             return None
         if not task.recurrence_rule or task.starts_at is None:
-            scheduled_at = self._relative_due(task, base, offset_minutes)
+            scheduled_at = ReminderService._relative_due(task, base, offset_minutes)
             if scheduled_at > after or (inclusive and scheduled_at == after):
                 return task.starts_at, scheduled_at
             return None
@@ -414,7 +445,7 @@ class ReminderService:
             )
             if occurrence_base is None:
                 return None
-            scheduled_at = self._relative_due(task, occurrence_base, offset_minutes)
+            scheduled_at = ReminderService._relative_due(task, occurrence_base, offset_minutes)
             if scheduled_at > after or (inclusive and scheduled_at == after):
                 return occurrence_start, scheduled_at
             occurrence_start = next_recurrence_start(
@@ -453,3 +484,10 @@ class ReminderService:
         if delivery is None:
             raise LookupError(f"알림 {delivery_id}을(를) 찾을 수 없습니다.")
         return delivery
+
+    def _save_target_schedule(self, target: ReminderTarget, due: datetime | None, occurrence: datetime | None) -> None:
+        guarded = getattr(self._repository, "save_schedule_if_current", None)
+        if guarded:
+            guarded(target, due, occurrence)
+        elif target.reminder.id is not None:
+            self._repository.save_reminder_schedule(target.reminder.id, due, occurrence)
