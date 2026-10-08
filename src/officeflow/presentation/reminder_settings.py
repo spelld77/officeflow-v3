@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.reminder_runtime import ReminderRuntimeState, scope_label
 from officeflow.application.reminders import ReminderService, ReminderTarget
 from officeflow.application.task_saving import ReminderEdit
 from officeflow.domain.enums import ReminderDeliveryStatus, ReminderRelation, TaskStatus
@@ -94,14 +95,22 @@ def rule_label(edit: ReminderEdit, task: Task, now: datetime) -> str:
 
 
 def state_label(
-    edit: ReminderEdit, task: Task, now: datetime, deliveries: tuple[ReminderDelivery, ...]
+    edit: ReminderEdit, task: Task, now: datetime, deliveries: tuple[ReminderDelivery, ...], runtime: ReminderRuntimeState | None = None
 ) -> str:
+    if runtime is not None:
+        task = runtime.task
+        deliveries = runtime.deliveries
     label = rule_label(edit, task, now)
     history = _matching_history(edit, task, deliveries)
+    if closed_scope := scope_label(task):
+        handled = {ReminderDeliveryStatus.ACKNOWLEDGED: "알림 확인함", ReminderDeliveryStatus.COMPLETED: "알림 처리됨", ReminderDeliveryStatus.DEFERRED: "알림 대기 처리"}
+        handled_state = handled.get(history[0].status, "이후 알림 중단") if history else "이후 알림 중단"
+        return label.rsplit(" · ", 1)[0] + f" · {closed_scope} · {handled_state}"
     active = tuple(
         d
         for d in history
         if d.status in {ReminderDeliveryStatus.FIRED, ReminderDeliveryStatus.SNOOZED}
+        and not (runtime and scope_label(task, runtime.occurrence_status(d.occurrence_start)))
     )
     if active:
         snoozes = [d.snoozed_until for d in active if d.snoozed_until]
@@ -114,14 +123,19 @@ def state_label(
                 + format_datetime(min(snoozes), task.timezone, short=True)
             )
         return label.rsplit(" · ", 1)[0] + " · " + extra
-    if history and _unhandled_candidate(edit, task, now, history) is None:
+    next_due = _unhandled_candidate(edit, task, now, history, runtime)
+    if history and next_due is None:
         state = {
             ReminderDeliveryStatus.ACKNOWLEDGED: "확인함",
             ReminderDeliveryStatus.COMPLETED: "완료",
             ReminderDeliveryStatus.DEFERRED: "대기 처리",
         }.get(history[0].status)
         if state:
+            if runtime and (scope := scope_label(task, runtime.occurrence_status(history[0].occurrence_start))):
+                state = f"{scope} · 알림 {'처리됨' if state == '완료' else state}"
             return label.rsplit(" · ", 1)[0] + " · " + state
+    if runtime and next_due != candidate(edit, task, now):
+        return (format_datetime(next_due, task.timezone, short=True) + " · 예정") if next_due else "이번 회차 처리됨 · 다음 예약 없음"
     return label
 
 
@@ -148,7 +162,7 @@ def _matching_history(
 
 
 def _unhandled_candidate(
-    edit: ReminderEdit, task: Task, now: datetime, history: tuple[ReminderDelivery, ...]
+    edit: ReminderEdit, task: Task, now: datetime, history: tuple[ReminderDelivery, ...], runtime: ReminderRuntimeState | None = None
 ) -> datetime | None:
     due = candidate(edit, task, now)
     handled = {
@@ -168,10 +182,15 @@ def _unhandled_candidate(
         ),
         task,
     )
-    while due is not None and due in handled:
+    for _attempt in range(512):
+        if due is None:
+            return None
+        current = ReminderService._next_candidate(target, after=due, inclusive=True)
+        if due not in handled and not (runtime and current and scope_label(task, runtime.occurrence_status(current[0]))):
+            return due
         result = ReminderService._next_candidate(target, after=due, inclusive=False)
         due = result[1] if result else None
-    return due
+    return None
 
 
 def reminder_summary(
@@ -179,18 +198,24 @@ def reminder_summary(
     task: Task,
     now: datetime,
     deliveries: tuple[ReminderDelivery, ...] = (),
+    runtime: ReminderRuntimeState | None = None,
 ) -> str:
+    if runtime:
+        task, deliveries = runtime.task, runtime.deliveries
+    if scope := scope_label(task):
+        return scope + " · 이후 알림 중단"
     active = tuple(
         d
         for e in edits
         for d in _matching_history(e, task, deliveries)
         if e.rule.enabled
         and d.status in {ReminderDeliveryStatus.FIRED, ReminderDeliveryStatus.SNOOZED}
+        and not (runtime and scope_label(task, runtime.occurrence_status(d.occurrence_start)))
     )
     dates = [
         due
         for e in edits
-        if (due := _unhandled_candidate(e, task, now, _matching_history(e, task, deliveries)))
+        if (due := _unhandled_candidate(e, task, now, _matching_history(e, task, deliveries), runtime))
         is not None
     ]
     dates.extend(d.snoozed_until for d in active if d.snoozed_until is not None)
@@ -419,11 +444,16 @@ class ReminderSettingsDialog(QDialog):
         self._save = save
         self._original_edits = edits
         self._deliveries = deliveries
+        self._runtime: ReminderRuntimeState | None = None
         self._child: ReminderRuleDialog | None = None
         self.setWindowTitle(f"알림 설정 · {task.title}")
         self.resize(570, 400)
         self.setMinimumSize(400, 300)
         layout = QVBoxLayout(self)
+        self.runtime_label = QLabel()
+        self.runtime_label.setWordWrap(True)
+        self.runtime_label.setObjectName("reminderRuntimeLabel")
+        layout.addWidget(self.runtime_label)
         self.count_label = QLabel()
         layout.addWidget(self.count_label)
         self.list = QListWidget()
@@ -460,6 +490,11 @@ class ReminderSettingsDialog(QDialog):
     def edits(self) -> tuple[ReminderEdit, ...]:
         return tuple(self._edits)
 
+    def update_runtime_state(self, state: ReminderRuntimeState) -> None:
+        self._runtime = state
+        self._deliveries = state.deliveries
+        self._refresh()
+
     def update_delivery_states(self, deliveries: tuple[ReminderDelivery, ...]) -> None:
         if deliveries == self._deliveries:
             return
@@ -492,7 +527,10 @@ class ReminderSettingsDialog(QDialog):
         self.list.clear()
         for edit in self._edits:
             history = self._deliveries if edit in self._original_edits else ()
-            label = state_label(edit, self._task, datetime.now(UTC), history)
+            actual = self._runtime if edit in self._original_edits else None
+            label = state_label(edit, self._task, datetime.now(UTC), history, actual)
+            if self._runtime and edit not in self._original_edits:
+                label = "미저장 설정 미리보기 · " + label
             self.list.addItem(label)
             item = self.list.item(self.list.count() - 1)
             item.setToolTip(label)
@@ -501,6 +539,7 @@ class ReminderSettingsDialog(QDialog):
             f"설정 {len(self._edits)} / 최대 20개 · 실제 울릴 시각은 오늘·달력에서도 확인"
         )
         self.count_label.setWordWrap(True)
+        self.runtime_label.setText((scope_label(self._runtime.task) + " · 이후 알림 중단" if scope_label(self._runtime.task) else "저장된 실제 실행 상태 · 편집 내용은 최종 저장 후 적용") if self._runtime else "미저장 설정 미리보기")
         selected_row = next(
             (
                 index

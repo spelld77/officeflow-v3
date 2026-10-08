@@ -225,7 +225,8 @@ QListWidget#calendarDayList, QListWidget#reminderList {
     padding: 3px;
 }
 QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrowserList,
-QListWidget#attachmentList, QListWidget#attachmentCleanupList, QListWidget#reminderPreviewList, QListWidget#reminderSettingsList {
+QListWidget#attachmentList, QListWidget#attachmentCleanupList, QListWidget#reminderPreviewList, QListWidget#reminderSettingsList,
+QListWidget#attachmentExportResults, QListWidget#attachmentRecoveryList {
     color: #172033;
     background: #FFFFFF;
     selection-color: #172033;
@@ -248,13 +249,15 @@ QListWidget#attachmentList[dragActive="true"] {
 }
 QListWidget#checklistList::item, QListWidget#taskWorkLogList::item,
 QListWidget#workLogBrowserList::item, QListWidget#attachmentList::item,
-QListWidget#attachmentCleanupList::item, QListWidget#reminderSettingsList::item {
+QListWidget#attachmentCleanupList::item, QListWidget#reminderSettingsList::item,
+QListWidget#attachmentExportResults::item, QListWidget#attachmentRecoveryList::item {
     border-radius: 5px;
     padding: 8px 10px;
 }
 QListWidget#checklistList::item:selected, QListWidget#taskWorkLogList::item:selected,
 QListWidget#workLogBrowserList::item:selected, QListWidget#attachmentList::item:selected,
-QListWidget#attachmentCleanupList::item:selected, QListWidget#reminderSettingsList::item:selected {
+QListWidget#attachmentCleanupList::item:selected, QListWidget#reminderSettingsList::item:selected,
+QListWidget#attachmentExportResults::item:selected, QListWidget#attachmentRecoveryList::item:selected {
     color: #172033;
     background: #DFE9FF;
 }

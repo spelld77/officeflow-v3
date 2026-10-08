@@ -162,6 +162,7 @@ class MonthCalendarWidget(QWidget):
         self._tasks: tuple[ScheduledTask, ...] = ()
         self._day_counts: dict[date, int] = {}
         self._alarm_counts: dict[date, int] = {}
+        self._alarm_attention: dict[date, int] = {}
         self._alarms_complete = True
         self._summary_mode = False
         self._compact = False
@@ -222,9 +223,10 @@ class MonthCalendarWidget(QWidget):
             self.updateGeometry()
             self.update()
 
-    def set_reminder_counts(self, counts: dict[date, int], *, complete: bool = True) -> None:
+    def set_reminder_counts(self, counts: dict[date, int], *, complete: bool = True, attention: dict[date, int] | None = None) -> None:
         self._alarm_counts = counts
         self._alarms_complete = complete
+        self._alarm_attention = attention or {}
         self.update()
 
     def sizeHint(self) -> QSize:
@@ -287,11 +289,16 @@ class MonthCalendarWidget(QWidget):
                 painter.setPen(QColor("#364158"))
             painter.drawText(day_rect, Qt.AlignmentFlag.AlignCenter, str(day.day))
             count = self._alarm_counts.get(day, 0)
-            if count or not self._alarms_complete:
+            attention_count = self._alarm_attention.get(day, 0)
+            if count or attention_count or not self._alarms_complete:
                 text = f"알림 {count}{'' if self._alarms_complete else '+'}" if count else "알림 ?"
+                if attention_count:
+                    text = f"알림 {count} · 확인 필요 {attention_count}" if count else f"알림 확인 필요 {attention_count}"
                 rect = QRectF(cell.left() + 34, cell.top() + 3, max(1, cell.width() - 38), 20)
                 if painter.fontMetrics().horizontalAdvance(text) > rect.width():
                     text = f"알{count}{'' if self._alarms_complete else '+'}" if count else "알?"
+                    if attention_count:
+                        text = f"알{count} !{attention_count}" if count else f"확인 !{attention_count}"
                 painter.setPen(QColor("#7A4FAD"))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(rect.width())))
@@ -712,8 +719,9 @@ class CalendarPage(QFrame):
     def set_reminder_preview(self, result: ReminderPreviewResult) -> None:
         self._reminder_preview = result
         start, end = self.visible_date_range
-        counts = {start + timedelta(days=i): len(result.for_date(start + timedelta(days=i), self._timezone)) for i in range((end-start).days)}
-        self.calendar.set_reminder_counts(counts, complete=result.complete)
+        counts = {start + timedelta(days=i): sum(item.is_pending for item in result.for_date(start + timedelta(days=i), self._timezone)) for i in range((end-start).days)}
+        attention = {day: sum(item.needs_attention for item in result.for_date(day, self._timezone)) for day in counts}
+        self.calendar.set_reminder_counts(counts, complete=result.complete, attention=attention)
         self._refresh_day_list(preserve_selection=True)
 
     def set_day_reminder_preview(self, day: date, result: ReminderPreviewResult) -> None:
@@ -877,7 +885,10 @@ class CalendarPage(QFrame):
         has_overflow = len(items) > 3
         self.day_count.setText(f"총 {len(items)}개 일정" if items else "일정 없음")
         if alarms or not result.complete:
-            self.day_count.setText(f"업무 {len(self._day_tasks)}개 · 알림 {len(alarms)}건{'' if result.complete else '+ (일부 조회)'} · 총 {len(items)}행")
+            active = sum(item.is_pending for item in alarms)
+            attention = sum(item.needs_attention for item in alarms)
+            history = len(alarms) - active - attention
+            self.day_count.setText(f"업무 {len(self._day_tasks)}개 · 알림 {active}건 · 처리 이력 {history}건" + (f" · 발생 기록 확인 필요 {attention}건" if attention else "") + f"{'' if result.complete else '+ (일부 조회)'} · 총 {len(items)}행")
         self.alarm_more_button.setVisible(not result.complete)
         self.day_count.setProperty("hasMany", has_many)
         self.day_count.style().unpolish(self.day_count)

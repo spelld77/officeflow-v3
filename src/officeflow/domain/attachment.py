@@ -21,6 +21,27 @@ class AttachmentMove(StrEnum):
     LAST = "last"
 
 
+class AttachmentCheckStatus(StrEnum):
+    UNCHANGED = "unchanged"
+    MODIFIED = "modified"
+    NO_BASELINE = "no_baseline"
+    MISSING = "missing"
+    UNAVAILABLE = "unavailable"
+    CHANGING = "changing"
+
+
+@dataclass(frozen=True, slots=True)
+class FileObservation:
+    size_bytes: int
+    checksum: str
+    mtime_ns: int
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.size_bytes < 0 or self.mtime_ns < 0 or not _SHA256_PATTERN.fullmatch(self.checksum) or self.observed_at.tzinfo is None:
+            raise AttachmentValidationError("파일 관측 정보가 올바르지 않습니다.")
+
+
 @dataclass(frozen=True, slots=True)
 class Attachment:
     id: int | None
@@ -34,6 +55,22 @@ class Attachment:
     missing_at: datetime | None = None
     detached_at: datetime | None = None
     sort_order: int = 0
+    observed_size_bytes: int | None = None
+    observed_checksum: str | None = None
+    observed_mtime_ns: int | None = None
+    observed_at: datetime | None = None
+    last_check_status: AttachmentCheckStatus | None = None
+    last_checked_at: datetime | None = None
+    # Transient operation feedback, not an error log stored in the database.
+    operation_warning: str = ""
+
+    @property
+    def display_size_bytes(self) -> int:
+        return self.observed_size_bytes if self.observed_size_bytes is not None else self.size_bytes
+
+    @property
+    def check_label(self) -> str:
+        return {None: "내용 미확인", AttachmentCheckStatus.UNCHANGED: "첨부 당시와 같음", AttachmentCheckStatus.MODIFIED: "첨부 후 수정됨", AttachmentCheckStatus.NO_BASELINE: "내용 확인됨 · 최초 기준 없음", AttachmentCheckStatus.MISSING: "파일 누락", AttachmentCheckStatus.UNAVAILABLE: "확인 불가", AttachmentCheckStatus.CHANGING: "저장 중 · 다시 확인"}[self.last_check_status]
 
     @property
     def id_required(self) -> int:
@@ -67,11 +104,20 @@ class Attachment:
             raise AttachmentValidationError("첨부파일 체크섬이 올바르지 않습니다.")
         object.__setattr__(self, "original_name", original_name)
         object.__setattr__(self, "checksum", checksum)
+        observations = (self.observed_size_bytes, self.observed_checksum, self.observed_mtime_ns, self.observed_at)
+        if any(value is not None for value in observations):
+            if any(value is None for value in observations):
+                raise AttachmentValidationError("파일 관측 정보는 한 번의 확인 결과로 함께 저장해야 합니다.")
+            assert self.observed_size_bytes is not None and self.observed_checksum is not None and self.observed_mtime_ns is not None and self.observed_at is not None
+            FileObservation(self.observed_size_bytes, self.observed_checksum, self.observed_mtime_ns, self.observed_at)
+        if self.last_check_status is not None:
+            object.__setattr__(self, "last_check_status", AttachmentCheckStatus(self.last_check_status))
 
         for label, value in (
             ("생성 시각", self.created_at),
             ("누락 확인 시각", self.missing_at),
             ("연결 해제 시각", self.detached_at),
+            ("최근 확인 시각", self.last_checked_at),
         ):
             if value is not None and value.tzinfo is None:
                 raise AttachmentValidationError(f"첨부파일 {label}에는 시간대가 필요합니다.")

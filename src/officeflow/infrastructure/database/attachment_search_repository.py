@@ -53,7 +53,8 @@ class SqlAlchemyAttachmentSearchRepository:
             AttachmentRecord.id,
             AttachmentRecord.task_id,
             AttachmentRecord.original_name,
-            AttachmentRecord.size_bytes,
+            func.coalesce(AttachmentRecord.observed_size_bytes, AttachmentRecord.size_bytes).label("size_bytes"),
+            AttachmentRecord.observed_at,
             AttachmentRecord.created_at,
             AttachmentRecord.missing_at,
             AttachmentRecord.detached_at,
@@ -126,6 +127,7 @@ class SqlAlchemyAttachmentSearchRepository:
                 deleted=row.deleted_at is not None,
                 detached=row.detached_at is not None,
                 missing=row.missing_at is not None,
+                size_observed=row.observed_at is not None,
             )
             for row in rows[: query.limit]
         )

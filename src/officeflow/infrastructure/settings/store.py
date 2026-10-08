@@ -39,6 +39,7 @@ class AppSettings:
     hourly_notification_morning_continuation_required: bool = True
     hourly_notification_holiday_date: str | None = None
     hourly_notification_morning_continuation_date: str | None = None
+    attachment_export_directory: str | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.missed_reminder_grace_minutes <= 43_200:
@@ -54,6 +55,8 @@ class AppSettings:
         except ZoneInfoNotFoundError as error:
             raise ValueError("지원하지 않는 시간대입니다.") from error
         hourly_settings(self)
+        if self.attachment_export_directory is not None and (not isinstance(self.attachment_export_directory, str) or not self.attachment_export_directory.strip() or "\x00" in self.attachment_export_directory):
+            raise ValueError("첨부 저장 폴더가 올바르지 않습니다.")
 
 
 def hourly_settings(settings: AppSettings) -> HourlySettings:
@@ -91,6 +94,9 @@ class JsonSettingsStore:
                 return AppSettings()
             allowed = AppSettings.__dataclass_fields__.keys()
             values = {key: value for key, value in raw.items() if key in allowed}
+            export_directory = values.get("attachment_export_directory")
+            if export_directory is not None and (not isinstance(export_directory, str) or not export_directory.strip() or "\x00" in export_directory):
+                values.pop("attachment_export_directory", None)
             collapsed = values.get("collapsed_today_groups")
             if isinstance(collapsed, list):
                 values["collapsed_today_groups"] = tuple(

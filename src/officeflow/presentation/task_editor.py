@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.reminder_runtime import ReminderRuntimeState
 from officeflow.application.task_saving import ReminderEdit
 from officeflow.application.tasks import TaskDraft
 from officeflow.domain.enums import ReminderRelation, TaskPriority, TaskStatus
@@ -62,6 +63,7 @@ class TaskEditorDialog(QDialog):
         self._draft: TaskDraft | None = None
         self._on_save = on_save
         self._deliveries = deliveries
+        self._runtime: ReminderRuntimeState | None = None
         self._reminder_edits: tuple[ReminderEdit, ...] = ()
         self._reminder_settings: ReminderSettingsDialog | None = None
         self._date_rows: dict[QWidget, QWidget] = {}
@@ -303,6 +305,13 @@ class TaskEditorDialog(QDialog):
     def reminder_edits(self) -> tuple[ReminderEdit, ...]:
         return self._reminder_edits
 
+    def update_runtime_state(self, state: ReminderRuntimeState) -> None:
+        self._runtime = state
+        self._deliveries = state.deliveries
+        if self._reminder_settings:
+            self._reminder_settings.update_runtime_state(state)
+        self._refresh_reminder_summary()
+
     def update_delivery_states(self, deliveries: tuple[ReminderDelivery, ...]) -> None:
         if deliveries == self._deliveries:
             return
@@ -320,7 +329,13 @@ class TaskEditorDialog(QDialog):
     def _refresh_reminder_summary(self) -> None:
         try:
             task = self._preview_task()
-            self.reminder_summary.setText(reminder_summary(self._reminder_edits, task, datetime.now(UTC), self._deliveries))
+            preview = reminder_summary(self._reminder_edits, task, datetime.now(UTC))
+            if self._runtime:
+                actual = self._runtime
+                actual_edits = tuple(ReminderEdit(ReminderRuleInput(r.relation, r.offset_minutes, r.absolute_at, r.enabled), r.id) for r in actual.reminders)
+                execution = reminder_summary(actual_edits, actual.task, datetime.now(UTC), actual.deliveries, actual)
+                preview = "실제 상태: " + execution + "\n미저장 설정 미리보기: " + preview
+            self.reminder_summary.setText(preview)
             if self._reminder_settings:
                 self._reminder_settings.update_basis(task)
         except ValueError:
@@ -337,6 +352,8 @@ class TaskEditorDialog(QDialog):
             self.error_label.show()
             return
         self._reminder_settings = dialog
+        if self._runtime:
+            dialog.update_runtime_state(self._runtime)
         self.save_button.setEnabled(False)
         def finished(result: int) -> None:
             if result == QDialog.DialogCode.Accepted:

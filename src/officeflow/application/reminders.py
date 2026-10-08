@@ -7,6 +7,7 @@ from time import monotonic
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from officeflow.application.reminder_runtime import ReminderRuntimeState
 from officeflow.application.tasks import TaskService
 from officeflow.domain.enums import (
     OccurrenceStatus,
@@ -110,6 +111,12 @@ class ReminderService:
     def task_deliveries(self, task_id: int) -> tuple[ReminderDelivery, ...]:
         query = getattr(self._repository, "task_deliveries", None)
         return tuple(query(task_id)) if query else ()
+
+    def runtime_state(self, task_id: int) -> ReminderRuntimeState:
+        query = getattr(self._repository, "runtime_state", None)
+        if query is None:
+            return ReminderRuntimeState(self._task_service.get_including_deleted(task_id), (), self.task_deliveries(task_id), self.reminders_for_task(task_id), datetime.now(UTC))
+        return query(task_id)  # type: ignore[no-any-return]
 
     def active_snoozes(self) -> tuple[ReminderDelivery, ...]:
         """Return pending snoozes that should remain visible to the user."""

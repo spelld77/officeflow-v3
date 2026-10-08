@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, tuple_, update
 from sqlalchemy.dialects.sqlite import insert
 
+from officeflow.application.reminder_runtime import ReminderRuntimeState
 from officeflow.application.reminders import ReminderTarget
 from officeflow.application.task_saving import ReminderEdit
-from officeflow.domain.enums import ReminderDeliveryStatus, ReminderRelation, TaskStatus
+from officeflow.domain.enums import (
+    OccurrenceStatus,
+    ReminderDeliveryStatus,
+    ReminderRelation,
+    TaskStatus,
+)
 from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.reminder import Reminder, ReminderDelivery, ReminderRuleInput
 from officeflow.infrastructure.database.models import (
@@ -41,6 +47,46 @@ class SqlAlchemyReminderRepository:
                 ReminderDeliveryRecord.status.in_(("fired", "snoozed")))).order_by(ReminderDeliveryRecord.updated_at.desc()).limit(1000)
         with self._sessions.transaction() as session:
             return tuple(self._to_delivery(row) for row in session.scalars(statement))
+
+    def occurrence_states(self, keys: tuple[tuple[int, datetime], ...]) -> dict[tuple[int, datetime], OccurrenceStatus]:
+        result: dict[tuple[int, datetime], OccurrenceStatus] = {}
+        with self._sessions.transaction() as session:
+            for offset in range(0, len(keys), 200):
+                statement = select(TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.occurrence_start, TaskOccurrenceRecord.status).where(tuple_(TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.occurrence_start).in_(keys[offset:offset + 200]))
+                for task_id, start, status in session.execute(statement):
+                    result[task_id, start] = OccurrenceStatus(status)
+        return result
+
+    def runtime_state(self, task_id: int) -> ReminderRuntimeState:
+        with self.read_snapshot() as repo:
+            tasks = SqlAlchemyTaskRepository(repo._sessions)
+            task = tasks.get(task_id) or tasks.get_deleted(task_id)
+            if task is None:
+                raise ValueError("업무를 찾을 수 없습니다.")
+            deliveries = repo.task_deliveries(task_id)
+            reminders = repo.list_reminders(task_id)
+            keys = {(task_id, d.occurrence_start) for d in deliveries if d.occurrence_start is not None}
+            keys.update((task_id, r.next_occurrence_start) for r in reminders if r.next_occurrence_start is not None)
+            from officeflow.application.reminders import ReminderService
+            next_starts = []
+            for reminder in reminders:
+                next_item = ReminderService._next_candidate(ReminderTarget(reminder, task), after=datetime.now(UTC).replace(second=0, microsecond=0), inclusive=True)
+                if next_item and next_item[0] is not None:
+                    keys.add((task_id, next_item[0]))
+                    next_starts.append(next_item[0])
+            states = repo.occurrence_states(tuple(keys))
+            if next_starts:
+                # A completed current occurrence can be followed by another
+                # explicitly skipped occurrence. Read these in one bounded
+                # query, not per projected reminder row.
+                statement = select(TaskOccurrenceRecord.occurrence_start, TaskOccurrenceRecord.status).where(
+                    TaskOccurrenceRecord.task_id == task_id,
+                    TaskOccurrenceRecord.occurrence_start >= min(next_starts),
+                    TaskOccurrenceRecord.status.in_(("completed", "skipped", "canceled")),
+                ).order_by(TaskOccurrenceRecord.occurrence_start).limit(512)
+                with repo._sessions.transaction() as session:
+                    states.update(((task_id, start), OccurrenceStatus(status)) for start, status in session.execute(statement))
+            return ReminderRuntimeState(task, tuple((start, status) for (_id, start), status in states.items()), deliveries, reminders, datetime.now(UTC))
 
     @staticmethod
     def _target_matches(current: ReminderTarget | None, expected: ReminderTarget) -> bool:

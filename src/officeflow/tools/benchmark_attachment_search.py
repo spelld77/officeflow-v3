@@ -14,7 +14,7 @@ from statistics import median
 from time import perf_counter
 
 from alembic import command
-from sqlalchemy import insert
+from sqlalchemy import text
 
 from officeflow.application.attachment_search import AttachmentSearchHit, AttachmentSearchQuery
 from officeflow.application.tasks import TaskQuery, TaskService, TaskView
@@ -22,7 +22,6 @@ from officeflow.infrastructure.database.attachment_search_repository import (
     SqlAlchemyAttachmentSearchRepository,
 )
 from officeflow.infrastructure.database.migrate import migration_config, upgrade_database
-from officeflow.infrastructure.database.models import AttachmentRecord
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 from officeflow.tools.sample_data import generate
@@ -45,7 +44,9 @@ def benchmark(
         with sessions.transaction() as session:
             for start in range(0, attachments, 1000):
                 session.execute(
-                    insert(AttachmentRecord),
+                    # Seed the deliberately downgraded schema, not the current
+                    # ORM model with columns absent from that historical DB.
+                    text("INSERT INTO attachments (task_id, original_name, stored_name, relative_path, size_bytes, created_at) VALUES (:task_id, :original_name, :stored_name, :relative_path, :size_bytes, :created_at)"),
                     [
                         dict(
                             task_id=i % tasks + 1,

@@ -42,7 +42,7 @@ from officeflow.presentation.dates import format_datetime
 
 def preview_text(item: ReminderPreviewItem, timezone: str) -> str:
     attachment = " · 첨부" if item.task.has_attachments else ""
-    return f"{format_datetime(item.effective_at, timezone, short=True)}  {item.task.title}{attachment} · {item.status}"
+    return f"{format_datetime(item.effective_at, timezone, short=True)}  {item.task.title}{attachment} · {item.display_status}"
 
 
 class ReminderPreviewDelegate(QStyledItemDelegate):
@@ -71,7 +71,7 @@ class ReminderPreviewDelegate(QStyledItemDelegate):
         painter.setPen(opt.palette.text().color())
         metrics = opt.fontMetrics
         rect = opt.rect.adjusted(8, 0, -8, 0)
-        status = {"시각 지남 · 발생 기록 없음": "발생 기록 없음"}.get(item.status, item.status)
+        status = {"시각 지남 · 발생 기록 없음": "발생 기록 없음"}.get(item.display_status, item.display_status)
         state_width = min(metrics.horizontalAdvance(status) + 8, int(rect.width() * 0.4))
         time_width = metrics.horizontalAdvance("00:00") + 14
         painter.drawText(
@@ -273,7 +273,9 @@ class ReminderPreviewWidget(QWidget):
     def set_result(self, result: ReminderPreviewResult) -> None:
         self._result = result
         pending = tuple(i for i in result.items if i.is_pending)
-        visible = (pending or result.items)[: self._max_rows]
+        attention = tuple(i for i in result.items if i.needs_attention)
+        history = len(result.items) - len(pending) - len(attention)
+        visible = (pending + attention or result.items)[: self._max_rows]
         self._fill(self.list, visible)
         row_height = max(32, self.list.fontMetrics().height() + 12)
         self.list.setFixedHeight(len(visible) * row_height + 10 if visible else 32)
@@ -285,7 +287,7 @@ class ReminderPreviewWidget(QWidget):
             else f"{len(result.items)}건 이상 · 일부 조회"
         )
         self.label.setText(
-            f"오늘 알림 · {count} · {len(visible)}건 표시"
+            f"오늘 알림 · 확인할/예정 {len(pending)}건 · 처리 이력 {history}건" + (f" · 발생 기록 확인 필요 {len(attention)}건" if attention else "") + f" · {count} · {len(visible)}건 표시"
             if result.items
             else "오늘 예약된 알림이 없습니다"
             if result.complete

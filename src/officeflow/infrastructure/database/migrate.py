@@ -76,7 +76,8 @@ def upgrade_database(database_file: Path, *, progress: Callable[[str], None] | N
                 progress("기존 데이터베이스의 보호 사본을 만들고 있습니다…")
             folder = database_file.parent / "schema-backups"
             folder.mkdir(exist_ok=True)
-            reason = "attachment-search" if needs_index else "attachment-order"
+            has_order = any(row[1] == "sort_order" for row in source.execute("PRAGMA table_info(attachments)"))
+            reason = "attachment-search" if needs_index else "attachment-order" if not has_order else "attachment-observation"
             backup = folder / f"pre-{reason}-{datetime.now(UTC):%Y%m%dT%H%M%S%f}.db"
             try:
                 with closing(sqlite3.connect(backup)) as target:
@@ -87,5 +88,5 @@ def upgrade_database(database_file: Path, *, progress: Callable[[str], None] | N
                 backup.unlink(missing_ok=True)
                 raise
     if progress is not None:
-        progress("데이터베이스와 첨부파일 순서를 준비하고 있습니다…")
+        progress("데이터베이스와 첨부파일 정보를 준비하고 있습니다…")
     command.upgrade(migration_config(database_file), "head")

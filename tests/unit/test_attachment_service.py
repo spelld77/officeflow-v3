@@ -16,7 +16,13 @@ from officeflow.application.attachments import (
     DuplicateAttachmentError,
 )
 from officeflow.application.tasks import TaskDraft, TaskService
-from officeflow.domain.attachment import Attachment, AttachmentMove, AttachmentValidationError
+from officeflow.domain.attachment import (
+    Attachment,
+    AttachmentCheckStatus,
+    AttachmentMove,
+    AttachmentValidationError,
+    FileObservation,
+)
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from tests.unit.test_task_service import InMemoryTaskRepository
 
@@ -75,6 +81,25 @@ class InMemoryAttachmentRepository(AttachmentRepository):
         saved = replace(self.items[attachment_id], checksum=checksum)
         self.items[attachment_id] = saved
         return saved
+
+    def update_observation_if_current(self, expected: Attachment, observation: FileObservation | None, status: AttachmentCheckStatus, checked_at: datetime) -> Attachment | None:
+        current = self.items.get(expected.id_required)
+        if current is None or (current.relative_path, current.observed_at, current.last_checked_at, current.detached_at) != (expected.relative_path, expected.observed_at, expected.last_checked_at, expected.detached_at):
+            return None
+        values = {"last_check_status": status, "last_checked_at": checked_at}
+        if observation:
+            values.update(observed_size_bytes=observation.size_bytes, observed_checksum=observation.checksum, observed_mtime_ns=observation.mtime_ns, observed_at=observation.observed_at, missing_at=None)
+        elif status is AttachmentCheckStatus.MISSING:
+            values["missing_at"] = current.missing_at or checked_at
+        saved = replace(current, **values)
+        self.items[expected.id_required] = saved
+        return saved
+
+    def paths_for_task(self, task_id: int) -> tuple[str, ...]:
+        return tuple(item.relative_path for item in self.items.values() if item.task_id == task_id)
+
+    def is_path_registered(self, relative_path: str) -> bool:
+        return any(item.relative_path == relative_path for item in self.items.values())
 
     def set_detached_at(
         self, attachment_id: int, detached_at: datetime | None

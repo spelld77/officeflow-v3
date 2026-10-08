@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
@@ -284,6 +284,10 @@ class TaskService:
     def __init__(self, repository: TaskRepository, *, timezone: str = "Asia/Seoul") -> None:
         self._repository = repository
         self._timezone = timezone
+        self._file_delete_guard: Callable[[int], AbstractContextManager[None]] | None = None
+
+    def set_file_delete_guard(self, guard: Callable[[int], AbstractContextManager[None]]) -> None:
+        self._file_delete_guard = guard
 
     def create(self, draft: TaskDraft, *, now: datetime | None = None) -> Task:
         task = Task.create(
@@ -456,7 +460,8 @@ class TaskService:
             raise TaskNotFoundError(
                 f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다."
             )
-        return self._repository.delete_permanently(task_id)
+        with self._file_delete_guard(task_id) if self._file_delete_guard else nullcontext():
+            return self._repository.delete_permanently(task_id)
 
     def query(self, query: TaskQuery, *, now: datetime | None = None) -> TaskPage:
         current, day_start, day_end = self._time_context(now)

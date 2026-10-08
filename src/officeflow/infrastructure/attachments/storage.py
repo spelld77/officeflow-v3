@@ -4,10 +4,13 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from stat import S_ISREG
 from time import monotonic
+from typing import BinaryIO
 from uuid import uuid4
 
 from officeflow.application.attachments import (
@@ -16,20 +19,24 @@ from officeflow.application.attachments import (
     QuarantinedAttachment,
     StoredAttachment,
 )
-from officeflow.infrastructure.attachments.coordination import attachment_gate
+from officeflow.application.file_operations import FileOperationCoordinator
+from officeflow.domain.attachment import FileObservation
+from officeflow.infrastructure.attachments.coordination import attachment_coordinator
+from officeflow.infrastructure.attachments.read_lease import protected_read
 
 _SAFE_EXTENSION = re.compile(r"^\.[A-Za-z0-9]{1,16}$")
 _COPY_CHUNK_SIZE = 1024 * 1024
 
 
 class ManagedAttachmentStorage:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, coordinator: FileOperationCoordinator | None = None) -> None:
         self._root = root.resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._quarantine_root = self._root / ".trash"
+        self.coordinator = coordinator or attachment_coordinator(self._root)
 
     def operation_lock(self) -> AbstractContextManager[bool]:
-        return attachment_gate(self._root)
+        return self.coordinator.gate
 
     @property
     def root(self) -> Path:
@@ -40,6 +47,7 @@ class ManagedAttachmentStorage:
         source: Path,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        reserve_published: Callable[[str], None] | None = None,
     ) -> StoredAttachment:
         try:
             source_path = source.resolve(strict=True)
@@ -71,6 +79,8 @@ class ManagedAttachmentStorage:
                 os.fsync(target_stream.fileno())
             with self.operation_lock():
                 os.replace(temporary, destination)
+                if reserve_published:
+                    reserve_published(relative_path)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -87,7 +97,7 @@ class ManagedAttachmentStorage:
         candidate = (self._root / relative_path).resolve(strict=False)
         if not candidate.is_relative_to(self._root) or candidate == self._root:
             raise AttachmentOperationError("첨부파일 경로가 관리 폴더를 벗어납니다.")
-        if require_exists and (not candidate.exists() or not candidate.is_file()):
+        if require_exists and not S_ISREG(candidate.stat().st_mode):
             raise FileNotFoundError(candidate)
         return candidate
 
@@ -128,12 +138,14 @@ class ManagedAttachmentStorage:
 
     def remove(self, relative_path: str) -> None:
         with self.operation_lock():
+            self.coordinator.assert_not_pinned((relative_path,))
             path = self.resolve(relative_path, require_exists=False)
             path.unlink(missing_ok=True)
             self._remove_empty_parents(path.parent)
 
     def quarantine(self, relative_path: str) -> QuarantinedAttachment:
         with self.operation_lock():
+            self.coordinator.assert_not_pinned((relative_path,))
             source = self.resolve(relative_path)
             if source.is_relative_to(self._quarantine_root):
                 raise AttachmentOperationError("격리 파일은 다시 삭제 대상으로 옮길 수 없습니다.")
@@ -149,6 +161,20 @@ class ManagedAttachmentStorage:
             os.replace(source, destination)
             self._remove_empty_parents(source.parent)
             return record
+
+    def observe(self, relative_path: str, *, cancel_requested: Callable[[], bool] | None = None, progress: Callable[[int, int], None] | None = None, now: datetime | None = None) -> FileObservation:
+        path = self.resolve(relative_path)
+        before = path.stat()
+        digest = self.checksum(relative_path, cancel_requested=cancel_requested, progress=progress)
+        after = path.stat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise AttachmentOperationError("검사 중 파일이 변경되었습니다. 저장을 마친 뒤 다시 확인하세요.")
+        return FileObservation(after.st_size, digest, after.st_mtime_ns, now or datetime.now(UTC))
+
+    @contextmanager
+    def protected_read(self, relative_path: str) -> Iterator[BinaryIO]:
+        with protected_read(self.resolve(relative_path)) as stream:
+            yield stream
 
     def restore(self, quarantined: QuarantinedAttachment) -> None:
         source = self.resolve(quarantined.quarantine_relative_path)

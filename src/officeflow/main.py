@@ -9,9 +9,11 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from officeflow import __version__
+from officeflow.application.attachment_export import AttachmentExportService
 from officeflow.application.attachment_search import AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
+from officeflow.application.file_operations import FileOperationCoordinator
 from officeflow.application.records import RecordService
 from officeflow.application.reminder_preview import ReminderPreviewService
 from officeflow.application.reminders import ReminderService
@@ -20,6 +22,7 @@ from officeflow.bootstrap.logging import configure_logging
 from officeflow.bootstrap.paths import AppPaths
 from officeflow.bootstrap.run_state import RunStateTracker
 from officeflow.bootstrap.single_instance import SingleInstanceCoordinator, instance_name
+from officeflow.infrastructure.attachments.export_storage import ExternalExportStorage
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from officeflow.infrastructure.backup import BackupError, BackupManager
 from officeflow.infrastructure.database.attachment_repository import (
@@ -61,7 +64,8 @@ def build_application(
     paths = AppPaths.discover()
     paths.ensure_directories()
     configure_logging(paths.log_dir)
-    backup_manager = BackupManager(paths)
+    file_coordinator = FileOperationCoordinator()
+    backup_manager = BackupManager(paths, coordinator=file_coordinator)
     def apply_restore() -> None:
         if backup_manager.restore_is_pending:
             def restore(progress: Callable[[str], None]) -> None:
@@ -91,7 +95,7 @@ def build_application(
     record_service = RecordService(SqlAlchemyRecordRepository(sessions), task_service)
     attachment_service = AttachmentService(
         SqlAlchemyAttachmentRepository(sessions),
-        ManagedAttachmentStorage(paths.attachment_dir),
+        ManagedAttachmentStorage(paths.attachment_dir, coordinator=file_coordinator),
         task_service,
     )
     export_service = ExportService(
@@ -111,6 +115,7 @@ def build_application(
             if on_clean_shutdown is not None:
                 on_clean_shutdown()
 
+    external_storage = ExternalExportStorage(paths.root)
     window = MainWindow(
         settings=settings,
         task_service=task_service,
@@ -119,6 +124,7 @@ def build_application(
         reminder_preview_service=ReminderPreviewService(SqlAlchemyReminderRepository(sessions), reminder_service),
         record_service=record_service,
         attachment_service=attachment_service,
+        attachment_export_service=AttachmentExportService(attachment_service, external_storage),
         attachment_search_service=AttachmentSearchService(
             SqlAlchemyAttachmentSearchRepository(sessions)
         ),
@@ -135,6 +141,8 @@ def build_application(
             "데이터 복구·정리 확인 필요: " + " · ".join(backup_manager.restore_warnings + recovery_warnings),
             15_000,
         )
+    if external_storage.has_pending_operations():
+        window.statusBar().showMessage("외부 파일 저장 중단 확인 필요 · 데이터 → 첨부 정리 → 중단된 저장 확인")
     return app, window
 
 

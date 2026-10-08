@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
-from officeflow.domain.attachment import Attachment, AttachmentMove
+from officeflow.domain.attachment import (
+    Attachment,
+    AttachmentCheckStatus,
+    AttachmentMove,
+    FileObservation,
+)
 from officeflow.infrastructure.database.models import AttachmentRecord, TaskRecord
 from officeflow.infrastructure.database.search import attachment_match_summaries
 from officeflow.infrastructure.database.session import SessionFactory
@@ -69,6 +74,12 @@ class SqlAlchemyAttachmentRepository:
                 relative_path=attachment.relative_path,
                 size_bytes=attachment.size_bytes,
                 checksum=attachment.checksum,
+                observed_size_bytes=attachment.observed_size_bytes,
+                observed_checksum=attachment.observed_checksum,
+                observed_mtime_ns=attachment.observed_mtime_ns,
+                observed_at=attachment.observed_at,
+                last_check_status=attachment.last_check_status,
+                last_checked_at=attachment.last_checked_at,
                 created_at=attachment.created_at,
                 missing_at=attachment.missing_at,
                 detached_at=attachment.detached_at,
@@ -128,6 +139,25 @@ class SqlAlchemyAttachmentRepository:
             record.checksum = checksum
         return self._get_required(attachment_id)
 
+    def update_observation_if_current(self, expected: Attachment, observation: FileObservation | None, status: AttachmentCheckStatus, checked_at: datetime) -> Attachment | None:
+        values: dict[str, object] = {"last_check_status": status.value, "last_checked_at": checked_at}
+        if observation:
+            values.update(observed_size_bytes=observation.size_bytes, observed_checksum=observation.checksum, observed_mtime_ns=observation.mtime_ns, observed_at=observation.observed_at, missing_at=None)
+        elif status is AttachmentCheckStatus.MISSING:
+            values["missing_at"] = expected.missing_at or checked_at
+        statement = update(AttachmentRecord).where(AttachmentRecord.id == expected.id_required, AttachmentRecord.relative_path == expected.relative_path, AttachmentRecord.observed_at == expected.observed_at, AttachmentRecord.last_checked_at == expected.last_checked_at, AttachmentRecord.detached_at == expected.detached_at).values(**values)
+        with self._sessions.transaction() as session:
+            changed = session.execute(statement).rowcount  # type: ignore[attr-defined]
+        return self.get_attachment(expected.id_required) if changed else None
+
+    def is_path_registered(self, relative_path: str) -> bool:
+        with self._sessions.transaction() as session:
+            return session.scalar(select(AttachmentRecord.id).where(AttachmentRecord.relative_path == relative_path).limit(1)) is not None
+
+    def paths_for_task(self, task_id: int) -> tuple[str, ...]:
+        with self._sessions.transaction() as session:
+            return tuple(session.scalars(select(AttachmentRecord.relative_path).where(AttachmentRecord.task_id == task_id)))
+
     def set_detached_at(
         self,
         attachment_id: int,
@@ -167,4 +197,10 @@ class SqlAlchemyAttachmentRepository:
             missing_at=record.missing_at,
             detached_at=record.detached_at,
             sort_order=record.sort_order,
+            observed_size_bytes=record.observed_size_bytes,
+            observed_checksum=record.observed_checksum,
+            observed_mtime_ns=record.observed_mtime_ns,
+            observed_at=record.observed_at,
+            last_check_status=AttachmentCheckStatus(record.last_check_status) if record.last_check_status else None,
+            last_checked_at=record.last_checked_at,
         )

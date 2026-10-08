@@ -154,6 +154,7 @@ class AttachmentRecord(Base):
         Index("ix_attachments_detached_created", "detached_at", "created_at"),
         Index("ix_attachments_created_id", "created_at", "id"),
         Index("ix_attachments_task_order", "task_id", "sort_order", "id"),
+        Index("ix_attachments_task_observed", "task_id", "observed_checksum"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -164,6 +165,12 @@ class AttachmentRecord(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     checksum: Mapped[str | None] = mapped_column(String(64))
     sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    observed_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    observed_checksum: Mapped[str | None] = mapped_column(String(64))
+    observed_mtime_ns: Mapped[int | None] = mapped_column(Integer)
+    observed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_check_status: Mapped[str | None] = mapped_column(String(32))
+    last_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
     missing_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     detached_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

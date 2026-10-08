@@ -21,6 +21,45 @@ from officeflow.infrastructure.database.session import SessionFactory, create_da
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 
 
+def test_observation_backup_restores_current_bytes_not_initial_hash(tmp_path):
+    from officeflow.application.attachments import AttachmentService
+    from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
+    from officeflow.infrastructure.database.attachment_repository import (
+        SqlAlchemyAttachmentRepository,
+    )
+    paths = AppPaths(tmp_path / "observations")
+    paths.ensure_directories()
+    upgrade_database(paths.database_file)
+    engine = create_database_engine(paths.database_file)
+    sessions = SessionFactory(engine)
+    tasks = TaskService(SqlAlchemyTaskRepository(sessions))
+    repository = SqlAlchemyAttachmentRepository(sessions)
+    managed = ManagedAttachmentStorage(paths.attachment_dir)
+    attachments = AttachmentService(repository, managed, tasks)
+    task = tasks.create(TaskDraft(title="편집된 자료"))
+    source = tmp_path / "edited.txt"
+    source.write_bytes(b"initial")
+    original = attachments.attach(task.id, source)
+    managed.resolve(original.relative_path).write_bytes(b"current saved content")
+    observed = attachments.verify(original.id).attachment
+    manager = BackupManager(paths, coordinator=managed.coordinator)
+    usage = manager.inspect_data_usage()
+    assert usage.linked_attachment_bytes == len(b"current saved content")
+    backup = manager.create_backup()
+    manager.stage_restore(backup.path)
+    engine.dispose()
+    manager.apply_pending_restore()
+    upgrade_database(paths.database_file)
+    engine = create_database_engine(paths.database_file)
+    try:
+        restored = SqlAlchemyAttachmentRepository(SessionFactory(engine)).get_attachment(original.id)
+        assert restored == observed
+        assert restored.checksum == original.checksum and restored.observed_checksum != restored.checksum
+        assert managed.resolve(original.relative_path).read_bytes() == b"current saved content"
+    finally:
+        engine.dispose()
+
+
 def _database(path, values: tuple[str, ...]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.is_file():

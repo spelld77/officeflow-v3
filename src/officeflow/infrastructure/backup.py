@@ -18,8 +18,11 @@ from typing import Any
 
 from alembic.script import ScriptDirectory
 
+from officeflow.application.file_operations import FileOperationCoordinator
 from officeflow.bootstrap.paths import AppPaths
-from officeflow.infrastructure.attachments.coordination import attachment_gate
+from officeflow.infrastructure.attachments.coordination import (
+    attachment_coordinator,
+)
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
 from officeflow.infrastructure.database.migrate import migration_config
 
@@ -126,6 +129,8 @@ class DataUsageSnapshot:
     largest_files: tuple[LargeStoredFile, ...]
     quarantine_file_count: int = 0
     quarantine_bytes: int = 0
+    unverified_attachment_count: int = 0
+    unavailable_attachment_count: int = 0
 
     @property
     def total_bytes(self) -> int:
@@ -138,13 +143,14 @@ class DataUsageSnapshot:
 
 
 class BackupManager:
-    def __init__(self, paths: AppPaths) -> None:
+    def __init__(self, paths: AppPaths, *, coordinator: FileOperationCoordinator | None = None) -> None:
         self._paths = paths
+        self._coordinator = coordinator or attachment_coordinator(paths.attachment_dir)
         self.restore_warnings: tuple[str, ...] = ()
 
     def recover_attachment_deletions(self) -> tuple[str, ...]:
-        with attachment_gate(self._paths.attachment_dir):
-            storage = ManagedAttachmentStorage(self._paths.attachment_dir)
+        with self._coordinator.gate:
+            storage = ManagedAttachmentStorage(self._paths.attachment_dir, coordinator=self._coordinator)
             return storage.recover_quarantine(self._tracked_attachment_paths())
 
     @property
@@ -198,7 +204,7 @@ class BackupManager:
                 ).fetchone()
                 attachment_rows = connection.execute(
                     """
-                    SELECT original_name, relative_path, size_bytes, checksum, detached_at
+                    SELECT original_name, relative_path, COALESCE(observed_size_bytes, size_bytes), observed_checksum, detached_at, observed_mtime_ns, last_check_status
                     FROM attachments
                     """
                 ).fetchall()
@@ -221,7 +227,7 @@ class BackupManager:
 
         tracked = {
             str(relative_path): (str(original_name), int(size_bytes), checksum, detached_at)
-            for original_name, relative_path, size_bytes, checksum, detached_at in attachment_rows
+            for original_name, relative_path, size_bytes, checksum, detached_at, _mtime, _state in attachment_rows
         }
         linked = {
             relative: (name, size, checksum)
@@ -234,10 +240,7 @@ class BackupManager:
             if detached_at is not None
         }
         checksum_sizes: dict[str, list[int]] = {}
-        for _name, size, checksum in linked.values():
-            if checksum:
-                checksum_sizes.setdefault(str(checksum), []).append(size)
-        duplicate_groups = [sizes for sizes in checksum_sizes.values() if len(sizes) > 1]
+        unverified_count = 0
         stored: dict[str, tuple[Path, int]] = {}
         quarantined: list[int] = []
         if self._paths.attachment_dir.is_dir():
@@ -251,10 +254,21 @@ class BackupManager:
                     continue
                 stored[relative_path.as_posix()] = (path, path.stat().st_size)
 
+        for _name, relative, size, checksum, detached_at, mtime, state in attachment_rows:
+            if detached_at is not None:
+                continue
+            sample = stored.get(str(relative))
+            if sample and checksum and state in {"unchanged", "modified", "no_baseline"} and sample[1] == size and sample[0].stat().st_mtime_ns == mtime:
+                checksum_sizes.setdefault(str(checksum), []).append(int(size))
+            else:
+                unverified_count += 1
+        duplicate_groups = [sizes for sizes in checksum_sizes.values() if len(sizes) > 1]
+
         linked_paths = set(linked)
         tracked_paths = set(tracked)
         stored_paths = set(stored)
-        orphan_paths = stored_paths - tracked_paths
+        coordinator = self._coordinator
+        orphan_paths = {path for path in stored_paths - tracked_paths if not coordinator.is_pinned(path)}
         largest = sorted(
             (
                 LargeStoredFile(
@@ -311,10 +325,10 @@ class BackupManager:
             aged_trash_task_count=int(task_row[5]),
             reminder_cleanup_candidate_count=reminder_cleanup_candidate_count,
             linked_attachment_count=len(linked),
-            linked_attachment_bytes=sum(size for _name, size, _checksum in linked.values()),
+            linked_attachment_bytes=sum(stored[path][1] for path in linked if path in stored),
             detached_attachment_count=len(detached),
             detached_attachment_bytes=sum(
-                size for _name, size, _checksum, _at in detached.values()
+                stored[path][1] for path in detached if path in stored
             ),
             aged_detached_attachment_count=sum(
                 1
@@ -337,6 +351,8 @@ class BackupManager:
             largest_files=tuple(largest),
             quarantine_file_count=len(quarantined),
             quarantine_bytes=sum(quarantined),
+            unverified_attachment_count=unverified_count,
+            unavailable_attachment_count=len(tracked_paths - stored_paths),
         )
 
     def list_orphan_attachment_files(
@@ -355,7 +371,7 @@ class BackupManager:
             if not path.is_file() or any(part.startswith(".") for part in relative.parts):
                 continue
             relative_path = relative.as_posix()
-            if relative_path in tracked:
+            if relative_path in tracked or self._coordinator.is_pinned(relative_path):
                 continue
             stat = path.stat()
             items.append(
@@ -369,7 +385,8 @@ class BackupManager:
         return tuple(sorted(items, key=lambda item: item.modified_at, reverse=True))
 
     def delete_orphan_attachment_file(self, relative_path: str) -> None:
-        with attachment_gate(self._paths.attachment_dir):
+        with self._coordinator.gate:
+            self._coordinator.assert_not_pinned((relative_path,))
             self._delete_orphan_attachment_file_locked(relative_path)
 
     def _delete_orphan_attachment_file_locked(self, relative_path: str) -> None:
@@ -440,7 +457,7 @@ class BackupManager:
                 snapshot = working / "officeflow.db"
                 captures = working / "captures"
                 captures.mkdir()
-                with attachment_gate(self._paths.attachment_dir):
+                with self._coordinator.gate:
                     for warning in self.recover_attachment_deletions():
                         logger.warning(warning)
                     missing_before = {

@@ -84,7 +84,8 @@ def _snapshot(paths: AppPaths) -> dict[str, list[tuple[object, ...]]]:
         for table in TABLES:
             # Compare every original field across old/new schemas. The new order
             # column is separately covered by attachment migration tests.
-            columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})") if row[1] != "sort_order"]
+            added = {"sort_order", "observed_size_bytes", "observed_checksum", "observed_mtime_ns", "observed_at", "last_check_status", "last_checked_at"}
+            columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})") if row[1] not in added]
             quoted = ",".join('"' + column.replace('"', '""') + '"' for column in columns)
             result[table] = list(connection.execute(f"SELECT {quoted} FROM {table} ORDER BY rowid"))
         return result
@@ -189,7 +190,7 @@ def test_imported_v3_backup_and_pending_restore_preserve_all_data(
         assert list(connection.execute("PRAGMA foreign_key_check")) == []
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0011_attachment_sort_order"
+            == "0012_attachment_observation"
         )
 
 

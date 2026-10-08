@@ -9,6 +9,7 @@ __pycache__/
 htmlcov/
 .venv/
 .local-data/
+.test-tmp/
 wheelhouse/
 artifacts/
 

@@ -49,9 +49,11 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow import __version__
+from officeflow.application.attachment_export import AttachmentExportService, FileReference
 from officeflow.application.attachment_search import AttachmentSearchHit, AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
+from officeflow.application.file_operations import FileInUseError
 from officeflow.application.hourly_notifications import HourlyState
 from officeflow.application.records import RecordService
 from officeflow.application.reminder_preview import (
@@ -73,7 +75,7 @@ from officeflow.application.tasks import (
 )
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.hourly_notification import HourlySettings
-from officeflow.domain.reminder import Reminder, ReminderDelivery, ReminderRuleInput
+from officeflow.domain.reminder import Reminder, ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
 from officeflow.infrastructure.backup import BackupInfo, BackupManager
 from officeflow.infrastructure.settings.store import (
@@ -84,6 +86,7 @@ from officeflow.infrastructure.settings.store import (
 from officeflow.infrastructure.windows.hotkey import WindowsGlobalHotkey
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.app_icon import create_app_icon
+from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_search_page import AttachmentSearchPageWidget
 from officeflow.presentation.background import OperationWorker, finish_thread
 from officeflow.presentation.data_dialog import DataManagementDialog
@@ -172,6 +175,7 @@ class MainWindow(QMainWindow):
         view_clock: Callable[[], datetime] | None = None,
         task_save_service: TaskSaveService | None = None,
         reminder_preview_service: ReminderPreviewService | None = None,
+        attachment_export_service: AttachmentExportService | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -189,6 +193,10 @@ class MainWindow(QMainWindow):
             self._preview_controller.failed.connect(lambda error: self.statusBar().showMessage(f"알림 미리보기 조회 실패: {error}", 8000))
         self._record_service = record_service
         self._attachment_service = attachment_service
+        self._attachment_export_service = attachment_export_service
+        self._attachment_export_controller = AttachmentExportController(attachment_export_service, self, initial_directory=settings.attachment_export_directory) if attachment_export_service else None
+        if self._attachment_export_controller:
+            self._attachment_export_controller.savedDirectory.connect(self._remember_attachment_export_directory)
         self._attachment_search_service = attachment_search_service
         self._file_search_active = False
         self._file_page: AttachmentSearchPageWidget | None = None
@@ -414,6 +422,7 @@ class MainWindow(QMainWindow):
             self._file_page.backRequested.connect(self._return_from_file_search)
             self._file_page.clearRequested.connect(self._clear_file_search)
             self._file_page.openRequested.connect(self._open_search_file)
+            self._file_page.saveRequested.connect(self._save_search_file)
             self._file_page.taskRequested.connect(lambda hit: self._open_file_records(hit, False))
             self._file_page.manageRequested.connect(lambda hit: self._open_file_records(hit, True))
             self._content_stack.addWidget(self._file_page)
@@ -1141,6 +1150,8 @@ class MainWindow(QMainWindow):
         if isinstance(dialog, TaskRecordsDialog):
             self._last_record_tab = dialog.current_tab_key
             dialog.tabChanged.connect(self._remember_record_tab)
+        if isinstance(dialog, (TaskRecordsDialog, WorkLogBrowserDialog, DataManagementDialog)):
+            dialog.exportDirectoryChanged.connect(self._remember_attachment_export_directory)
 
         def finished(_result: int) -> None:
             if dialog in self._file_dialogs:
@@ -1151,6 +1162,8 @@ class MainWindow(QMainWindow):
 
         dialog.finished.connect(finished)
         dialog.show()
+        if isinstance(dialog, (TaskEditorDialog, ReminderSettingsDialog)):
+            self._synchronize_reminder_dialog()
 
     def _remember_record_tab(self, key: str) -> None:
         self._last_record_tab = key
@@ -1175,6 +1188,8 @@ class MainWindow(QMainWindow):
             dialog = TaskRecordsDialog(
                 task, task_service=self._task_service, record_service=self._record_service,
                 attachment_service=self._attachment_service, occurrence_start=occurrence_start,
+                attachment_export_service=self._attachment_export_service,
+                attachment_export_directory=self._settings.attachment_export_directory,
                 initial_tab=initial_tab or self._last_record_tab, parent=self,
             )
             dialog.changed.connect(self._refresh_tasks)
@@ -1634,6 +1649,8 @@ class MainWindow(QMainWindow):
             query=self._build_query(offset=0, limit=None),
             attachment_service=self._attachment_service,
             task_service=self._task_service,
+            attachment_export_service=self._attachment_export_service,
+            attachment_export_directory=self._settings.attachment_export_directory,
             selected_task_ids=self._selected_task_ids_for_export(),
             automatic_backup_enabled=self._settings.automatic_backup_enabled,
             automatic_backup_interval_hours=(self._settings.automatic_backup_interval_hours),
@@ -1647,7 +1664,7 @@ class MainWindow(QMainWindow):
                 dialog.tabs.setCurrentIndex(dialog._cleanup_tab_index)
             self._keep_file_dialog(dialog)
         else:
-            dialog.exec()
+            self._keep_file_dialog(dialog)
 
     def _selected_task_ids_for_export(self) -> tuple[int, ...]:
         selected_ids: list[int] = []
@@ -1832,7 +1849,7 @@ class MainWindow(QMainWindow):
 
         try:
             attachment_paths = self._task_service.delete_permanently(self._selected_task_id)
-        except (LookupError, ValueError) as error:
+        except (LookupError, ValueError, FileInUseError) as error:
             self._show_error("업무를 영구 삭제하지 못했습니다.", error)
             return
 
@@ -1909,6 +1926,8 @@ class MainWindow(QMainWindow):
             task_service=self._task_service,
             record_service=self._record_service,
             attachment_service=self._attachment_service,
+            attachment_export_service=self._attachment_export_service,
+            attachment_export_directory=self._settings.attachment_export_directory,
             parent=self,
         )
         dialog.changed.connect(self._refresh_tasks)
@@ -2024,7 +2043,7 @@ class MainWindow(QMainWindow):
         self._selected_task_id = item.task.id
         self._selected_occurrence_start = item.occurrence_start if item.task.recurrence_rule else None
         self._update_detail(item.task)
-        self._detail_schedule.setText(self._detail_schedule.text() + "\n선택 알림: " + format_datetime(item.effective_at, self._settings.timezone) + " · " + item.status)
+        self._detail_schedule.setText(self._detail_schedule.text() + "\n선택 알림: " + format_datetime(item.effective_at, self._settings.timezone) + " · " + item.display_status)
         self._apply_responsive_layout()
 
     def _apply_day_reminder_preview(self, date_range: tuple[date, date], result: ReminderPreviewResult) -> None:
@@ -2476,7 +2495,7 @@ class MainWindow(QMainWindow):
                 if not self._reminder_service.alert_is_active(delivery_id):
                     self._reminder_dialog.remove_delivery(delivery_id)
         if self._reminder_service:
-            histories: dict[int, tuple[ReminderDelivery, ...]] = {}
+            states = {}
             for dialog in tuple(self._file_dialogs):
                 if not isinstance(dialog, (TaskEditorDialog, ReminderSettingsDialog)):
                     continue
@@ -2484,11 +2503,11 @@ class MainWindow(QMainWindow):
                 if task is None or task.id is None:
                     continue
                 try:
-                    if task.id not in histories:
-                        histories[task.id] = self._reminder_service.task_deliveries(task.id)
+                    if task.id not in states:
+                        states[task.id] = self._reminder_service.runtime_state(task.id)
                     # Only display metadata changes. Never replace the unsaved
                     # task/rule draft after a popup acknowledges or snoozes it.
-                    dialog.update_delivery_states(histories[task.id])
+                    dialog.update_runtime_state(states[task.id])
                 except Exception:
                     logger.exception("열린 알림 설정의 발생 상태를 갱신하지 못했습니다.")
 
@@ -2607,6 +2626,8 @@ class MainWindow(QMainWindow):
         if self._day_preview_controller:
             self._day_preview_controller.shutdown()
         self._today_reminders.shutdown()
+        if self._attachment_export_controller:
+            self._attachment_export_controller.shutdown()
         self._reminder_timer.stop()
         if self._settings_dialog is not None:
             self._settings_dialog.close()
@@ -2828,6 +2849,22 @@ class MainWindow(QMainWindow):
             },
         )
         self._save_settings(self._settings)
+
+    def _remember_attachment_export_directory(self, directory: str) -> None:
+        self._settings = replace(self._settings, attachment_export_directory=directory)
+        for controller in self.findChildren(AttachmentExportController):
+            controller.directory = directory
+        for dialog in self.findChildren(WorkLogBrowserDialog):
+            dialog._attachment_export_directory = directory
+        if self._save_settings:
+            try:
+                self._save_settings(self._settings)
+            except OSError:
+                self.statusBar().showMessage("파일은 저장되었지만 마지막 저장 폴더 설정은 저장하지 못했습니다.", 8000)
+
+    def _save_search_file(self, value: object) -> None:
+        if isinstance(value, AttachmentSearchHit) and self._attachment_export_controller:
+            self._attachment_export_controller.choose((FileReference.attachment(value.attachment_id),))
 
     @staticmethod
     def _named_label(text: str, object_name: str) -> QLabel:

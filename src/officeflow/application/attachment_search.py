@@ -67,6 +67,7 @@ class AttachmentSearchHit:
     deleted: bool
     detached: bool
     missing: bool
+    size_observed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -46,6 +46,47 @@ def edits_for(repo, task):
     )
 
 
+def test_completed_scope_keeps_real_history_not_future_reservations(environment):
+    sessions, tasks, repo, reminders, save = environment
+    task = save.save(TaskDraft("중간 완료", starts_at=NOW + timedelta(days=30)), edits=(absolute(), absolute(minutes=10), absolute(20)), now=NOW)
+    first = reminders.poll_due(now=NOW)[0]
+    reminders.acknowledge(first.delivery.id, now=NOW)
+    second = reminders.poll_due(now=NOW + timedelta(minutes=10))[0]
+    reminders.complete(second.delivery.id, now=NOW + timedelta(minutes=10))
+    runtime = reminders.runtime_state(task.id)
+    assert runtime.task.status is TaskStatus.COMPLETED
+    with sessions.transaction() as session:
+        before = session.scalar(select(func.count()).select_from(ReminderDeliveryRecord))
+    result = ReminderPreviewService(repo, reminders).query(NOW.date(), (NOW + timedelta(days=21)).date(), timezone="UTC", now=NOW + timedelta(minutes=20))
+    assert len(result.items) == 2
+    assert all(not item.is_pending and not item.needs_attention for item in result.items)
+    assert {item.display_status for item in result.items} == {"업무 완료 · 알림 확인함", "업무 완료 · 알림 처리됨"}
+    with sessions.transaction() as session:
+        assert session.scalar(select(func.count()).select_from(ReminderDeliveryRecord)) == before
+    tasks.transition(task.id, TaskStatus.ACTIVE, now=NOW + timedelta(minutes=21))
+    result = ReminderPreviewService(repo, reminders).query((NOW + timedelta(days=20)).date(), (NOW + timedelta(days=20)).date(), timezone="UTC", now=NOW + timedelta(minutes=22))
+    assert len(result.items) == 1 and result.items[0].is_pending
+
+
+def test_runtime_skips_consecutive_closed_occurrences_and_reopen_refreshes(environment):
+    from officeflow.domain.enums import OccurrenceStatus
+    from officeflow.presentation.reminder_settings import state_label
+    _sessions, tasks, repo, reminders, save = environment
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    start = now + timedelta(days=1)
+    task = save.save(TaskDraft("반복 범위", starts_at=start, recurrence_rule="FREQ=DAILY;COUNT=5"), edits=(ReminderEdit(Rule(ReminderRelation.START, offset_minutes=0)),), now=now)
+    tasks.transition_occurrence(task.id, start, OccurrenceStatus.COMPLETED, now=now)
+    tasks.transition_occurrence(task.id, start + timedelta(days=1), OccurrenceStatus.SKIPPED, now=now)
+    runtime = reminders.runtime_state(task.id)
+    from officeflow.presentation.dates import format_datetime
+    label = state_label(edits_for(repo, task)[0], task, now, (), runtime)
+    assert format_datetime(start + timedelta(days=2), task.timezone, short=True) in label
+    tasks.transition_occurrence(task.id, start, OccurrenceStatus.PENDING, now=now)
+    refreshed = reminders.runtime_state(task.id)
+    label = state_label(edits_for(repo, task)[0], task, now, (), refreshed)
+    assert format_datetime(start, task.timezone, short=True) in label
+
+
 def test_three_reminders_one_task_and_independent_confirmation(environment):
     sessions, _tasks, repo, reminders, save = environment
     task = save.save(

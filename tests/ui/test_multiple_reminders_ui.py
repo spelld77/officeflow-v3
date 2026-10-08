@@ -235,6 +235,54 @@ def test_alarm_rows_indicate_attachments_and_same_editor_is_reused(live_window, 
     assert editor.title_edit.text() == "작성 중 내용"
 
 
+def test_runtime_refresh_keeps_all_open_drafts_and_conflict_baseline(live_window, qtbot):
+    window, env, task, now, _repo = live_window
+    window._open_editor(task)
+    editor = next(d for d in window._file_dialogs if isinstance(d, TaskEditorDialog))
+    editor.title_edit.setText("보존할 제목")
+    editor.description_edit.setPlainText("아직 저장하지 않은 설명")
+    editor._open_reminder_settings()
+    settings = editor._reminder_settings
+    settings.list.setCurrentRow(2)
+    settings._open_rule(True)
+    child = settings._child
+    child.time_edit.setTime(child.time_edit.time().addSecs(600))
+    baseline = editor._task
+    edits = settings._edits.copy()
+    child_time = child.time_edit.time()
+    env.tasks.complete(task.id, now=now)
+    window._synchronize_reminder_dialog()
+    assert editor._task == baseline
+    assert editor.title_edit.text() == "보존할 제목"
+    assert editor.description_edit.toPlainText() == "아직 저장하지 않은 설명"
+    assert editor.status_combo.currentData() == "active"
+    assert settings._edits == edits
+    assert settings.list.currentRow() == 2
+    assert child.time_edit.time() == child_time
+    assert "업무 완료" in settings.runtime_label.text()
+    assert "이후 알림 중단" in editor.reminder_summary.text()
+    child.reject()
+    settings.reject()
+    qtbot.mouseClick(editor.save_button, Qt.MouseButton.LeftButton)
+    assert editor.isVisible()
+    assert env.tasks.get(task.id).status is TaskStatus.COMPLETED
+    assert editor.title_edit.text() == "보존할 제목"
+
+
+def test_last_export_directory_updates_already_open_controllers(live_window, tmp_path):
+    from officeflow.application.attachment_export import AttachmentExportService
+    from officeflow.infrastructure.attachments.export_storage import ExternalExportStorage
+    from officeflow.presentation.attachment_export import AttachmentExportController
+    window, env, _task, _now, _repo = live_window
+    service = AttachmentExportService(env.attachments, ExternalExportStorage(tmp_path / "data"))
+    first = AttachmentExportController(service, window, initial_directory=str(tmp_path / "old"))
+    second = AttachmentExportController(service, window, initial_directory=None)
+    directory = str(tmp_path / "latest")
+    window._remember_attachment_export_directory(directory)
+    assert first.directory == second.directory == directory
+    assert window._settings.attachment_export_directory == directory
+
+
 def test_actual_window_click_remains_available_over_modeless_editors(live_window, qtbot):
     from PySide6.QtCore import QPoint
     from PySide6.QtTest import QTest
@@ -318,7 +366,7 @@ def test_open_reminder_settings_follow_end_repeat_and_status_changes(qtbot):
     editor.repeat_interval.setValue(2)
     assert "INTERVAL=2" in child._task.recurrence_rule
     editor.status_combo.setCurrentIndex(editor.status_combo.findData("completed"))
-    assert "다음 예약 없음" in editor.reminder_summary.text()
+    assert "업무 완료 · 이후 알림 중단" in editor.reminder_summary.text()
 
 
 def test_calendar_alarm_count_selects_and_scrolls_to_pending_alarm(live_window, qtbot):

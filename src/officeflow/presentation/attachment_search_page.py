@@ -159,7 +159,7 @@ class AttachmentSearchDelegate(QStyledItemDelegate):
             if hit.size_bytes < 1024**2
             else f"{hit.size_bytes / 1024**2:.1f} MB"
         )
-        meta = f"{hit.task_title} · {'/'.join(flags)} · {format_date(hit.created_at.astimezone(self._zone).date(), short=True)} 첨부 · {size}"
+        meta = f"{hit.task_title} · {'/'.join(flags)} · {format_date(hit.created_at.astimezone(self._zone).date(), short=True)} 첨부 · {size} ({'최근 확인' if hit.size_observed else '첨부 당시'})"
         painter.setPen(QColor("#58657D"))
         painter.drawText(
             rect.adjusted(0, rect.height() // 2, 0, 0),
@@ -171,6 +171,7 @@ class AttachmentSearchDelegate(QStyledItemDelegate):
 
 class AttachmentSearchPageWidget(QFrame):
     openRequested = Signal(object)
+    saveRequested = Signal(object)
     taskRequested = Signal(object)
     manageRequested = Signal(object)
     backRequested = Signal()
@@ -290,10 +291,13 @@ class AttachmentSearchPageWidget(QFrame):
         root.addWidget(self.selection_label)
         actions = QHBoxLayout()
         self.open_button = QPushButton("파일 열기")
+        self.save_button = QPushButton("다른 이름으로 저장…")
+        self.save_button.setObjectName("saveSearchAttachmentButton")
         self.task_button = QPushButton("연결 업무")
         self.manage_button = QPushButton("첨부 관리")
         for button, signal in (
             (self.open_button, self.openRequested),
+            (self.save_button, self.saveRequested),
             (self.task_button, self.taskRequested),
             (self.manage_button, self.manageRequested),
         ):
@@ -319,7 +323,7 @@ class AttachmentSearchPageWidget(QFrame):
         self.selection_label.setText(
             f"선택: {hit.original_name}" if hit else "파일을 선택해 주세요."
         )
-        for button in (self.open_button, self.task_button, self.manage_button):
+        for button in (self.open_button, self.save_button, self.task_button, self.manage_button):
             button.setEnabled(hit is not None)
         self.manage_button.setText("첨부 정리" if hit and hit.detached else "첨부 관리")
 

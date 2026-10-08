@@ -7,8 +7,9 @@ from time import monotonic
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from officeflow.application.reminder_runtime import scope_label
 from officeflow.application.reminders import ReminderService, ReminderTarget
-from officeflow.domain.enums import ReminderDeliveryStatus
+from officeflow.domain.enums import OccurrenceStatus, ReminderDeliveryStatus
 from officeflow.domain.reminder import ReminderDelivery
 from officeflow.domain.task import Task
 
@@ -24,6 +25,8 @@ class ReminderPreviewItem:
     delivery_id: int | None = None
     snoozed_until: datetime | None = None
     actual_fired_at: datetime | None = None
+    occurrence_status: OccurrenceStatus | None = None
+    moved_history: bool = False
 
     @property
     def key(self) -> tuple[int, datetime | None, datetime]:
@@ -31,12 +34,17 @@ class ReminderPreviewItem:
 
     @property
     def is_pending(self) -> bool:
-        return self.status not in {
-            "확인함",
-            "완료",
-            "대기 처리",
-            "다른 날로 미룸",
-        } and not self.status.startswith("다른 날 발생 · ")
+        return not scope_label(self.task, self.occurrence_status) and not self.moved_history and self.status in {"예정", "미확인", "재알림"}
+
+    @property
+    def needs_attention(self) -> bool:
+        return not scope_label(self.task, self.occurrence_status) and not self.moved_history and self.status == "시각 지남 · 발생 기록 없음"
+
+    @property
+    def display_status(self) -> str:
+        scope = scope_label(self.task, self.occurrence_status)
+        state = {"확인함": "알림 확인함", "완료": "알림 처리됨", "대기 처리": "알림 대기 처리"}.get(self.status, self.status)
+        return f"{scope} · {state}" if scope else self.status
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +68,7 @@ class ReminderPreviewResult:
                         status="다른 날로 미룸"
                         if item.snoozed_until
                         else "다른 날 발생 · " + item.status,
+                        moved_history=True,
                     )
                 )
         return tuple(sorted(result, key=lambda i: (i.effective_at, i.reminder_id)))
@@ -75,6 +84,8 @@ class PreviewRepository(Protocol):
     def closed_occurrences(
         self, task_ids: tuple[int, ...], start: datetime, end: datetime
     ) -> frozenset[tuple[int, datetime]]: ...
+
+    def occurrence_states(self, keys: tuple[tuple[int, datetime], ...]) -> dict[tuple[int, datetime], OccurrenceStatus]: ...
 
 
 class ReminderPreviewService:
@@ -185,6 +196,7 @@ class ReminderPreviewService:
                 if not complete or len(targets) < 200:
                     break
         deliveries = self._repository.preview_deliveries(start, end, limit=limit + 1)
+        scopes = self._repository.occurrence_states(tuple({(d.task_id, d.occurrence_start) for d, _t in deliveries[:limit] if d.occurrence_start is not None}))
         if len(deliveries) > limit:
             complete = False
         for delivery, target in deliveries[:limit]:
@@ -212,12 +224,22 @@ class ReminderPreviewService:
                 delivery.id,
                 delivery.snoozed_until,
                 delivery.last_fired_at,
+                occurrence_status=scopes.get((delivery.task_id, delivery.occurrence_start)) if delivery.occurrence_start else None,
+                moved_history=status == "다른 날로 미룸",
             )
             items[item.key] = item
+        scopes.update(self._repository.occurrence_states(tuple({(item.task.id, item.occurrence_start) for item in items.values() if item.task.id is not None and item.occurrence_start is not None})))
+        projected = []
+        for item in items.values():
+            occurrence_status = scopes.get((item.task.id, item.occurrence_start)) if item.task.id is not None and item.occurrence_start is not None else None
+            item = replace(item, occurrence_status=occurrence_status)
+            if item.delivery_id is None and scope_label(item.task, occurrence_status):
+                continue  # Closed future scopes are not fabricated delivery history.
+            projected.append(item)
         return ReminderPreviewResult(
             tuple(
                 sorted(
-                    items.values(), key=lambda i: (i.effective_at, i.task.id or 0, i.reminder_id)
+                    projected, key=lambda i: (i.effective_at, i.task.id or 0, i.reminder_id)
                 )
             ),
             complete,

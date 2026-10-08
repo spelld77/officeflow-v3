@@ -46,7 +46,8 @@ def test_upgrade_preserves_existing_display_ids_metadata_search_and_detached_slo
     assert needs_database_upgrade(database)
     upgrade_database(database)
     after = _rows(database)
-    assert [row[:-1] for row in after] == before
+    assert [row[:len(before[0])] for row in after] == before
+    assert all(all(value is None for value in row[len(before[0]) + 1:]) for row in after)
     with closing(sqlite3.connect(database)) as connection:
         assert dict(connection.execute("SELECT id,sort_order FROM attachments")) == {a: 30, b: 20, c: 10, d: 10}
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
