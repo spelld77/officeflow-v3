@@ -21,7 +21,7 @@
 - [x] EXE 새 프로필 실행 / 격리 설치·재설치·제거와 사용자 자료 보존
 - [x] 새 Python ZIP 추출·모듈·진단·실행·빈 0015 DB
 - [x] Windows ZIP 전체 폴더 구성·사용자 자료 제외·체크섬
-- [ ] 커밋·main/태그 업로드·GitHub 릴리스 공개와 6개 자산 검증
+- [x] 커밋·main/태그 업로드·GitHub 릴리스 공개와 6개 자산 검증
 
 ## 실제 검사 결과
 
@@ -71,6 +71,29 @@ DB·백업·로그·개발 캐시 제외와 EXE 3.0.8 / 설치 리소스 3.0.8.0
 | OfficeFlow-3.0.8-Windows.zip | 62,152,788 |
 | OfficeFlow-Python-3.0.8.zip | 421,584 |
 | OfficeFlow-Python-3.0.8.zip.sha256.txt | 95 |
+| SHA256SUMS.txt | 105,035 |
+| release-manifest.json | 166,919 |
+
+## 실제 공개 결과
+
+- 2026-10-09 22:08:50 KST에 [OfficeFlow 3.0.8](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.8)을 최신 정식 릴리스로 공개했다. draft/prerelease는 false다.
+- 최종 소스 커밋 `500ea2830f33b91d8a0ceb6a216a3f6aca860ee8`, 태그 `v3.0.8`.
+  1차 `dd7d5ac`·2차 `3be8a61`과 3차 최종 변경을 모두 포함하고 원격 main/태그를 확인했다.
+- 게시 전 허용 경로 검사에서 코드의 `infrastructure/attachments`를 사용자 첨부 경로로 오인해 커밋이 중단됐다.
+  다음 업로드가 중간 커밋의 태그를 먼저 생성한 것을 발견했다. 아직 릴리스가 없고 방금 만든 동일 태그임을
+  확인한 뒤 조건부로 그 미공개 태그만 회수·재등록했다. 공개 태그는 위 최종 커밋을 가리키며 기존 공개 릴리스는 변경하지 않았다.
+- 초안에 6개 파일을 업로드하고 각 파일의 GitHub 서버 digest SHA-256·크기·uploaded 상태를 로컬 파일과 대조한 후 공개했다.
+- 공개 Python ZIP과 자체 체크섬을 `artifacts/release-3.0.8-download`로 내려받아 원래 ZIP과 동일한 해시임을 확인했다.
+- GitHub Actions 실행 목록은 비어 있었다. 자동 원격 CI 통과로 보고하지 않으며 이번 품질 근거는 위 로컬 검증이다.
+- 공개 결과 기록은 문서 전용 후속 커밋으로 main에 반영한다. 릴리스 태그/배포물은 검증된 소스 커밋에 유지한다.
+
+주요 배포 SHA-256:
+
+| 파일 | SHA-256 |
+| --- | --- |
+| Setup.exe | `ebf9009d2a51714105664754a2fa3995becf14e865bd40440d40696793b9780b` |
+| Windows.zip | `9caf7925c9a4e380370fed4f658b65856372f061f2947906a755fc781d55a8c4` |
+| Python.zip | `094bb6bd2b0b1d566bbb1aa06b3a0949959cd1354cea5219c985c130051cbf93` |
 
 ## 안전과 미검증 환경
 
