@@ -305,6 +305,43 @@ QListWidget#calendarDayList QScrollBar:vertical, QScrollArea#taskEditorScroll QS
     border-radius: 6px;
     margin: 2px;
 }
+QListWidget#attachmentList QScrollBar:vertical,
+QListWidget#documentFileList QScrollBar:vertical,
+QListWidget#viewCopyList QScrollBar:vertical {
+    width: 13px;
+    background: #EDF1F7;
+    border: none;
+    border-radius: 6px;
+    margin: 2px;
+}
+QListWidget#attachmentList QScrollBar::handle:vertical,
+QListWidget#documentFileList QScrollBar::handle:vertical,
+QListWidget#viewCopyList QScrollBar::handle:vertical {
+    min-height: 28px;
+    background: #7FA3EF;
+    border-radius: 5px;
+}
+QListWidget#attachmentList QScrollBar::handle:vertical:hover,
+QListWidget#documentFileList QScrollBar::handle:vertical:hover,
+QListWidget#viewCopyList QScrollBar::handle:vertical:hover {
+    background: #4F7FDF;
+}
+QListWidget#attachmentList QScrollBar::add-line:vertical,
+QListWidget#attachmentList QScrollBar::sub-line:vertical,
+QListWidget#attachmentList QScrollBar::add-page:vertical,
+QListWidget#attachmentList QScrollBar::sub-page:vertical,
+QListWidget#documentFileList QScrollBar::add-line:vertical,
+QListWidget#documentFileList QScrollBar::sub-line:vertical,
+QListWidget#documentFileList QScrollBar::add-page:vertical,
+QListWidget#documentFileList QScrollBar::sub-page:vertical,
+QListWidget#viewCopyList QScrollBar::add-line:vertical,
+QListWidget#viewCopyList QScrollBar::sub-line:vertical,
+QListWidget#viewCopyList QScrollBar::add-page:vertical,
+QListWidget#viewCopyList QScrollBar::sub-page:vertical {
+    background: transparent;
+    border: none;
+    height: 0;
+}
 QListWidget#calendarDayList QScrollBar::handle:vertical, QScrollArea#taskEditorScroll QScrollBar::handle:vertical {
     min-height: 28px;
     background: #7FA3EF;
@@ -334,7 +371,8 @@ QLineEdit {
     border-radius: 9px;
     padding: 10px 12px;
 }
-QTextEdit {
+QTextEdit, QPlainTextEdit {
+    color: #172033;
     background: #FFFFFF;
     border: 1px solid #DCE2EC;
     border-radius: 8px;
@@ -346,7 +384,7 @@ QComboBox, QDateEdit, QTimeEdit, QSpinBox {
     border-radius: 8px;
     padding: 5px 10px;
 }
-QTextEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus, QSpinBox:focus {
+QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus, QSpinBox:focus {
     border-color: #2F6FED;
 }
 QGroupBox {
@@ -431,5 +469,31 @@ QListView#taskList::item {
 QStatusBar {
     color: #526078;
     background: #F4F6FA;
+}
+QListWidget#documentFileList, QListWidget#viewCopyList, QListWidget#internalRecoveryList {
+    color: #172033;
+    background: #FFFFFF;
+    selection-color: #172033;
+    selection-background-color: #DFE9FF;
+    border: 1px solid #DCE2EC;
+    border-radius: 8px;
+    padding: 4px;
+}
+QListWidget#documentFileList QWidget#qt_scrollarea_viewport,
+QListWidget#viewCopyList QWidget#qt_scrollarea_viewport,
+QListWidget#internalRecoveryList QWidget#qt_scrollarea_viewport {
+    color: #172033;
+    background: #FFFFFF;
+}
+QListWidget#documentFileList::item, QListWidget#viewCopyList::item, QListWidget#internalRecoveryList::item {
+    padding: 7px 6px;
+}
+QListWidget#documentFileList::item:selected, QListWidget#viewCopyList::item:selected, QListWidget#internalRecoveryList::item:selected {
+    color: #172033;
+    background: #DFE9FF;
+}
+QPlainTextEdit QWidget#qt_scrollarea_viewport {
+    color: #172033;
+    background: #FFFFFF;
 }
 """

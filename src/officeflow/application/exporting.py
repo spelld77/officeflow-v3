@@ -65,7 +65,10 @@ class TaskExporter(Protocol):
 
 class StreamingTaskExporter(Protocol):
     def export_stream(
-        self, tasks: Iterable[Task], destination: Path, *,
+        self,
+        tasks: Iterable[Task],
+        destination: Path,
+        *,
         cancel_requested: Callable[[], bool] | None = None,
         progress: Callable[[int], None] | None = None,
     ) -> Path: ...
@@ -92,7 +95,10 @@ class ExportService:
     ) -> Path:
         tasks = self._task_service.export_tasks(query, cancel_requested=cancel_requested)
         return self._excel_exporter.export_stream(
-            tasks, destination, cancel_requested=cancel_requested, progress=progress,
+            tasks,
+            destination,
+            cancel_requested=cancel_requested,
+            progress=progress,
         )
 
     def export_calendar(
@@ -111,15 +117,11 @@ class ExportService:
         active = tuple(task for task in tasks if task.deleted_at is None)
         excluded_unscheduled = sum(task.starts_at is None for task in active)
         scheduled = tuple(task for task in active if task.starts_at is not None)
-        excluded_recurring = sum(
-            task.recurrence_rule is not None for task in scheduled
-        )
+        excluded_recurring = sum(task.recurrence_rule is not None for task in scheduled)
         if effective_options.include_recurring:
             recurrence_filtered = scheduled
         else:
-            recurrence_filtered = tuple(
-                task for task in scheduled if task.recurrence_rule is None
-            )
+            recurrence_filtered = tuple(task for task in scheduled if task.recurrence_rule is None)
         excluded_completed = sum(
             task.status is TaskStatus.COMPLETED for task in recurrence_filtered
         )
@@ -127,9 +129,7 @@ class ExportService:
             status_filtered = recurrence_filtered
         else:
             status_filtered = tuple(
-                task
-                for task in recurrence_filtered
-                if task.status is not TaskStatus.COMPLETED
+                task for task in recurrence_filtered if task.status is not TaskStatus.COMPLETED
             )
         normalized = self._original_recurring_tasks(status_filtered)
         if not normalized:

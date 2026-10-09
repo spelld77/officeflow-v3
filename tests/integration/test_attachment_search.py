@@ -36,14 +36,14 @@ from officeflow.infrastructure.database.migrate import (
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
+from tests.integration.legacy_attachment_fixture import legacy_environment
 
 NOW = datetime(2026, 10, 1, 3, tzinfo=UTC)
 
 
 def test_failed_index_rolls_back_and_retry_succeeds(tmp_path: Path) -> None:
     database = tmp_path / "old.db"
-    upgrade_database(database)
-    command.downgrade(migration_config(database), "0009_reminder_schedule_cache")
+    command.upgrade(migration_config(database), "0009_reminder_schedule_cache")
 
     def fail(_connection, _cursor, statement, _parameters, _context, _many):
         if "CREATE TRIGGER IF NOT EXISTS attachment_search_update" in statement:
@@ -78,8 +78,7 @@ def test_insufficient_space_leaves_old_database_unchanged(tmp_path: Path, monkey
     from officeflow.infrastructure.database import migrate
 
     database = tmp_path / "old.db"
-    upgrade_database(database)
-    command.downgrade(migration_config(database), "0009_reminder_schedule_cache")
+    command.upgrade(migration_config(database), "0009_reminder_schedule_cache")
     monkeypatch.setattr(migrate.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
     with pytest.raises(OSError, match="공간"):
         upgrade_database(database)
@@ -98,14 +97,19 @@ def test_backup_restore_recreates_search_and_preserves_bytes(
     root.mkdir()
     paths = AppPaths(root)
     paths.ensure_directories()
-    with search_environment(paths.data_dir, attachment_root=paths.attachment_dir) as env:
-        task = env.tasks.create(TaskDraft(title="복원 업무"))
-        source = tmp_path / "복원보고서.txt"
-        source.write_bytes(b"preserved content")
-        attached = env.attachments.attach(task.id, source)
-        stored_path = env.attachments.path_for_open(attached.id_required)
     if old_schema:
-        command.downgrade(migration_config(paths.database_file), "0009_reminder_schedule_cache")
+        with legacy_environment(
+            paths.data_dir, "0009_reminder_schedule_cache", attachment_root=paths.attachment_dir
+        ) as old:
+            task = old.tasks.create(TaskDraft(title="복원 업무"))
+            stored_path = old.add(task.id, "복원보고서.txt", content=b"preserved content").path
+    else:
+        with search_environment(paths.data_dir, attachment_root=paths.attachment_dir) as env:
+            task = env.tasks.create(TaskDraft(title="복원 업무"))
+            source = tmp_path / "복원보고서.txt"
+            source.write_bytes(b"preserved content")
+            attached = env.attachments.attach(task.id, source)
+            stored_path = env.attachments.path_for_open(attached.id_required)
     manager = BackupManager(paths)
     backup = manager.create_backup()
     stored_path.write_bytes(b"changed content")
@@ -305,11 +309,10 @@ def test_calendar_work_log_and_completion_scope(tmp_path: Path) -> None:
 
 
 def test_old_database_backfill_backup_rename_and_delete_triggers(tmp_path: Path) -> None:
+    with legacy_environment(tmp_path, "0009_reminder_schedule_cache") as old:
+        task = old.tasks.create(TaskDraft(title="기존 데이터"))
+        item = old.add(task.id, "구매견적.xlsx")
     with search_environment(tmp_path) as env:
-        task = env.tasks.create(TaskDraft(title="기존 데이터"))
-        item = env.add(task.id, "구매견적.xlsx")
-        command.downgrade(migration_config(env.database), "0009_reminder_schedule_cache")
-        upgrade_database(env.database)
         copies = list((tmp_path / "schema-backups").glob("*.db"))
         assert len(copies) == 1
         with sqlite3.connect(copies[0]) as connection:
@@ -324,7 +327,7 @@ def test_old_database_backfill_backup_rename_and_delete_triggers(tmp_path: Path)
         assert env.search.search_page(AttachmentSearchQuery(search="견적")).items
         with env.engine.begin() as connection:
             connection.execute(
-                text("UPDATE attachments SET original_name='새보고서.pdf' WHERE id=:id"),
+                text("UPDATE attachments SET display_name='새보고서.pdf' WHERE id=:id"),
                 {"id": item.id},
             )
         assert not env.search.search_page(AttachmentSearchQuery(search="견적")).items
@@ -351,17 +354,24 @@ def test_cancel_timeout_and_short_input_are_not_empty_success(tmp_path: Path) ->
 
 
 def test_cancellation_during_sql_clears_progress_handler(tmp_path: Path) -> None:
-    from sqlalchemy import insert
-
     from officeflow.infrastructure.database.models import AttachmentRecord
+
     with search_environment(tmp_path) as env:
         task = env.tasks.create(TaskDraft(title="취소 검증"))
         with env.sessions.transaction() as session:
-            session.execute(insert(AttachmentRecord), [
-                dict(task_id=task.id, original_name=f"업무보고서{i}.pdf", stored_name=f"fake{i}",
-                     relative_path=f"fake/{i}", size_bytes=1, created_at=NOW)
-                for i in range(5000)
-            ])
+            session.add_all(
+                [
+                    AttachmentRecord(
+                        task_id=task.id,
+                        original_name=f"업무보고서{i}.pdf",
+                        stored_name=f"fake{i}",
+                        relative_path=f"fake/{i}",
+                        size_bytes=1,
+                        created_at=NOW,
+                    )
+                    for i in range(5000)
+                ]
+            )
         calls = 0
 
         def cancel():

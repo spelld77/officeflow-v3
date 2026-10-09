@@ -95,7 +95,11 @@ def rule_label(edit: ReminderEdit, task: Task, now: datetime) -> str:
 
 
 def state_label(
-    edit: ReminderEdit, task: Task, now: datetime, deliveries: tuple[ReminderDelivery, ...], runtime: ReminderRuntimeState | None = None
+    edit: ReminderEdit,
+    task: Task,
+    now: datetime,
+    deliveries: tuple[ReminderDelivery, ...],
+    runtime: ReminderRuntimeState | None = None,
 ) -> str:
     if runtime is not None:
         task = runtime.task
@@ -103,8 +107,14 @@ def state_label(
     label = rule_label(edit, task, now)
     history = _matching_history(edit, task, deliveries)
     if closed_scope := scope_label(task):
-        handled = {ReminderDeliveryStatus.ACKNOWLEDGED: "알림 확인함", ReminderDeliveryStatus.COMPLETED: "알림 처리됨", ReminderDeliveryStatus.DEFERRED: "알림 대기 처리"}
-        handled_state = handled.get(history[0].status, "이후 알림 중단") if history else "이후 알림 중단"
+        handled = {
+            ReminderDeliveryStatus.ACKNOWLEDGED: "알림 확인함",
+            ReminderDeliveryStatus.COMPLETED: "알림 처리됨",
+            ReminderDeliveryStatus.DEFERRED: "알림 대기 처리",
+        }
+        handled_state = (
+            handled.get(history[0].status, "이후 알림 중단") if history else "이후 알림 중단"
+        )
         return label.rsplit(" · ", 1)[0] + f" · {closed_scope} · {handled_state}"
     active = tuple(
         d
@@ -131,11 +141,17 @@ def state_label(
             ReminderDeliveryStatus.DEFERRED: "대기 처리",
         }.get(history[0].status)
         if state:
-            if runtime and (scope := scope_label(task, runtime.occurrence_status(history[0].occurrence_start))):
+            if runtime and (
+                scope := scope_label(task, runtime.occurrence_status(history[0].occurrence_start))
+            ):
                 state = f"{scope} · 알림 {'처리됨' if state == '완료' else state}"
             return label.rsplit(" · ", 1)[0] + " · " + state
     if runtime and next_due != candidate(edit, task, now):
-        return (format_datetime(next_due, task.timezone, short=True) + " · 예정") if next_due else "이번 회차 처리됨 · 다음 예약 없음"
+        return (
+            (format_datetime(next_due, task.timezone, short=True) + " · 예정")
+            if next_due
+            else "이번 회차 처리됨 · 다음 예약 없음"
+        )
     return label
 
 
@@ -162,7 +178,11 @@ def _matching_history(
 
 
 def _unhandled_candidate(
-    edit: ReminderEdit, task: Task, now: datetime, history: tuple[ReminderDelivery, ...], runtime: ReminderRuntimeState | None = None
+    edit: ReminderEdit,
+    task: Task,
+    now: datetime,
+    history: tuple[ReminderDelivery, ...],
+    runtime: ReminderRuntimeState | None = None,
 ) -> datetime | None:
     due = candidate(edit, task, now)
     handled = {
@@ -186,7 +206,9 @@ def _unhandled_candidate(
         if due is None:
             return None
         current = ReminderService._next_candidate(target, after=due, inclusive=True)
-        if due not in handled and not (runtime and current and scope_label(task, runtime.occurrence_status(current[0]))):
+        if due not in handled and not (
+            runtime and current and scope_label(task, runtime.occurrence_status(current[0]))
+        ):
             return due
         result = ReminderService._next_candidate(target, after=due, inclusive=False)
         due = result[1] if result else None
@@ -215,7 +237,11 @@ def reminder_summary(
     dates = [
         due
         for e in edits
-        if (due := _unhandled_candidate(e, task, now, _matching_history(e, task, deliveries), runtime))
+        if (
+            due := _unhandled_candidate(
+                e, task, now, _matching_history(e, task, deliveries), runtime
+            )
+        )
         is not None
     ]
     dates.extend(d.snoozed_until for d in active if d.snoozed_until is not None)
@@ -539,7 +565,15 @@ class ReminderSettingsDialog(QDialog):
             f"설정 {len(self._edits)} / 최대 20개 · 실제 울릴 시각은 오늘·달력에서도 확인"
         )
         self.count_label.setWordWrap(True)
-        self.runtime_label.setText((scope_label(self._runtime.task) + " · 이후 알림 중단" if scope_label(self._runtime.task) else "저장된 실제 실행 상태 · 편집 내용은 최종 저장 후 적용") if self._runtime else "미저장 설정 미리보기")
+        self.runtime_label.setText(
+            (
+                scope_label(self._runtime.task) + " · 이후 알림 중단"
+                if scope_label(self._runtime.task)
+                else "저장된 실제 실행 상태 · 편집 내용은 최종 저장 후 적용"
+            )
+            if self._runtime
+            else "미저장 설정 미리보기"
+        )
         selected_row = next(
             (
                 index

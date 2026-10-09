@@ -88,10 +88,15 @@ class ICalendarTaskExporter:
             lines.append(f"RRULE:{task.recurrence_rule}")
         description = task.description
         if task.status is TaskStatus.COMPLETED:
-            description = "\n\n".join(part for part in (
-                description, "업무 상태: 완료",
-                f"완료 요약: {task.result_note}" if task.result_note else "",
-            ) if part)
+            description = "\n\n".join(
+                part
+                for part in (
+                    description,
+                    "업무 상태: 완료",
+                    f"완료 요약: {task.result_note}" if task.result_note else "",
+                )
+                if part
+            )
         if description:
             lines.append(f"DESCRIPTION:{_escape_text(description)}")
         if task.result_note:

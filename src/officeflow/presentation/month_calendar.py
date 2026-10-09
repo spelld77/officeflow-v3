@@ -223,7 +223,13 @@ class MonthCalendarWidget(QWidget):
             self.updateGeometry()
             self.update()
 
-    def set_reminder_counts(self, counts: dict[date, int], *, complete: bool = True, attention: dict[date, int] | None = None) -> None:
+    def set_reminder_counts(
+        self,
+        counts: dict[date, int],
+        *,
+        complete: bool = True,
+        attention: dict[date, int] | None = None,
+    ) -> None:
         self._alarm_counts = counts
         self._alarms_complete = complete
         self._alarm_attention = attention or {}
@@ -293,15 +299,26 @@ class MonthCalendarWidget(QWidget):
             if count or attention_count or not self._alarms_complete:
                 text = f"알림 {count}{'' if self._alarms_complete else '+'}" if count else "알림 ?"
                 if attention_count:
-                    text = f"알림 {count} · 확인 필요 {attention_count}" if count else f"알림 확인 필요 {attention_count}"
+                    text = (
+                        f"알림 {count} · 확인 필요 {attention_count}"
+                        if count
+                        else f"알림 확인 필요 {attention_count}"
+                    )
                 rect = QRectF(cell.left() + 34, cell.top() + 3, max(1, cell.width() - 38), 20)
                 if painter.fontMetrics().horizontalAdvance(text) > rect.width():
                     text = f"알{count}{'' if self._alarms_complete else '+'}" if count else "알?"
                     if attention_count:
-                        text = f"알{count} !{attention_count}" if count else f"확인 !{attention_count}"
+                        text = (
+                            f"알{count} !{attention_count}" if count else f"확인 !{attention_count}"
+                        )
                 painter.setPen(QColor("#7A4FAD"))
-                painter.drawText(rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(rect.width())))
+                painter.drawText(
+                    rect,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    painter.fontMetrics().elidedText(
+                        text, Qt.TextElideMode.ElideRight, int(rect.width())
+                    ),
+                )
                 self._alarm_hits.append((rect, day))
 
         lane_limit = 2 if self._compact else 3
@@ -309,9 +326,7 @@ class MonthCalendarWidget(QWidget):
         available_lanes = max(1, int((row_height - self.DATE_HEIGHT - 22) // self.BAR_HEIGHT))
         lane_limit = min(lane_limit, available_lanes)
         segments = (
-            ()
-            if count_only
-            else build_calendar_segments(self._tasks, grid_start, self._timezone)
+            () if count_only else build_calendar_segments(self._tasks, grid_start, self._timezone)
         )
         visible_task_days: set[tuple[int | None, datetime | None, date]] = set()
         for segment in segments:
@@ -624,7 +639,9 @@ class CalendarPage(QFrame):
         day_header.addWidget(self.expand_list_button)
         self.records_button = QPushButton("기록")
         self.records_button.setObjectName("calendarRecords")
-        self.records_button.setToolTip("선택한 업무의 체크리스트 · 완료 요약 · 업무일지 확인 (더블클릭)")
+        self.records_button.setToolTip(
+            "선택한 업무의 체크리스트 · 완료 요약 · 업무일지 확인 (더블클릭)"
+        )
         self.attachments_button = QPushButton("첨부")
         self.attachments_button.setObjectName("calendarAttachments")
         self.attachments_button.setToolTip("선택한 업무의 첨부파일 목록 보기 · 관리")
@@ -651,11 +668,11 @@ class CalendarPage(QFrame):
         self.day_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.day_list.setAlternatingRowColors(True)
         self.day_list.setUniformItemSizes(True)
-        self.day_list.setVerticalScrollMode(
-            QAbstractItemView.ScrollMode.ScrollPerItem
-        )
+        self.day_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
         self.day_list.setMinimumHeight(112)
-        self.day_list.setToolTip("일정을 더블클릭하면 업무 기록이 열립니다. 일정 수정은 ⋯ 또는 오른쪽 클릭 메뉴에서 합니다.")
+        self.day_list.setToolTip(
+            "일정을 더블클릭하면 업무 기록이 열립니다. 일정 수정은 ⋯ 또는 오른쪽 클릭 메뉴에서 합니다."
+        )
         self.day_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         day_panel_layout.addWidget(self.day_list, 1)
         day_panel_layout.addWidget(self.day_more_hint)
@@ -719,8 +736,17 @@ class CalendarPage(QFrame):
     def set_reminder_preview(self, result: ReminderPreviewResult) -> None:
         self._reminder_preview = result
         start, end = self.visible_date_range
-        counts = {start + timedelta(days=i): sum(item.is_pending for item in result.for_date(start + timedelta(days=i), self._timezone)) for i in range((end-start).days)}
-        attention = {day: sum(item.needs_attention for item in result.for_date(day, self._timezone)) for day in counts}
+        counts = {
+            start + timedelta(days=i): sum(
+                item.is_pending
+                for item in result.for_date(start + timedelta(days=i), self._timezone)
+            )
+            for i in range((end - start).days)
+        }
+        attention = {
+            day: sum(item.needs_attention for item in result.for_date(day, self._timezone))
+            for day in counts
+        }
         self.calendar.set_reminder_counts(counts, complete=result.complete, attention=attention)
         self._refresh_day_list(preserve_selection=True)
 
@@ -768,7 +794,8 @@ class CalendarPage(QFrame):
         self.more_button.setEnabled(selected is not None)
         if selected is not None:
             self.attachments_button.setToolTip(
-                "등록한 첨부파일 목록 보기 · 관리" if selected.has_attachments
+                "등록한 첨부파일 목록 보기 · 관리"
+                if selected.has_attachments
                 else "첨부파일이 없습니다. 목록을 열어 파일을 추가할 수 있습니다."
             )
 
@@ -834,29 +861,54 @@ class CalendarPage(QFrame):
     def _refresh_day_list(self, *, preserve_selection: bool = False) -> None:
         selected_key = (
             (self._selected_task.id, self._selected_task.occurrence_start)
-            if self._selected_task is not None else None
+            if self._selected_task is not None
+            else None
         )
-        result = self._day_alarm_override[1] if self._day_alarm_override and self._day_alarm_override[0] == self.selected_date else self._reminder_preview
+        result = (
+            self._day_alarm_override[1]
+            if self._day_alarm_override and self._day_alarm_override[0] == self.selected_date
+            else self._reminder_preview
+        )
         alarms = result.for_date(self.selected_date, self._timezone)
         items: tuple[ScheduledTask | ReminderPreviewItem, ...] = (*self._day_tasks, *alarms)
-        selected_data = self.day_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.day_list.currentItem() else None
+        selected_data = (
+            self.day_list.currentItem().data(Qt.ItemDataRole.UserRole)
+            if self.day_list.currentItem()
+            else None
+        )
         previous_row = self.day_list.currentRow()
         scroll = self.day_list.verticalScrollBar().value()
         with QSignalBlocker(self.day_list):
             self.day_list.clear()
             for task in items:
-                text = "[알림] " + preview_text(task, self._timezone) if isinstance(task, ReminderPreviewItem) else self._day_item_text(task)
+                text = (
+                    "[알림] " + preview_text(task, self._timezone)
+                    if isinstance(task, ReminderPreviewItem)
+                    else self._day_item_text(task)
+                )
                 item = QListWidgetItem(text)
                 item.setToolTip(text)
                 if isinstance(task, ReminderPreviewItem) and task.snoozed_until:
                     from officeflow.presentation.dates import format_datetime
-                    item.setToolTip(text + "\n다시 알림: " + format_datetime(task.snoozed_until, self._timezone))
+
+                    item.setToolTip(
+                        text + "\n다시 알림: " + format_datetime(task.snoozed_until, self._timezone)
+                    )
                 item.setSizeHint(QSize(0, self._day_row_height()))
                 item.setData(Qt.ItemDataRole.UserRole, task)
-                if (isinstance(task, ReminderPreviewItem) and not task.is_pending) or task.status is TaskStatus.COMPLETED:
+                if (
+                    isinstance(task, ReminderPreviewItem) and not task.is_pending
+                ) or task.status is TaskStatus.COMPLETED:
                     item.setForeground(QColor("#7D899E"))
                 self.day_list.addItem(item)
-                matched = task.key == selected_data.key if isinstance(task, ReminderPreviewItem) and isinstance(selected_data, ReminderPreviewItem) else not isinstance(task, ReminderPreviewItem) and (task.id, task.occurrence_start) == selected_key and not isinstance(selected_data, ReminderPreviewItem)
+                matched = (
+                    task.key == selected_data.key
+                    if isinstance(task, ReminderPreviewItem)
+                    and isinstance(selected_data, ReminderPreviewItem)
+                    else not isinstance(task, ReminderPreviewItem)
+                    and (task.id, task.occurrence_start) == selected_key
+                    and not isinstance(selected_data, ReminderPreviewItem)
+                )
                 if matched:
                     self.day_list.setCurrentItem(item)
             if self._focus_alarm_on_refresh and alarms:
@@ -880,7 +932,9 @@ class CalendarPage(QFrame):
             # view if newly loaded task rows move it below the viewport.
             self.day_list.doItemsLayout()
             self.day_list.scrollToItem(current)
-        self.day_label.setText(f"{self.selected_date.month}월 {self.selected_date.day}일({WEEKDAYS[self.selected_date.weekday()]})")
+        self.day_label.setText(
+            f"{self.selected_date.month}월 {self.selected_date.day}일({WEEKDAYS[self.selected_date.weekday()]})"
+        )
         has_many = len(items) >= 3
         has_overflow = len(items) > 3
         self.day_count.setText(f"총 {len(items)}개 일정" if items else "일정 없음")
@@ -888,7 +942,11 @@ class CalendarPage(QFrame):
             active = sum(item.is_pending for item in alarms)
             attention = sum(item.needs_attention for item in alarms)
             history = len(alarms) - active - attention
-            self.day_count.setText(f"업무 {len(self._day_tasks)}개 · 알림 {active}건 · 처리 이력 {history}건" + (f" · 발생 기록 확인 필요 {attention}건" if attention else "") + f"{'' if result.complete else '+ (일부 조회)'} · 총 {len(items)}행")
+            self.day_count.setText(
+                f"업무 {len(self._day_tasks)}개 · 알림 {active}건 · 처리 이력 {history}건"
+                + (f" · 발생 기록 확인 필요 {attention}건" if attention else "")
+                + f"{'' if result.complete else '+ (일부 조회)'} · 총 {len(items)}행"
+            )
         self.alarm_more_button.setVisible(not result.complete)
         self.day_count.setProperty("hasMany", has_many)
         self.day_count.style().unpolish(self.day_count)
@@ -914,8 +972,7 @@ class CalendarPage(QFrame):
             self.day_more_hint.setText(f"↓ 아래에 {remaining_count}개 더 있음")
         else:
             self.day_more_hint.setText(
-                f"↓ 아래에 {remaining_count}개 더 있음 · "
-                "스크롤하거나 목록 확대"
+                f"↓ 아래에 {remaining_count}개 더 있음 · 스크롤하거나 목록 확대"
             )
 
     def _select_task(self, task: ScheduledTask) -> None:
@@ -959,8 +1016,12 @@ class CalendarPage(QFrame):
         if isinstance(value, ScheduledTask):
             return value
         if isinstance(value, ReminderPreviewItem):
-            return ScheduledTask(value.task, value.occurrence_start or value.task.starts_at or value.effective_at,
-                value.task.ends_at, occurrence_start=value.occurrence_start if value.task.recurrence_rule else None)
+            return ScheduledTask(
+                value.task,
+                value.occurrence_start or value.task.starts_at or value.effective_at,
+                value.task.ends_at,
+                occurrence_start=value.occurrence_start if value.task.recurrence_rule else None,
+            )
         return None
 
     def _activate_selected(self) -> None:
@@ -1008,9 +1069,7 @@ class CalendarPage(QFrame):
         if task.occurrence_start is not None:
             return None
         candidates = (
-            due
-            for (task_id, _occurrence), due in self._snoozed_until.items()
-            if task_id == task.id
+            due for (task_id, _occurrence), due in self._snoozed_until.items() if task_id == task.id
         )
         return min(candidates, default=None)
 

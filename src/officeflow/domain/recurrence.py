@@ -144,9 +144,11 @@ def next_recurrence_start(
     normalized = validate_recurrence_rule(rule, template_start)
     zone = ZoneInfo(timezone)
     fields = _rule_fields(normalized)
-    periods = {"DAILY": 86_400, "WEEKLY": 604_800, "HOURLY": 3_600,
-               "MINUTELY": 60, "SECONDLY": 1}
-    if set(fields) <= {"FREQ", "INTERVAL", "COUNT", "UNTIL", "WKST"} and fields.get("FREQ") in periods:
+    periods = {"DAILY": 86_400, "WEEKLY": 604_800, "HOURLY": 3_600, "MINUTELY": 60, "SECONDLY": 1}
+    if (
+        set(fields) <= {"FREQ", "INTERVAL", "COUNT", "UNTIL", "WKST"}
+        and fields.get("FREQ") in periods
+    ):
         interval = int(fields.get("INTERVAL", "1"))
         if interval > 0:
             # dateutil normalizes DTSTART to whole seconds as RFC 5545 does.
@@ -158,8 +160,15 @@ def next_recurrence_start(
                 period = timedelta(seconds=periods[fields["FREQ"]] * interval)
             except OverflowError:
                 first = start.astimezone(UTC)
-                return first if ((count is None or count > 0) and (until is None or first <= until)
-                                 and (first > after or (inclusive and first == after))) else None
+                return (
+                    first
+                    if (
+                        (count is None or count > 0)
+                        and (until is None or first <= until)
+                        and (first > after or (inclusive and first == after))
+                    )
+                    else None
+                )
             elapsed = local_after.replace(tzinfo=None) - start.replace(tzinfo=None)
             index = max(0, elapsed // period)
             while count is None or index < count:

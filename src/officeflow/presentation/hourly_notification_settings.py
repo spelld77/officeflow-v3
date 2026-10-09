@@ -70,7 +70,9 @@ class HourlyNotificationSettingsDialog(QDialog):
         self.morning_button.setToolTip("08시 전에 인사랑 출근·업무기록을 했는데 앱을 늦게 켠 경우")
         self.morning_button.clicked.connect(self.morningRequested.emit)
         content.addWidget(self.morning_button)
-        self.morning_resume_hint = QLabel("08시 전 출근·기록 후, 프로그램만 늦게 켠 경우에 선택하세요.")
+        self.morning_resume_hint = QLabel(
+            "08시 전 출근·기록 후, 프로그램만 늦게 켠 경우에 선택하세요."
+        )
         self.morning_resume_hint.setWordWrap(True)
         self.morning_resume_hint.setObjectName("mutedText")
         content.addWidget(self.morning_resume_hint)

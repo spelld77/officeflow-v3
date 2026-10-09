@@ -69,9 +69,7 @@ class ReminderRepository(Protocol):
         self, task_id: int, occurrence_start: datetime
     ) -> TaskOccurrence | None: ...
 
-    def claim_reminder_delivery(
-        self, delivery: ReminderDelivery
-    ) -> ReminderDelivery | None: ...
+    def claim_reminder_delivery(self, delivery: ReminderDelivery) -> ReminderDelivery | None: ...
 
     def get_reminder_delivery(self, delivery_id: int) -> ReminderDelivery | None: ...
 
@@ -115,7 +113,13 @@ class ReminderService:
     def runtime_state(self, task_id: int) -> ReminderRuntimeState:
         query = getattr(self._repository, "runtime_state", None)
         if query is None:
-            return ReminderRuntimeState(self._task_service.get_including_deleted(task_id), (), self.task_deliveries(task_id), self.reminders_for_task(task_id), datetime.now(UTC))
+            return ReminderRuntimeState(
+                self._task_service.get_including_deleted(task_id),
+                (),
+                self.task_deliveries(task_id),
+                self.reminders_for_task(task_id),
+                datetime.now(UTC),
+            )
         return query(task_id)  # type: ignore[no-any-return]
 
     def active_snoozes(self) -> tuple[ReminderDelivery, ...]:
@@ -127,8 +131,16 @@ class ReminderService:
         if delivery is None or delivery.status is not ReminderDeliveryStatus.FIRED:
             return False
         target = self._repository.get_reminder_target(delivery.reminder_id)
-        return bool(target and target.reminder.enabled and target.task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
-            and not (target.task.recurrence_rule and delivery.occurrence_start and self._occurrence_is_closed(target.task.id, delivery.occurrence_start)))
+        return bool(
+            target
+            and target.reminder.enabled
+            and target.task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+            and not (
+                target.task.recurrence_rule
+                and delivery.occurrence_start
+                and self._occurrence_is_closed(target.task.id, delivery.occurrence_start)
+            )
+        )
 
     def alert_for_delivery(self, delivery_id: int) -> ReminderAlert | None:
         if not self.alert_is_active(delivery_id):
@@ -147,7 +159,9 @@ class ReminderService:
     ) -> tuple[Reminder, ...]:
         task = self._task_service.get(task_id)
         old = self._repository.list_reminders(task_id)
-        if len(rules) > 20 and (len(rules) > len(old) or {r.identity for r in rules} - {r.identity for r in old}):
+        if len(rules) > 20 and (
+            len(rules) > len(old) or {r.identity for r in rules} - {r.identity for r in old}
+        ):
             raise ValueError("업무 하나에 알림을 최대 20개까지 설정할 수 있습니다.")
         for rule in rules:
             if rule.relation is ReminderRelation.START and task.starts_at is None:
@@ -211,8 +225,12 @@ class ReminderService:
         calculations = 0
 
         def exhausted() -> bool:
-            return (calculations >= max_candidates or monotonic() - started >= max_poll_seconds
-                    or (cancel_requested is not None and cancel_requested()))
+            return (
+                calculations >= max_candidates
+                or monotonic() - started >= max_poll_seconds
+                or (cancel_requested is not None and cancel_requested())
+            )
+
         window_start = current - timedelta(minutes=grace_minutes)
         alerts: list[ReminderAlert] = []
         if cancel_requested is not None and cancel_requested():
@@ -290,7 +308,9 @@ class ReminderService:
                     # Seek to the recovery window, rather than walking months of misses.
                     candidate = self._next_candidate(target, after=window_start, inclusive=True)
                     calculations += 1
-                    occurrence_start, scheduled_at = candidate if candidate is not None else (None, None)
+                    occurrence_start, scheduled_at = (
+                        candidate if candidate is not None else (None, None)
+                    )
                 while scheduled_at is not None and scheduled_at <= current and not exhausted():
                     if scheduled_at >= window_start and not (
                         occurrence_start is not None
@@ -310,7 +330,11 @@ class ReminderService:
                             now=current,
                         )
                         claim = getattr(self._repository, "claim_current_delivery", None)
-                        claimed = claim(delivery, target) if claim else self._repository.claim_reminder_delivery(delivery)
+                        claimed = (
+                            claim(delivery, target)
+                            if claim
+                            else self._repository.claim_reminder_delivery(delivery)
+                        )
                         if claimed is not None:
                             alerts.append(
                                 ReminderAlert(
@@ -318,8 +342,7 @@ class ReminderService:
                                     reminder=target.reminder,
                                     task=target.task,
                                     recovered=scheduled_at
-                                    < current
-                                    - timedelta(seconds=recovery_threshold_seconds),
+                                    < current - timedelta(seconds=recovery_threshold_seconds),
                                 )
                             )
                     candidate = self._next_candidate(
@@ -356,15 +379,11 @@ class ReminderService:
             delivery.snooze(minutes, now=now or datetime.now(UTC))
         )
 
-    def acknowledge(
-        self, delivery_id: int, *, now: datetime | None = None
-    ) -> ReminderDelivery:
+    def acknowledge(self, delivery_id: int, *, now: datetime | None = None) -> ReminderDelivery:
         delivery = self._get_delivery(delivery_id)
         return self._repository.save_reminder_delivery(delivery.acknowledge(now=now))
 
-    def complete(
-        self, delivery_id: int, *, now: datetime | None = None
-    ) -> ReminderDelivery:
+    def complete(self, delivery_id: int, *, now: datetime | None = None) -> ReminderDelivery:
         current = now or datetime.now(UTC)
         delivery = self._get_delivery(delivery_id)
         task = self._task_service.get(delivery.task_id)
@@ -415,9 +434,7 @@ class ReminderService:
         if reminder.relation is ReminderRelation.ABSOLUTE:
             if reminder.absolute_at is None:
                 return None
-            if reminder.absolute_at > after or (
-                inclusive and reminder.absolute_at == after
-            ):
+            if reminder.absolute_at > after or (inclusive and reminder.absolute_at == after):
                 return None, reminder.absolute_at
             return None
 
@@ -446,9 +463,7 @@ class ReminderService:
         while occurrence_start is not None:
             occurrence_end = occurrence_start + duration if task.ends_at is not None else None
             occurrence_base = (
-                occurrence_start
-                if reminder.relation is ReminderRelation.START
-                else occurrence_end
+                occurrence_start if reminder.relation is ReminderRelation.START else occurrence_end
             )
             if occurrence_base is None:
                 return None
@@ -492,7 +507,9 @@ class ReminderService:
             raise LookupError(f"알림 {delivery_id}을(를) 찾을 수 없습니다.")
         return delivery
 
-    def _save_target_schedule(self, target: ReminderTarget, due: datetime | None, occurrence: datetime | None) -> None:
+    def _save_target_schedule(
+        self, target: ReminderTarget, due: datetime | None, occurrence: datetime | None
+    ) -> None:
         guarded = getattr(self._repository, "save_schedule_if_current", None)
         if guarded:
             guarded(target, due, occurrence)

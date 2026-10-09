@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,6 +21,8 @@ from officeflow.domain.attachment import Attachment, FileObservation
 
 class FileReferenceKind(StrEnum):
     ATTACHMENT = "attachment"
+    VERSION = "version"
+    CACHE = "cache"
     ORPHAN = "orphan"
 
 
@@ -30,10 +33,10 @@ class FileReference:
     relative_path: str | None = None
 
     def __post_init__(self) -> None:
-        if self.kind is FileReferenceKind.ATTACHMENT:
+        if self.kind in {FileReferenceKind.ATTACHMENT, FileReferenceKind.VERSION}:
             if not self.attachment_id or self.relative_path is not None:
                 raise ValueError("올바른 첨부 ID가 필요합니다.")
-        elif self.kind is FileReferenceKind.ORPHAN:
+        elif self.kind in {FileReferenceKind.ORPHAN, FileReferenceKind.CACHE}:
             path = PurePosixPath(self.relative_path or "")
             if (
                 self.attachment_id is not None
@@ -44,12 +47,24 @@ class FileReference:
                 or any(part.startswith(".") for part in path.parts)
             ):
                 raise ValueError("올바른 관리 파일 상대 경로가 필요합니다.")
+            if self.kind is FileReferenceKind.CACHE and not (
+                len(path.parts) == 5 and path.parts[:2] == ("cache", "attachment-views")
+            ):
+                raise ValueError("소유된 보기 사본 파일을 선택하세요.")
         else:
             raise ValueError("지원하지 않는 파일 참조입니다.")
 
     @classmethod
     def attachment(cls, attachment_id: int) -> FileReference:
         return cls(FileReferenceKind.ATTACHMENT, attachment_id=attachment_id)
+
+    @classmethod
+    def version(cls, version_id: int) -> FileReference:
+        return cls(FileReferenceKind.VERSION, attachment_id=version_id)
+
+    @classmethod
+    def cache(cls, relative: str) -> FileReference:
+        return cls(FileReferenceKind.CACHE, relative_path=relative)
 
     @classmethod
     def orphan(cls, relative_path: str) -> FileReference:
@@ -171,12 +186,32 @@ class AttachmentExportService:
         self.attachments = attachments
         self.storage = storage
 
+    @staticmethod
+    def _version_name(name: str, label: str) -> str:
+        path = PurePosixPath(name)
+        label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", label).rstrip(" .") or "보관본"
+        return f"{path.stem} - {label}{path.suffix}"
+
     def resolve(self, reference: FileReference) -> ResolvedFileReference:
         root = self.attachments.storage_root
-        if reference.kind is FileReferenceKind.ATTACHMENT:
+        if reference.kind is FileReferenceKind.VERSION:
+            if self.attachments.lifecycle is None or reference.attachment_id is None:
+                raise ValueError("보관본 서비스가 준비되지 않았습니다.")
+            entry = self.attachments.lifecycle.catalog.get("version", reference.attachment_id)
+            attachment = entry.file
+            relative, name = attachment.relative_path, self._version_name(entry.name, entry.label)
+        elif reference.kind is FileReferenceKind.ATTACHMENT:
             assert reference.attachment_id is not None
             attachment = self.attachments.get_metadata(reference.attachment_id)
-            relative, name = attachment.relative_path, attachment.original_name
+            relative, name = attachment.relative_path, attachment.name
+        elif reference.kind is FileReferenceKind.CACHE:
+            if not self.attachments.lifecycle or not reference.relative_path:
+                raise ValueError("보기 사본 서비스를 확인하세요.")
+            path = root / reference.relative_path
+            copy = self.attachments.lifecycle.cache.by_path(path)
+            if copy is None or copy.relative_path != reference.relative_path:
+                raise ValueError("보기 사본의 소유 원장을 확인하세요.")
+            relative, name, attachment = copy.relative_path, copy.name, None
         else:
             attachment = None
             assert reference.relative_path is not None
@@ -211,13 +246,7 @@ class AttachmentExportService:
             and len(references) > 1
             and (
                 any(ref.attachment_id is None for ref in references)
-                or len(
-                    {
-                        self.attachments.get_metadata(ref.attachment_id).task_id
-                        for ref in references
-                        if ref.attachment_id is not None
-                    }
-                )
+                or len({self.task_id(ref) for ref in references if ref.attachment_id is not None})
                 != 1
             )
         ):
@@ -266,8 +295,26 @@ class AttachmentExportService:
                                 cancel_requested=canceled,
                                 progress=progress,
                             )
+                            if (
+                                resolved.attachment
+                                and resolved.attachment.is_frozen
+                                and (
+                                    prepared.observation.checksum
+                                    != resolved.attachment.fixed_checksum
+                                    or prepared.observation.size_bytes
+                                    != resolved.attachment.fixed_size_bytes
+                                )
+                            ):
+                                self.storage.abort(prepared)
+                                prepared = None
+                                raise AttachmentOperationError(
+                                    "보관 후 내용이 변경되어 저장하지 않았습니다. 기준은 바꾸지 않았습니다."
+                                )
                             warning = ""
-                            if resolved.attachment:
+                            if (
+                                resolved.attachment
+                                and reference.kind is FileReferenceKind.ATTACHMENT
+                            ):
                                 try:
                                     self.attachments.record_observation(
                                         resolved.attachment, prepared.observation
@@ -340,6 +387,38 @@ class AttachmentExportService:
                 for reference in references
             )
         return ExportBatchResult(job_id, tuple(items), folder, canceled())
+
+    def task_id(self, reference: FileReference) -> int:
+        if (
+            reference.kind is FileReferenceKind.VERSION
+            and self.attachments.lifecycle
+            and reference.attachment_id
+        ):
+            return self.attachments.lifecycle.catalog.get(
+                "version", reference.attachment_id
+            ).task_id
+        if reference.attachment_id:
+            return self.attachments.get_metadata(reference.attachment_id).task_id
+        raise ValueError("업무 안의 첨부/보관본을 선택하세요.")
+
+    def name(self, reference: FileReference) -> str:
+        if (
+            reference.kind is FileReferenceKind.VERSION
+            and self.attachments.lifecycle
+            and reference.attachment_id
+        ):
+            entry = self.attachments.lifecycle.catalog.get("version", reference.attachment_id)
+            return self._version_name(entry.name, entry.label)
+        if reference.attachment_id:
+            return self.attachments.get_metadata(reference.attachment_id).name
+        return PurePosixPath(reference.relative_path or "첨부파일").name
+
+    def prepare_open(self, reference: FileReference, canceled: Callable[[], bool]) -> Path:
+        if reference.attachment_id and self.attachments.lifecycle:
+            return self.attachments.lifecycle.prepare_open(
+                reference.kind.value, reference.attachment_id, canceled
+            )
+        return self.resolve(reference).path
 
     def inspect_recovery(self, canceled: Callable[[], bool]) -> tuple[ExportRecoveryItem, ...]:
         with self.attachments.coordinator.job(canceled):

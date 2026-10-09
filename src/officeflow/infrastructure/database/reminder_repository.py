@@ -38,21 +38,51 @@ class SqlAlchemyReminderRepository:
             yield SqlAlchemyReminderRepository(sessions)
 
     def task_deliveries(self, task_id: int) -> tuple[ReminderDelivery, ...]:
-        latest = select(ReminderDeliveryRecord.id,
-            func.row_number().over(partition_by=ReminderDeliveryRecord.reminder_id,
-                order_by=ReminderDeliveryRecord.updated_at.desc()).label("position")
-            ).where(ReminderDeliveryRecord.task_id == task_id).subquery()
-        statement = select(ReminderDeliveryRecord).where(ReminderDeliveryRecord.task_id == task_id,
-            or_(ReminderDeliveryRecord.id.in_(select(latest.c.id).where(latest.c.position == 1)),
-                ReminderDeliveryRecord.status.in_(("fired", "snoozed")))).order_by(ReminderDeliveryRecord.updated_at.desc()).limit(1000)
+        latest = (
+            select(
+                ReminderDeliveryRecord.id,
+                func.row_number()
+                .over(
+                    partition_by=ReminderDeliveryRecord.reminder_id,
+                    order_by=ReminderDeliveryRecord.updated_at.desc(),
+                )
+                .label("position"),
+            )
+            .where(ReminderDeliveryRecord.task_id == task_id)
+            .subquery()
+        )
+        statement = (
+            select(ReminderDeliveryRecord)
+            .where(
+                ReminderDeliveryRecord.task_id == task_id,
+                or_(
+                    ReminderDeliveryRecord.id.in_(
+                        select(latest.c.id).where(latest.c.position == 1)
+                    ),
+                    ReminderDeliveryRecord.status.in_(("fired", "snoozed")),
+                ),
+            )
+            .order_by(ReminderDeliveryRecord.updated_at.desc())
+            .limit(1000)
+        )
         with self._sessions.transaction() as session:
             return tuple(self._to_delivery(row) for row in session.scalars(statement))
 
-    def occurrence_states(self, keys: tuple[tuple[int, datetime], ...]) -> dict[tuple[int, datetime], OccurrenceStatus]:
+    def occurrence_states(
+        self, keys: tuple[tuple[int, datetime], ...]
+    ) -> dict[tuple[int, datetime], OccurrenceStatus]:
         result: dict[tuple[int, datetime], OccurrenceStatus] = {}
         with self._sessions.transaction() as session:
             for offset in range(0, len(keys), 200):
-                statement = select(TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.occurrence_start, TaskOccurrenceRecord.status).where(tuple_(TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.occurrence_start).in_(keys[offset:offset + 200]))
+                statement = select(
+                    TaskOccurrenceRecord.task_id,
+                    TaskOccurrenceRecord.occurrence_start,
+                    TaskOccurrenceRecord.status,
+                ).where(
+                    tuple_(TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.occurrence_start).in_(
+                        keys[offset : offset + 200]
+                    )
+                )
                 for task_id, start, status in session.execute(statement):
                     result[task_id, start] = OccurrenceStatus(status)
         return result
@@ -65,12 +95,23 @@ class SqlAlchemyReminderRepository:
                 raise ValueError("업무를 찾을 수 없습니다.")
             deliveries = repo.task_deliveries(task_id)
             reminders = repo.list_reminders(task_id)
-            keys = {(task_id, d.occurrence_start) for d in deliveries if d.occurrence_start is not None}
-            keys.update((task_id, r.next_occurrence_start) for r in reminders if r.next_occurrence_start is not None)
+            keys = {
+                (task_id, d.occurrence_start) for d in deliveries if d.occurrence_start is not None
+            }
+            keys.update(
+                (task_id, r.next_occurrence_start)
+                for r in reminders
+                if r.next_occurrence_start is not None
+            )
             from officeflow.application.reminders import ReminderService
+
             next_starts = []
             for reminder in reminders:
-                next_item = ReminderService._next_candidate(ReminderTarget(reminder, task), after=datetime.now(UTC).replace(second=0, microsecond=0), inclusive=True)
+                next_item = ReminderService._next_candidate(
+                    ReminderTarget(reminder, task),
+                    after=datetime.now(UTC).replace(second=0, microsecond=0),
+                    inclusive=True,
+                )
                 if next_item and next_item[0] is not None:
                     keys.add((task_id, next_item[0]))
                     next_starts.append(next_item[0])
@@ -79,14 +120,28 @@ class SqlAlchemyReminderRepository:
                 # A completed current occurrence can be followed by another
                 # explicitly skipped occurrence. Read these in one bounded
                 # query, not per projected reminder row.
-                statement = select(TaskOccurrenceRecord.occurrence_start, TaskOccurrenceRecord.status).where(
-                    TaskOccurrenceRecord.task_id == task_id,
-                    TaskOccurrenceRecord.occurrence_start >= min(next_starts),
-                    TaskOccurrenceRecord.status.in_(("completed", "skipped", "canceled")),
-                ).order_by(TaskOccurrenceRecord.occurrence_start).limit(512)
+                statement = (
+                    select(TaskOccurrenceRecord.occurrence_start, TaskOccurrenceRecord.status)
+                    .where(
+                        TaskOccurrenceRecord.task_id == task_id,
+                        TaskOccurrenceRecord.occurrence_start >= min(next_starts),
+                        TaskOccurrenceRecord.status.in_(("completed", "skipped", "canceled")),
+                    )
+                    .order_by(TaskOccurrenceRecord.occurrence_start)
+                    .limit(512)
+                )
                 with repo._sessions.transaction() as session:
-                    states.update(((task_id, start), OccurrenceStatus(status)) for start, status in session.execute(statement))
-            return ReminderRuntimeState(task, tuple((start, status) for (_id, start), status in states.items()), deliveries, reminders, datetime.now(UTC))
+                    states.update(
+                        ((task_id, start), OccurrenceStatus(status))
+                        for start, status in session.execute(statement)
+                    )
+            return ReminderRuntimeState(
+                task,
+                tuple((start, status) for (_id, start), status in states.items()),
+                deliveries,
+                reminders,
+                datetime.now(UTC),
+            )
 
     @staticmethod
     def _target_matches(current: ReminderTarget | None, expected: ReminderTarget) -> bool:
@@ -94,12 +149,33 @@ class SqlAlchemyReminderRepository:
             return False
         r, old = current.reminder, expected.reminder
         t, old_task = current.task, expected.task
-        return (r.identity, r.enabled, r.next_fire_at, r.next_occurrence_start, r.schedule_initialized) == (
-            old.identity, old.enabled, old.next_fire_at, old.next_occurrence_start, old.schedule_initialized) and (
-            t.starts_at, t.ends_at, t.timezone, t.all_day, t.recurrence_rule, t.status) == (
-            old_task.starts_at, old_task.ends_at, old_task.timezone, old_task.all_day, old_task.recurrence_rule, old_task.status)
+        return (
+            r.identity,
+            r.enabled,
+            r.next_fire_at,
+            r.next_occurrence_start,
+            r.schedule_initialized,
+        ) == (
+            old.identity,
+            old.enabled,
+            old.next_fire_at,
+            old.next_occurrence_start,
+            old.schedule_initialized,
+        ) and (t.starts_at, t.ends_at, t.timezone, t.all_day, t.recurrence_rule, t.status) == (
+            old_task.starts_at,
+            old_task.ends_at,
+            old_task.timezone,
+            old_task.all_day,
+            old_task.recurrence_rule,
+            old_task.status,
+        )
 
-    def save_schedule_if_current(self, target: ReminderTarget, next_fire_at: datetime | None, next_occurrence_start: datetime | None) -> bool:
+    def save_schedule_if_current(
+        self,
+        target: ReminderTarget,
+        next_fire_at: datetime | None,
+        next_occurrence_start: datetime | None,
+    ) -> bool:
         assert target.reminder.id is not None
         with self._sessions.write_unit_of_work() as scoped:
             repo = SqlAlchemyReminderRepository(scoped)
@@ -108,47 +184,108 @@ class SqlAlchemyReminderRepository:
             repo.save_reminder_schedule(target.reminder.id, next_fire_at, next_occurrence_start)
             return True
 
-    def claim_current_delivery(self, delivery: ReminderDelivery, target: ReminderTarget) -> ReminderDelivery | None:
+    def claim_current_delivery(
+        self, delivery: ReminderDelivery, target: ReminderTarget
+    ) -> ReminderDelivery | None:
         with self._sessions.write_unit_of_work() as scoped:
             repo = SqlAlchemyReminderRepository(scoped)
             if not self._target_matches(repo.get_reminder_target(delivery.reminder_id), target):
                 return None
             return repo.claim_reminder_delivery(delivery)
 
-    def preview_targets(self, start: datetime, end: datetime, *, after_id: int, limit: int) -> tuple[ReminderTarget, ...]:
+    def preview_targets(
+        self, start: datetime, end: datetime, *, after_id: int, limit: int
+    ) -> tuple[ReminderTarget, ...]:
         margin = timedelta(days=32)
-        statement = select(ReminderRecord, TaskRecord, SqlAlchemyTaskRepository._attachment_exists()).join(TaskRecord, TaskRecord.id == ReminderRecord.task_id).where(
-            ReminderRecord.id > after_id, ReminderRecord.enabled.is_(True), TaskRecord.deleted_at.is_(None),
-            TaskRecord.status.in_(("active", "pending")),
-            or_(
-                (ReminderRecord.relation == "absolute") & (ReminderRecord.absolute_at >= start) & (ReminderRecord.absolute_at < end),
-                (ReminderRecord.relation == "start") & (TaskRecord.starts_at >= start - margin) & (TaskRecord.starts_at < end + margin),
-                (ReminderRecord.relation == "end") & (TaskRecord.ends_at >= start - margin) & (TaskRecord.ends_at < end + margin),
-                (ReminderRecord.relation.in_(("start", "end"))) & TaskRecord.recurrence_rule.is_not(None),
+        statement = (
+            select(ReminderRecord, TaskRecord, SqlAlchemyTaskRepository._attachment_exists())
+            .join(TaskRecord, TaskRecord.id == ReminderRecord.task_id)
+            .where(
+                ReminderRecord.id > after_id,
+                ReminderRecord.enabled.is_(True),
+                TaskRecord.deleted_at.is_(None),
+                TaskRecord.status.in_(("active", "pending")),
+                or_(
+                    (ReminderRecord.relation == "absolute")
+                    & (ReminderRecord.absolute_at >= start)
+                    & (ReminderRecord.absolute_at < end),
+                    (ReminderRecord.relation == "start")
+                    & (TaskRecord.starts_at >= start - margin)
+                    & (TaskRecord.starts_at < end + margin),
+                    (ReminderRecord.relation == "end")
+                    & (TaskRecord.ends_at >= start - margin)
+                    & (TaskRecord.ends_at < end + margin),
+                    (ReminderRecord.relation.in_(("start", "end")))
+                    & TaskRecord.recurrence_rule.is_not(None),
+                ),
             )
-        ).order_by(ReminderRecord.id).limit(limit)
+            .order_by(ReminderRecord.id)
+            .limit(limit)
+        )
         with self._sessions.transaction() as session:
-            return tuple(ReminderTarget(self._to_reminder(r), SqlAlchemyTaskRepository._to_domain(t, has_attachments=bool(attached))) for r, t, attached in session.execute(statement))
+            return tuple(
+                ReminderTarget(
+                    self._to_reminder(r),
+                    SqlAlchemyTaskRepository._to_domain(t, has_attachments=bool(attached)),
+                )
+                for r, t, attached in session.execute(statement)
+            )
 
-    def preview_deliveries(self, start: datetime, end: datetime, *, limit: int) -> tuple[tuple[ReminderDelivery, ReminderTarget], ...]:
-        statement = select(ReminderDeliveryRecord, ReminderRecord, TaskRecord, SqlAlchemyTaskRepository._attachment_exists()).join(
-            ReminderRecord, ReminderRecord.id == ReminderDeliveryRecord.reminder_id).join(
-            TaskRecord, TaskRecord.id == ReminderDeliveryRecord.task_id).where(TaskRecord.deleted_at.is_(None),
-            or_((ReminderDeliveryRecord.scheduled_at >= start) & (ReminderDeliveryRecord.scheduled_at < end),
-                (ReminderDeliveryRecord.snoozed_until >= start) & (ReminderDeliveryRecord.snoozed_until < end),
-                (ReminderDeliveryRecord.last_fired_at >= start) & (ReminderDeliveryRecord.last_fired_at < end))
-        ).order_by(ReminderDeliveryRecord.scheduled_at, ReminderDeliveryRecord.id).limit(limit)
+    def preview_deliveries(
+        self, start: datetime, end: datetime, *, limit: int
+    ) -> tuple[tuple[ReminderDelivery, ReminderTarget], ...]:
+        statement = (
+            select(
+                ReminderDeliveryRecord,
+                ReminderRecord,
+                TaskRecord,
+                SqlAlchemyTaskRepository._attachment_exists(),
+            )
+            .join(ReminderRecord, ReminderRecord.id == ReminderDeliveryRecord.reminder_id)
+            .join(TaskRecord, TaskRecord.id == ReminderDeliveryRecord.task_id)
+            .where(
+                TaskRecord.deleted_at.is_(None),
+                or_(
+                    (ReminderDeliveryRecord.scheduled_at >= start)
+                    & (ReminderDeliveryRecord.scheduled_at < end),
+                    (ReminderDeliveryRecord.snoozed_until >= start)
+                    & (ReminderDeliveryRecord.snoozed_until < end),
+                    (ReminderDeliveryRecord.last_fired_at >= start)
+                    & (ReminderDeliveryRecord.last_fired_at < end),
+                ),
+            )
+            .order_by(ReminderDeliveryRecord.scheduled_at, ReminderDeliveryRecord.id)
+            .limit(limit)
+        )
         with self._sessions.transaction() as session:
-            return tuple((self._to_delivery(d), ReminderTarget(self._to_reminder(r), SqlAlchemyTaskRepository._to_domain(t, has_attachments=bool(attached)))) for d, r, t, attached in session.execute(statement))
+            return tuple(
+                (
+                    self._to_delivery(d),
+                    ReminderTarget(
+                        self._to_reminder(r),
+                        SqlAlchemyTaskRepository._to_domain(t, has_attachments=bool(attached)),
+                    ),
+                )
+                for d, r, t, attached in session.execute(statement)
+            )
 
-    def closed_occurrences(self, task_ids: tuple[int, ...], start: datetime, end: datetime) -> frozenset[tuple[int, datetime]]:
+    def closed_occurrences(
+        self, task_ids: tuple[int, ...], start: datetime, end: datetime
+    ) -> frozenset[tuple[int, datetime]]:
         if not task_ids:
             return frozenset()
-        statement = select(TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.occurrence_start).where(
-            TaskOccurrenceRecord.task_id.in_(task_ids), TaskOccurrenceRecord.occurrence_start >= start,
-            TaskOccurrenceRecord.occurrence_start < end, TaskOccurrenceRecord.status.in_(("completed", "skipped", "canceled")))
+        statement = select(
+            TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.occurrence_start
+        ).where(
+            TaskOccurrenceRecord.task_id.in_(task_ids),
+            TaskOccurrenceRecord.occurrence_start >= start,
+            TaskOccurrenceRecord.occurrence_start < end,
+            TaskOccurrenceRecord.status.in_(("completed", "skipped", "canceled")),
+        )
         with self._sessions.transaction() as session:
-            return frozenset((task_id, occurrence) for task_id, occurrence in session.execute(statement))
+            return frozenset(
+                (task_id, occurrence) for task_id, occurrence in session.execute(statement)
+            )
 
     def list_reminders(self, task_id: int) -> tuple[Reminder, ...]:
         statement = (
@@ -161,19 +298,34 @@ class SqlAlchemyReminderRepository:
 
     def dismiss_rule_deliveries(self, reminder_id: int, now: datetime) -> None:
         with self._sessions.transaction() as session:
-            session.execute(update(ReminderDeliveryRecord).where(
-                ReminderDeliveryRecord.reminder_id == reminder_id,
-                ReminderDeliveryRecord.status.in_(("fired", "snoozed")),
-            ).values(status="acknowledged", acknowledged_at=now, updated_at=now, snoozed_until=None))
+            session.execute(
+                update(ReminderDeliveryRecord)
+                .where(
+                    ReminderDeliveryRecord.reminder_id == reminder_id,
+                    ReminderDeliveryRecord.status.in_(("fired", "snoozed")),
+                )
+                .values(
+                    status="acknowledged", acknowledged_at=now, updated_at=now, snoozed_until=None
+                )
+            )
 
-    def apply_edits(self, task_id: int, edits: tuple[ReminderEdit, ...], *, now: datetime) -> tuple[Reminder, ...]:
+    def apply_edits(
+        self, task_id: int, edits: tuple[ReminderEdit, ...], *, now: datetime
+    ) -> tuple[Reminder, ...]:
         with self._sessions.write_unit_of_work() as scoped:
             with scoped.transaction() as session:
                 task = session.get(TaskRecord, task_id)
                 if task is None or task.deleted_at is not None:
                     raise LookupError("업무를 찾을 수 없거나 휴지통에 있습니다.")
-                existing = {r.id: r for r in session.scalars(select(ReminderRecord).where(ReminderRecord.task_id == task_id))}
-                if len(edits) > 20 and (len(edits) > len(existing) or any(e.reminder_id is None for e in edits)):
+                existing = {
+                    r.id: r
+                    for r in session.scalars(
+                        select(ReminderRecord).where(ReminderRecord.task_id == task_id)
+                    )
+                }
+                if len(edits) > 20 and (
+                    len(edits) > len(existing) or any(e.reminder_id is None for e in edits)
+                ):
                     raise ValueError("업무 하나에 알림을 최대 20개까지 설정할 수 있습니다.")
                 ids = [e.reminder_id for e in edits if e.reminder_id is not None]
                 if len(ids) != len(set(ids)) or not set(ids) <= existing.keys():
@@ -185,13 +337,23 @@ class SqlAlchemyReminderRepository:
                         session.delete(existing_record)
                 for edit in edits:
                     rule = edit.rule
-                    record = existing.get(edit.reminder_id) if edit.reminder_id is not None else None
+                    record = (
+                        existing.get(edit.reminder_id) if edit.reminder_id is not None else None
+                    )
                     if record is None:
-                        record = ReminderRecord(task_id=task_id, relation=rule.relation.value,
-                            offset_minutes=rule.offset_minutes, absolute_at=rule.absolute_at,
-                            enabled=rule.enabled, schedule_initialized=False)
+                        record = ReminderRecord(
+                            task_id=task_id,
+                            relation=rule.relation.value,
+                            offset_minutes=rule.offset_minutes,
+                            absolute_at=rule.absolute_at,
+                            enabled=rule.enabled,
+                            schedule_initialized=False,
+                        )
                         session.add(record)
-                    elif self._to_reminder(record).identity != rule.identity or record.enabled != rule.enabled:
+                    elif (
+                        self._to_reminder(record).identity != rule.identity
+                        or record.enabled != rule.enabled
+                    ):
                         SqlAlchemyReminderRepository(scoped).dismiss_rule_deliveries(record.id, now)
                         record.relation = rule.relation.value
                         record.offset_minutes = rule.offset_minutes
@@ -217,7 +379,10 @@ class SqlAlchemyReminderRepository:
                 ).all()
             )
             requested = {rule.identity: rule for rule in rules}
-            if len(rules) > 20 and (len(rules) > len(existing) or set(requested) - {self._to_reminder(r).identity for r in existing}):
+            if len(rules) > 20 and (
+                len(rules) > len(existing)
+                or set(requested) - {self._to_reminder(r).identity for r in existing}
+            ):
                 raise ValueError("업무 하나에 알림을 최대 20개까지 설정할 수 있습니다.")
             for record in existing:
                 identity = (
@@ -295,9 +460,7 @@ class SqlAlchemyReminderRepository:
                 for reminder, task in session.execute(statement).all()
             )
 
-    def list_unscheduled_reminder_targets(
-        self, *, limit: int = 100
-    ) -> tuple[ReminderTarget, ...]:
+    def list_unscheduled_reminder_targets(self, *, limit: int = 100) -> tuple[ReminderTarget, ...]:
         statement = (
             select(ReminderRecord, TaskRecord)
             .join(TaskRecord, TaskRecord.id == ReminderRecord.task_id)
@@ -335,9 +498,15 @@ class SqlAlchemyReminderRepository:
 
     def restore_reminder_schedule(self, reminder: Reminder) -> None:
         with self._sessions.transaction() as session:
-            session.execute(update(ReminderRecord).where(ReminderRecord.id == reminder.id).values(
-                next_fire_at=reminder.next_fire_at, next_occurrence_start=reminder.next_occurrence_start,
-                schedule_initialized=reminder.schedule_initialized))
+            session.execute(
+                update(ReminderRecord)
+                .where(ReminderRecord.id == reminder.id)
+                .values(
+                    next_fire_at=reminder.next_fire_at,
+                    next_occurrence_start=reminder.next_occurrence_start,
+                    schedule_initialized=reminder.schedule_initialized,
+                )
+            )
 
     def get_reminder_target(self, reminder_id: int) -> ReminderTarget | None:
         statement = (
@@ -370,9 +539,7 @@ class SqlAlchemyReminderRepository:
                 else None
             )
 
-    def claim_reminder_delivery(
-        self, delivery: ReminderDelivery
-    ) -> ReminderDelivery | None:
+    def claim_reminder_delivery(self, delivery: ReminderDelivery) -> ReminderDelivery | None:
         values = self._delivery_values(delivery)
         statement = (
             insert(ReminderDeliveryRecord)
@@ -383,13 +550,22 @@ class SqlAlchemyReminderRepository:
         with self._sessions.transaction() as session:
             reminder = session.get(ReminderRecord, delivery.reminder_id)
             task = session.get(TaskRecord, delivery.task_id)
-            if reminder is None or not reminder.enabled or task is None or task.deleted_at or task.status not in {"active", "pending"}:
+            if (
+                reminder is None
+                or not reminder.enabled
+                or task is None
+                or task.deleted_at
+                or task.status not in {"active", "pending"}
+            ):
                 return None
             if delivery.occurrence_start is not None:
-                closed = session.scalar(select(TaskOccurrenceRecord.id).where(
-                    TaskOccurrenceRecord.task_id == delivery.task_id,
-                    TaskOccurrenceRecord.occurrence_start == delivery.occurrence_start,
-                    TaskOccurrenceRecord.status.in_(("completed", "skipped", "canceled"))))
+                closed = session.scalar(
+                    select(TaskOccurrenceRecord.id).where(
+                        TaskOccurrenceRecord.task_id == delivery.task_id,
+                        TaskOccurrenceRecord.occurrence_start == delivery.occurrence_start,
+                        TaskOccurrenceRecord.status.in_(("completed", "skipped", "canceled")),
+                    )
+                )
                 if closed is not None:
                     return None
             delivery_id = session.scalar(statement)
@@ -493,9 +669,7 @@ class SqlAlchemyReminderRepository:
             .order_by(ReminderDeliveryRecord.snoozed_until, ReminderDeliveryRecord.id)
         )
         with self._sessions.transaction() as session:
-            return tuple(
-                self._to_delivery(record) for record in session.scalars(statement).all()
-            )
+            return tuple(self._to_delivery(record) for record in session.scalars(statement).all())
 
     @staticmethod
     def _to_reminder(record: ReminderRecord) -> Reminder:

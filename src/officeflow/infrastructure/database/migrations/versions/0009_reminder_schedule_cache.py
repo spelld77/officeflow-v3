@@ -13,9 +13,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    reminder_columns = {
-        column["name"] for column in inspect(bind).get_columns("reminders")
-    }
+    reminder_columns = {column["name"] for column in inspect(bind).get_columns("reminders")}
     with op.batch_alter_table("reminders") as batch:
         if "next_fire_at" not in reminder_columns:
             batch.add_column(Column("next_fire_at", DateTime(), nullable=True))

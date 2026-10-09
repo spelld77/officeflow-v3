@@ -91,10 +91,18 @@ class DataManagementDialog(QDialog):
         self._query = query
         self._attachment_service = attachment_service
         self._attachment_export_service = attachment_export_service
-        self._export_controller = AttachmentExportController(attachment_export_service, self, initial_directory=attachment_export_directory) if attachment_export_service else None
+        self._export_controller = (
+            AttachmentExportController(
+                attachment_export_service, self, initial_directory=attachment_export_directory
+            )
+            if attachment_export_service
+            else None
+        )
         if self._export_controller:
             self._export_controller.savedDirectory.connect(self.exportDirectoryChanged)
-            self._export_controller.busyChanged.connect(lambda _busy: self._cleanup_selection_changed(self.cleanup_list.currentItem(), None))
+            self._export_controller.busyChanged.connect(
+                lambda _busy: self._cleanup_selection_changed(self.cleanup_list.currentItem(), None)
+            )
         self._task_service = task_service
         self._selected_task_ids = selected_task_ids
         self._automatic_backup_enabled = automatic_backup_enabled
@@ -119,9 +127,7 @@ class DataManagementDialog(QDialog):
         title = QLabel("데이터 관리")
         title.setObjectName("pageTitle")
         root.addWidget(title)
-        caption = QLabel(
-            "저장 공간과 누적 현황을 확인하고 데이터를 내보내거나 백업할 수 있습니다."
-        )
+        caption = QLabel("저장 공간과 누적 현황을 확인하고 데이터를 내보내거나 백업할 수 있습니다.")
         caption.setObjectName("mutedText")
         caption.setWordWrap(True)
         root.addWidget(caption)
@@ -131,9 +137,7 @@ class DataManagementDialog(QDialog):
         self.tabs.addTab(self._build_usage_tab(), "사용량")
         self._cleanup_tab_index: int | None = None
         if self._attachment_service is not None:
-            self._cleanup_tab_index = self.tabs.addTab(
-                self._build_cleanup_tab(), "첨부 정리"
-            )
+            self._cleanup_tab_index = self.tabs.addTab(self._build_cleanup_tab(), "첨부 정리")
         self._tools_tab_index = self.tabs.addTab(self._build_tools_tab(), "내보내기 · 백업")
         self.tabs.currentChanged.connect(self._tab_changed)
         root.addWidget(self.tabs, 1)
@@ -205,9 +209,7 @@ class DataManagementDialog(QDialog):
         self.open_attachment_folder_button.setToolTip(
             "내용 확인용입니다. 탐색기에서 파일을 이동·이름 변경·삭제하지 마세요."
         )
-        self.open_attachment_folder_button.clicked.connect(
-            self._open_attachment_folder
-        )
+        self.open_attachment_folder_button.clicked.connect(self._open_attachment_folder)
         largest_heading.addWidget(self.open_attachment_folder_button)
         largest_layout.addLayout(largest_heading)
         largest_note = QLabel(
@@ -288,9 +290,7 @@ class DataManagementDialog(QDialog):
         layout.addWidget(description)
         self.cleanup_list = QListWidget()
         self.cleanup_list.setObjectName("attachmentCleanupList")
-        self.cleanup_list.setToolTip(
-            "업무에서 연결을 해제했거나 연결 정보가 없는 첨부파일입니다."
-        )
+        self.cleanup_list.setToolTip("업무에서 연결을 해제했거나 연결 정보가 없는 첨부파일입니다.")
         self.cleanup_list.currentItemChanged.connect(self._cleanup_selection_changed)
         layout.addWidget(self.cleanup_list, 1)
         self.cleanup_detail_label = QLabel(
@@ -320,9 +320,11 @@ class DataManagementDialog(QDialog):
         more = QMenu(self.cleanup_more_button)
         more.addAction("원래 업무로 복원", self._restore_cleanup_item)
         more.addAction("영구 삭제", self._delete_cleanup_item)
+
         def update_more() -> None:
             more.actions()[0].setEnabled(self.restore_attachment_button.isEnabled())
             more.actions()[1].setEnabled(self.delete_cleanup_button.isEnabled())
+
         more.aboutToShow.connect(update_more)
         self.cleanup_more_button.setMenu(more)
         actions.addWidget(self.cleanup_more_button)
@@ -331,9 +333,34 @@ class DataManagementDialog(QDialog):
             recovery.setObjectName("externalExportRecoveryButton")
             recovery.clicked.connect(self._inspect_external_operations)
             layout.addWidget(recovery, alignment=Qt.AlignmentFlag.AlignLeft)
+        if self._attachment_service and self._attachment_service.lifecycle:
+            cache = QPushButton("보기 사본 · 변경 내용 확인…")
+            cache.setObjectName("viewCacheManagementButton")
+            cache.clicked.connect(self._inspect_view_cache)
+            layout.addWidget(cache)
+            internal = QPushButton("중단된 내부 작업 확인…")
+            internal.clicked.connect(self._inspect_internal_operations)
+            layout.addWidget(internal)
         actions.addStretch()
         layout.addLayout(actions)
         return tab
+
+    def _inspect_view_cache(self) -> None:
+        if self._attachment_service and self._attachment_service.lifecycle:
+            from officeflow.presentation.document_actions import ViewCacheDialog, file_actions
+
+            lifecycle = self._attachment_service.lifecycle
+            file_actions(self, lifecycle).keep(
+                ViewCacheDialog(lifecycle, self, exports=self._attachment_export_service)
+            )
+
+    def _inspect_internal_operations(self) -> None:
+        if self._attachment_service and self._attachment_service.lifecycle:
+            from officeflow.presentation.document_actions import file_actions
+            from officeflow.presentation.internal_recovery import InternalRecoveryDialog
+
+            lifecycle = self._attachment_service.lifecycle
+            file_actions(self, lifecycle).keep(InternalRecoveryDialog(lifecycle, self))
 
     def _refresh_cleanup(self) -> None:
         if not hasattr(self, "cleanup_list") or self._attachment_service is None:
@@ -372,30 +399,23 @@ class DataManagementDialog(QDialog):
             task_title = f"업무 #{attachment.task_id}"
             if self._task_service is not None:
                 with suppress(LookupError):
-                    task_title = self._task_service.get_including_deleted(
-                        attachment.task_id
-                    ).title
+                    task_title = self._task_service.get_including_deleted(attachment.task_id).title
             label = (
-                f"복원 가능 · {attachment.original_name} "
+                f"복원 가능 · {attachment.name} "
                 f"· {self._format_bytes(attachment.size_bytes)} "
-                f"· {task_title}"
-                + (" · 30일 경과" if aged else "")
+                f"· {task_title}" + (" · 30일 경과" if aged else "")
             )
             item = QListWidgetItem(label)
             item.setToolTip(
-                f"원래 업무로 복원할 수 있습니다.\n"
-                f"파일: {attachment.original_name}\n업무: {task_title}"
+                f"원래 업무로 복원할 수 있습니다.\n파일: {attachment.name}\n업무: {task_title}"
             )
             item.setData(Qt.ItemDataRole.UserRole, ("detached", attachment.id_required))
             self.cleanup_list.addItem(item)
         for orphan in result.orphaned:
             item = QListWidgetItem(
-                f"연결 정보 없음 · {orphan.name} "
-                f"· {self._format_bytes(orphan.size_bytes)}"
+                f"연결 정보 없음 · {orphan.name} · {self._format_bytes(orphan.size_bytes)}"
             )
-            item.setToolTip(
-                "DB 연결 정보가 없어 OfficeFlow에서 원래 업무로 복원할 수 없습니다."
-            )
+            item.setToolTip("DB 연결 정보가 없어 OfficeFlow에서 원래 업무로 복원할 수 없습니다.")
             item.setData(Qt.ItemDataRole.UserRole, ("orphan", orphan.relative_path))
             item.setData(Qt.ItemDataRole.UserRole + 1, orphan)
             self.cleanup_list.addItem(item)
@@ -440,8 +460,7 @@ class DataManagementDialog(QDialog):
             )
         else:
             self.cleanup_detail_label.setText(
-                "30일이 지나도 자동으로 삭제하지 않습니다. "
-                "삭제는 사용자가 직접 확인해야 합니다."
+                "30일이 지나도 자동으로 삭제하지 않습니다. 삭제는 사용자가 직접 확인해야 합니다."
             )
 
     def _restore_cleanup_item(self) -> None:
@@ -463,18 +482,31 @@ class DataManagementDialog(QDialog):
         data = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(data, tuple) or len(data) != 2:
             return None
-        return FileReference.attachment(int(data[1])) if data[0] == "detached" else FileReference.orphan(str(data[1]))
+        return (
+            FileReference.attachment(int(data[1]))
+            if data[0] == "detached"
+            else FileReference.orphan(str(data[1]))
+        )
 
     def _open_cleanup_item(self) -> None:
         reference = self._cleanup_reference()
         if reference is None or self._attachment_export_service is None:
             return
         service = self._attachment_export_service
+
         def open_result(value: object) -> str:
-            if isinstance(value, Path) and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(value))):
+            if isinstance(value, Path) and not QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(value))
+            ):
                 return "연결된 프로그램을 열지 못했습니다."
             return "파일 내용을 확인한 뒤 필요하면 외부 사본을 저장하세요."
-        self._start("파일을 확인하는 중…", lambda _canceled: service.resolve(reference).path, open_result, show_progress=False)
+
+        self._start(
+            "파일을 확인하는 중…",
+            lambda canceled: service.prepare_open(reference, canceled),
+            open_result,
+            show_progress=False,
+        )
 
     def _save_cleanup_item(self) -> None:
         reference = self._cleanup_reference()
@@ -484,6 +516,7 @@ class DataManagementDialog(QDialog):
     def _inspect_external_operations(self) -> None:
         if self._attachment_export_service:
             service = self._attachment_export_service
+
             def show(value: object) -> str:
                 if isinstance(value, tuple) and value:
                     items = tuple(item for item in value if isinstance(item, ExportRecoveryItem))
@@ -492,12 +525,29 @@ class DataManagementDialog(QDialog):
                     dialog.show()
                     return "중단된 저장 확인 창에서 자료 위치와 처리 가능 여부를 확인하세요."
                 return "확인이 필요한 외부 저장 작업이 없습니다."
-            self._start("중단된 파일 저장 기록 확인 중…", service.inspect_recovery, show, show_progress=False)
+
+            self._start(
+                "중단된 파일 저장 기록 확인 중…",
+                service.inspect_recovery,
+                show,
+                show_progress=False,
+            )
 
     def _delete_cleanup_item(self) -> None:
         item = self.cleanup_list.currentItem()
         data = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not isinstance(data, tuple) or len(data) != 2:
+            return
+        if (
+            data[0] == "detached"
+            and self._attachment_service
+            and self._attachment_service.lifecycle
+        ):
+            from officeflow.presentation.document_actions import file_actions
+
+            file_actions(self, self._attachment_service.lifecycle).delete(
+                "attachment", int(data[1]), self._after_cleanup_change
+            )
             return
         if (
             QMessageBox.warning(
@@ -517,7 +567,13 @@ class DataManagementDialog(QDialog):
                 self._attachment_service.delete_file(int(data[1]))
             else:
                 self._backup_manager.delete_orphan_attachment_file(str(data[1]))
-        except (AttachmentOperationError, BackupError, LookupError, OSError, FileInUseError) as error:
+        except (
+            AttachmentOperationError,
+            BackupError,
+            LookupError,
+            OSError,
+            FileInUseError,
+        ) as error:
             QMessageBox.warning(self, "첨부파일을 삭제하지 못했습니다.", str(error))
             return
         self.status_label.setText("선택한 첨부파일을 영구 삭제했습니다.")
@@ -583,16 +639,12 @@ class DataManagementDialog(QDialog):
 
         primary_actions = QHBoxLayout()
         primary_actions.addWidget(self._tool_button("지금 백업", self._create_backup))
-        primary_actions.addWidget(
-            self._tool_button("백업에서 복원", self._stage_restore)
-        )
+        primary_actions.addWidget(self._tool_button("백업에서 복원", self._stage_restore))
         primary_actions.addStretch()
         layout.addLayout(primary_actions)
 
         management_actions = QHBoxLayout()
-        management_actions.addWidget(
-            self._tool_button("백업 폴더 열기", self._open_backup_folder)
-        )
+        management_actions.addWidget(self._tool_button("백업 폴더 열기", self._open_backup_folder))
         management_actions.addWidget(
             self._tool_button("오래된 수동 백업 정리", self._cleanup_manual_backups)
         )
@@ -639,9 +691,7 @@ class DataManagementDialog(QDialog):
         self.status_label.setText("저장 공간과 파일 연결 상태를 확인하는 중입니다...")
         self._start(
             "데이터 사용량을 확인하는 중입니다...",
-            lambda canceled: self._backup_manager.inspect_data_usage(
-                cancel_requested=canceled
-            ),
+            lambda canceled: self._backup_manager.inspect_data_usage(cancel_requested=canceled),
             self._usage_message,
             show_progress=False,
         )
@@ -649,9 +699,7 @@ class DataManagementDialog(QDialog):
     def _usage_message(self, result: object) -> str:
         if not isinstance(result, DataUsageSnapshot):
             return "데이터 사용량을 확인했습니다."
-        self.usage_total_label.setText(
-            f"현재 사용량 {self._format_bytes(result.total_bytes)}"
-        )
+        self.usage_total_label.setText(f"현재 사용량 {self._format_bytes(result.total_bytes)}")
         current_tasks = result.task_count - result.trash_task_count
         self.usage_task_label.setText(
             "업무  "
@@ -671,7 +719,9 @@ class DataManagementDialog(QDialog):
         self._update_backup_summary(result)
         issues: list[str] = []
         if result.quarantine_file_count:
-            issues.append(f"삭제 복구 대기 {result.quarantine_file_count:,}개 파일 (재실행 시 복구 재시도, 임의 삭제 금지)")
+            issues.append(
+                f"삭제 복구 대기 {result.quarantine_file_count:,}개 파일 (재실행 시 복구 재시도, 임의 삭제 금지)"
+            )
         if result.missing_attachment_count:
             issues.append(f"파일 누락 {result.missing_attachment_count:,}개")
         if result.orphan_attachment_count:
@@ -687,29 +737,26 @@ class DataManagementDialog(QDialog):
                 f"({self._format_bytes(result.detached_attachment_bytes)})"
             )
         if result.aged_detached_attachment_count:
-            issues.append(
-                f"30일 지난 정리 대기 첨부 {result.aged_detached_attachment_count:,}개"
-            )
+            issues.append(f"30일 지난 정리 대기 첨부 {result.aged_detached_attachment_count:,}개")
         if result.duplicate_attachment_count:
             issues.append(
                 f"최근 확인 기준 중복 후보 {result.duplicate_attachment_count:,}개 "
                 f"({self._format_bytes(result.duplicate_attachment_bytes)})"
             )
         if result.unverified_attachment_count:
-            issues.append(f"내용 미확인/재확인 필요 첨부 {result.unverified_attachment_count:,}개 · 중복 확정/삭제 근거가 아님")
+            issues.append(
+                f"내용 미확인/재확인 필요 첨부 {result.unverified_attachment_count:,}개 · 중복 확정/삭제 근거가 아님"
+            )
         if result.stored_attachment_bytes >= 5 * 1024 * 1024 * 1024:
             issues.append("첨부파일 총량 5 GB 이상")
         if result.aged_trash_task_count:
             issues.append(f"30일 지난 휴지통 업무 {result.aged_trash_task_count:,}개")
         if result.reminder_cleanup_candidate_count:
             issues.append(
-                "180일 지난 처리 완료 알림 "
-                f"{result.reminder_cleanup_candidate_count:,}개"
+                f"180일 지난 처리 완료 알림 {result.reminder_cleanup_candidate_count:,}개"
             )
         self.usage_issue_label.setText(
-            "확인 필요  " + " · ".join(issues)
-            if issues
-            else "확인 필요 항목이 없습니다."
+            "확인 필요  " + " · ".join(issues) if issues else "확인 필요 항목이 없습니다."
         )
         self.usage_issue_label.setStyleSheet(
             "color: #B45309; font-weight: 600;" if issues else "color: #2E7D5B;"
@@ -728,9 +775,7 @@ class DataManagementDialog(QDialog):
     def _update_backup_summary(self, result: DataUsageSnapshot) -> None:
         other_count = max(
             0,
-            result.backup_count
-            - result.manual_backup_count
-            - result.automatic_backup_count,
+            result.backup_count - result.manual_backup_count - result.automatic_backup_count,
         )
         other_text = f" · 복원/가져오기 보호본 {other_count:,}개" if other_count else ""
         self.backup_inventory_label.setText(
@@ -749,9 +794,7 @@ class DataManagementDialog(QDialog):
             )
             return
         latest_local = latest.astimezone()
-        due_local = (
-            latest + timedelta(hours=self._automatic_backup_interval_hours)
-        ).astimezone()
+        due_local = (latest + timedelta(hours=self._automatic_backup_interval_hours)).astimezone()
         due_prefix = "백업 예정" if due_local > datetime.now().astimezone() else "백업 기한 경과"
         self.backup_schedule_label.setText(
             f"최근 자동 백업 {format_date(latest_local.date())} {latest_local:%H:%M} · "
@@ -782,7 +825,9 @@ class DataManagementDialog(QDialog):
             ),
             lambda result: f"Excel 내보내기 완료: {result}",
             progress_operation=lambda canceled, report: self._export_service.export_excel(
-                self._query, destination, cancel_requested=canceled,
+                self._query,
+                destination,
+                cancel_requested=canceled,
                 progress=lambda count: report(count, 0),
             ),
         )
@@ -824,10 +869,7 @@ class DataManagementDialog(QDialog):
         if result.excluded_unscheduled_count:
             exclusions.append(f"일정 없는 업무 {result.excluded_unscheduled_count:,}개")
         suffix = f" · 제외: {', '.join(exclusions)}" if exclusions else ""
-        return (
-            f"ICS 내보내기 완료: 일정 {result.exported_count:,}개 · {result.path}"
-            f"{suffix}"
-        )
+        return f"ICS 내보내기 완료: 일정 {result.exported_count:,}개 · {result.path}{suffix}"
 
     def _create_backup(self) -> None:
         self._start(
@@ -877,9 +919,7 @@ class DataManagementDialog(QDialog):
         manager = self._backup_manager
         self._start(
             "오래된 수동 백업을 정리하는 중입니다...",
-            lambda canceled: ()
-            if canceled()
-            else manager.prune_manual_backups(keep),
+            lambda canceled: () if canceled() else manager.prune_manual_backups(keep),
             self._manual_backup_cleanup_message,
         )
 
@@ -918,14 +958,18 @@ class DataManagementDialog(QDialog):
         success_message: Callable[[Any], str],
         *,
         show_progress: bool = True,
-        progress_operation: Callable[[Callable[[], bool], Callable[[int, int], None]], object] | None = None,
+        progress_operation: Callable[[Callable[[], bool], Callable[[int, int], None]], object]
+        | None = None,
     ) -> None:
         if self._thread is not None:
             self.status_label.setText("다른 데이터 작업이 진행 중입니다.")
             return
         thread = QThread(self)
-        worker = OperationWorker(operation if progress_operation is None else
-                                 lambda canceled: progress_operation(canceled, worker.progress.emit))
+        worker = OperationWorker(
+            operation
+            if progress_operation is None
+            else lambda canceled: progress_operation(canceled, worker.progress.emit)
+        )
         worker.progress.connect(self._operation_progress)
         worker.moveToThread(thread)
         progress: QProgressDialog | None = None
@@ -1006,7 +1050,9 @@ class DataManagementDialog(QDialog):
             return "백업이 완료되었습니다."
         message = f"백업 완료: {result.path} (첨부파일 {result.attachment_count}개)"
         if result.missing_attachments:
-            message += f" · 주의: 기존 누락 첨부 {len(result.missing_attachments)}개는 백업에 없습니다."
+            message += (
+                f" · 주의: 기존 누락 첨부 {len(result.missing_attachments)}개는 백업에 없습니다."
+            )
         return message
 
     def _restore_message(self, result: object) -> str:
@@ -1022,6 +1068,9 @@ class DataManagementDialog(QDialog):
         return message
 
     def reject(self) -> None:
+        from officeflow.presentation.document_actions import stop_file_actions
+
+        stop_file_actions(self)
         if self._worker is not None:
             self._worker.cancel()
             return
@@ -1032,6 +1081,9 @@ class DataManagementDialog(QDialog):
         super().reject()
 
     def shutdown(self) -> None:
+        from officeflow.presentation.document_actions import stop_file_actions
+
+        stop_file_actions(self)
         """Wait for a modeless cleanup operation before its owner closes."""
         self._owner_shutting_down = True
         for dialog in self.findChildren(AttachmentRecoveryDialog):
@@ -1052,6 +1104,9 @@ class DataManagementDialog(QDialog):
         super().reject()
 
     def accept(self) -> None:
+        from officeflow.presentation.document_actions import stop_file_actions
+
+        stop_file_actions(self)
         if self._worker is not None:
             self._worker.cancel()
             return

@@ -27,6 +27,7 @@ def test_observation_backup_restores_current_bytes_not_initial_hash(tmp_path):
     from officeflow.infrastructure.database.attachment_repository import (
         SqlAlchemyAttachmentRepository,
     )
+
     paths = AppPaths(tmp_path / "observations")
     paths.ensure_directories()
     upgrade_database(paths.database_file)
@@ -52,9 +53,14 @@ def test_observation_backup_restores_current_bytes_not_initial_hash(tmp_path):
     upgrade_database(paths.database_file)
     engine = create_database_engine(paths.database_file)
     try:
-        restored = SqlAlchemyAttachmentRepository(SessionFactory(engine)).get_attachment(original.id)
+        restored = SqlAlchemyAttachmentRepository(SessionFactory(engine)).get_attachment(
+            original.id
+        )
         assert restored == observed
-        assert restored.checksum == original.checksum and restored.observed_checksum != restored.checksum
+        assert (
+            restored.checksum == original.checksum
+            and restored.observed_checksum != restored.checksum
+        )
         assert managed.resolve(original.relative_path).read_bytes() == b"current saved content"
     finally:
         engine.dispose()
@@ -67,13 +73,37 @@ def _database(path, values: tuple[str, ...]) -> None:
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY, value TEXT)")
         connection.execute("DELETE FROM sample")
-        connection.executemany("INSERT INTO sample(value) VALUES (?)", ((value,) for value in values))
+        connection.executemany(
+            "INSERT INTO sample(value) VALUES (?)", ((value,) for value in values)
+        )
         connection.commit()
 
 
 def _values(path) -> tuple[str, ...]:
     with closing(sqlite3.connect(path)) as connection:
         return tuple(row[0] for row in connection.execute("SELECT value FROM sample ORDER BY id"))
+
+
+def register_file(paths: AppPaths, relative: str) -> None:
+    """Restore transaction fixtures must use a registered asset, not an orphan."""
+    engine = create_database_engine(paths.database_file)
+    sessions = SessionFactory(engine)
+    tasks = TaskService(SqlAlchemyTaskRepository(sessions))
+    task = tasks.create(TaskDraft(title="복원 파일 보호 fixture"))
+    file = paths.attachment_dir / relative
+    with sessions.transaction() as session:
+        session.add(
+            AttachmentRecord(
+                task_id=task.id,
+                original_name=file.name,
+                stored_name=file.name,
+                relative_path=relative,
+                size_bytes=file.stat().st_size,
+                checksum=None,
+                created_at=datetime.now(UTC),
+            )
+        )
+    engine.dispose()
 
 
 def test_online_backup_verifies_and_restores_database_attachments_and_settings(tmp_path) -> None:
@@ -83,6 +113,7 @@ def test_online_backup_verifies_and_restores_database_attachments_and_settings(t
     attachment = paths.attachment_dir / "ab" / "original.bin"
     attachment.parent.mkdir()
     attachment.write_bytes(b"original attachment")
+    register_file(paths, "ab/original.bin")
     paths.settings_file.write_text('{"theme": "light"}', encoding="utf-8")
     manager = BackupManager(paths)
 
@@ -113,6 +144,7 @@ def test_backup_verification_rejects_tampered_attachment(tmp_path) -> None:
     attachment = paths.attachment_dir / "ab" / "file.bin"
     attachment.parent.mkdir()
     attachment.write_bytes(b"safe")
+    register_file(paths, "ab/file.bin")
     manager = BackupManager(paths)
     created = manager.create_backup()
     tampered = paths.backup_dir / "tampered.ofbackup"

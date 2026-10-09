@@ -23,8 +23,12 @@ def upgrade() -> None:
         ) UPDATE attachments SET sort_order = (
             SELECT position FROM ranked WHERE ranked.id = attachments.id
         )""")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_attachments_task_order ON attachments(task_id, sort_order, id)")
-    if connection.exec_driver_sql("SELECT 1 FROM attachments WHERE sort_order IS NULL OR sort_order < 0 LIMIT 1").fetchone():
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_attachments_task_order ON attachments(task_id, sort_order, id)"
+    )
+    if connection.exec_driver_sql(
+        "SELECT 1 FROM attachments WHERE sort_order IS NULL OR sort_order < 0 LIMIT 1"
+    ).fetchone():
         raise ValueError("첨부 순서 변환을 검증하지 못했습니다.")
 
 

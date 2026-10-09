@@ -92,12 +92,7 @@ class AttachmentExportController(QObject):
         if single:
             try:
                 reference = references[0]
-                if reference.attachment_id is not None:
-                    name = self._service.attachments.get_metadata(
-                        reference.attachment_id
-                    ).original_name
-                else:
-                    name = Path(reference.relative_path or "첨부파일").name
+                name = self._service.name(reference)
             except Exception as error:
                 self._error(str(error))
                 return

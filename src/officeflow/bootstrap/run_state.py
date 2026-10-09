@@ -35,4 +35,3 @@ class RunStateTracker:
             self._marker_file.unlink(missing_ok=True)
         except OSError:
             logger.exception("정상 종료 표식 파일을 정리하지 못했습니다.")
-

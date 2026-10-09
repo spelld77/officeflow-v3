@@ -47,9 +47,7 @@ class SettingsDialog(QDialog):
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
-        caption = QLabel(
-            "창을 닫았을 때의 동작과 Windows 빠른 등록 단축키를 설정합니다."
-        )
+        caption = QLabel("창을 닫았을 때의 동작과 Windows 빠른 등록 단축키를 설정합니다.")
         caption.setObjectName("mutedText")
         caption.setWordWrap(True)
         root.addWidget(caption)
@@ -75,9 +73,7 @@ class SettingsDialog(QDialog):
         self.grace_minutes_spin.setObjectName("reminderGraceMinutes")
         self.grace_minutes_spin.setRange(1, 43_200)
         self.grace_minutes_spin.setSuffix("분")
-        self.grace_minutes_spin.setValue(
-            settings.missed_reminder_grace_minutes
-        )
+        self.grace_minutes_spin.setValue(settings.missed_reminder_grace_minutes)
         self.grace_minutes_spin.setToolTip(
             "프로그램 종료·절전 중 알림 시각이 지났을 때, 현재부터 얼마나 이전의 "
             "알림까지 다시 보여줄지 정합니다."

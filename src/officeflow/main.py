@@ -9,9 +9,15 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from officeflow import __version__
+from officeflow.application.attachment_deletion import AttachmentDeletionService
+from officeflow.application.attachment_documents import (
+    AttachmentDocumentService,
+    InternalRecoveryReport,
+)
 from officeflow.application.attachment_export import AttachmentExportService
 from officeflow.application.attachment_search import AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
+from officeflow.application.document_lifecycle import DocumentLifecycle
 from officeflow.application.exporting import ExportService
 from officeflow.application.file_operations import FileOperationCoordinator
 from officeflow.application.records import RecordService
@@ -22,15 +28,26 @@ from officeflow.bootstrap.logging import configure_logging
 from officeflow.bootstrap.paths import AppPaths
 from officeflow.bootstrap.run_state import RunStateTracker
 from officeflow.bootstrap.single_instance import SingleInstanceCoordinator, instance_name
+from officeflow.infrastructure.attachments.deletion_storage import DeletionFileStorage
 from officeflow.infrastructure.attachments.export_storage import ExternalExportStorage
+from officeflow.infrastructure.attachments.internal_storage import InternalFileStorage
+from officeflow.infrastructure.attachments.maintenance import FileMaintenance
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
+from officeflow.infrastructure.attachments.view_cache import AttachmentViewCache
 from officeflow.infrastructure.backup import BackupError, BackupManager
+from officeflow.infrastructure.database.attachment_deletion_repository import (
+    SqlAlchemyDeletionRepository,
+)
+from officeflow.infrastructure.database.attachment_document_repository import (
+    SqlAlchemyDocumentRepository,
+)
 from officeflow.infrastructure.database.attachment_repository import (
     SqlAlchemyAttachmentRepository,
 )
 from officeflow.infrastructure.database.attachment_search_repository import (
     SqlAlchemyAttachmentSearchRepository,
 )
+from officeflow.infrastructure.database.document_catalog import DocumentCatalog
 from officeflow.infrastructure.database.migrate import (
     needs_database_upgrade,
     upgrade_database,
@@ -66,15 +83,23 @@ def build_application(
     configure_logging(paths.log_dir)
     file_coordinator = FileOperationCoordinator()
     backup_manager = BackupManager(paths, coordinator=file_coordinator)
+
     def apply_restore() -> None:
         if backup_manager.restore_is_pending:
+
             def restore(progress: Callable[[str], None]) -> None:
-                progress("예약한 백업을 검증하고 복원하고 있습니다. 자료 보호를 위해 종료하지 마세요…")
+                progress(
+                    "예약한 백업을 검증하고 복원하고 있습니다. 자료 보호를 위해 종료하지 마세요…"
+                )
                 backup_manager.apply_pending_restore()
+
             DatabaseUpgradeDialog(restore, message="예약한 백업을 복원하고 있습니다…").run_upgrade()
         else:
             backup_manager.apply_pending_restore()
-    prepare_pending_restore(backup_manager, on_failure=restore_failure_handler, apply_operation=apply_restore)
+
+    prepare_pending_restore(
+        backup_manager, on_failure=restore_failure_handler, apply_operation=apply_restore
+    )
 
     settings_store = JsonSettingsStore(paths.settings_file)
     settings = settings_store.load()
@@ -85,11 +110,31 @@ def build_application(
         ).run_upgrade()
     else:
         upgrade_database(paths.database_file)
-    recovery_warnings = backup_manager.recover_attachment_deletions()
+    # Mandatory path-only protection precedes the first UI/reminder engine;
+    # hashes and general cleanup must not be added to this synchronous preflight.
+    internal_storage = InternalFileStorage(paths.attachment_dir, coordinator=file_coordinator)
+    internal_pending = internal_storage.preflight()
+    deletion_storage = DeletionFileStorage(paths.attachment_dir, coordinator=file_coordinator)
+    deletion_pending = deletion_storage.preflight()
+    recovery_warnings = tuple(item.message for item in internal_pending + deletion_pending)
+    # Legacy file I/O is deferred; only a path-only reservation precedes the UI.
+    legacy_pending = False
+    legacy_folder = paths.attachment_dir / ".trash"
+    if legacy_folder.is_dir():
+        with os.scandir(legacy_folder) as entries:
+            legacy_pending = any(not entry.name.startswith("delete-") for entry in entries)
+    if legacy_pending:
+        file_coordinator.protect("legacy:pending", None)
     for warning in recovery_warnings:
         logger.warning(warning)
     engine = create_database_engine(paths.database_file)
     sessions = SessionFactory(engine)
+    document_service = AttachmentDocumentService(
+        SqlAlchemyDocumentRepository(sessions), internal_storage
+    )
+    deletion_service = AttachmentDeletionService(
+        SqlAlchemyDeletionRepository(sessions), deletion_storage
+    )
     task_service = TaskService(SqlAlchemyTaskRepository(sessions), timezone=settings.timezone)
     reminder_service = ReminderService(SqlAlchemyReminderRepository(sessions), task_service)
     record_service = RecordService(SqlAlchemyRecordRepository(sessions), task_service)
@@ -97,6 +142,17 @@ def build_application(
         SqlAlchemyAttachmentRepository(sessions),
         ManagedAttachmentStorage(paths.attachment_dir, coordinator=file_coordinator),
         task_service,
+    )
+    view_cache = AttachmentViewCache(paths.attachment_dir, file_coordinator)
+    attachment_service.lifecycle = DocumentLifecycle(
+        document_service,
+        deletion_service,
+        DocumentCatalog(sessions),
+        view_cache,
+        changed=attachment_service._notify_changed,
+    )
+    maintenance = FileMaintenance(
+        document_service, deletion_service, internal_storage, deletion_storage, view_cache
     )
     export_service = ExportService(
         task_service,
@@ -110,18 +166,35 @@ def build_application(
 
     def shutdown() -> None:
         try:
+            view_cache.close()
+            maintenance.close()
             engine.dispose()
         finally:
             if on_clean_shutdown is not None:
                 on_clean_shutdown()
 
     external_storage = ExternalExportStorage(paths.root)
+
+    def recover_internal(canceled: Callable[[], bool]) -> InternalRecoveryReport:
+        nonlocal legacy_pending
+        if legacy_pending and not canceled():
+            warnings = backup_manager.recover_attachment_deletions()
+            legacy_pending = False
+            if not warnings:
+                file_coordinator.unprotect("legacy:pending")
+            else:
+                return InternalRecoveryReport(0, len(warnings), warnings)
+        return maintenance.tick(canceled)
+
     window = MainWindow(
+        internal_recovery=recover_internal,
         settings=settings,
         task_service=task_service,
         reminder_service=reminder_service,
         task_save_service=task_save_service(sessions, settings.timezone),
-        reminder_preview_service=ReminderPreviewService(SqlAlchemyReminderRepository(sessions), reminder_service),
+        reminder_preview_service=ReminderPreviewService(
+            SqlAlchemyReminderRepository(sessions), reminder_service
+        ),
         record_service=record_service,
         attachment_service=attachment_service,
         attachment_export_service=AttachmentExportService(attachment_service, external_storage),
@@ -138,16 +211,21 @@ def build_application(
     )
     if backup_manager.restore_warnings or recovery_warnings:
         window.statusBar().showMessage(
-            "데이터 복구·정리 확인 필요: " + " · ".join(backup_manager.restore_warnings + recovery_warnings),
+            "데이터 복구·정리 확인 필요: "
+            + " · ".join(backup_manager.restore_warnings + recovery_warnings),
             15_000,
         )
     if external_storage.has_pending_operations():
-        window.statusBar().showMessage("외부 파일 저장 중단 확인 필요 · 데이터 → 첨부 정리 → 중단된 저장 확인")
+        window.statusBar().showMessage(
+            "외부 파일 저장 중단 확인 필요 · 데이터 → 첨부 정리 → 중단된 저장 확인"
+        )
     return app, window
 
 
 def prepare_pending_restore(
-    manager: BackupManager, *, on_failure: Callable[[BackupError], str] | None = None,
+    manager: BackupManager,
+    *,
+    on_failure: Callable[[BackupError], str] | None = None,
     apply_operation: Callable[[], object] | None = None,
 ) -> None:
     """Never open the working DB after an unacknowledged restore failure."""
@@ -168,14 +246,18 @@ def prepare_pending_restore(
                     f"복원 예약을 취소하고 현재 자료를 사용합니다. 복원 파일 보존: {retained}",
                 )
                 return
-            raise BackupError("복원을 완료하지 못해 프로그램 시작을 중단했습니다. 현재 자료와 복원 예약은 보존됩니다.") from error
+            raise BackupError(
+                "복원을 완료하지 못해 프로그램 시작을 중단했습니다. 현재 자료와 복원 예약은 보존됩니다."
+            ) from error
 
 
 def _restore_failure_choice(error: BackupError) -> str:
     box = QMessageBox()
     box.setWindowTitle("OfficeFlow · 예약된 복원 실패")
     box.setIcon(QMessageBox.Icon.Warning)
-    box.setText("백업 복원을 적용하지 못했습니다.\n현재 자료로 조용히 시작하지 않고 선택을 기다립니다.")
+    box.setText(
+        "백업 복원을 적용하지 못했습니다.\n현재 자료로 조용히 시작하지 않고 선택을 기다립니다."
+    )
     box.setInformativeText(str(error))
     retry = box.addButton("복원 다시 시도", QMessageBox.ButtonRole.AcceptRole)
     cancel = box.addButton("예약 취소 후 현재 자료 사용", QMessageBox.ButtonRole.ActionRole)
@@ -191,7 +273,13 @@ def _restore_failure_choice(error: BackupError) -> str:
     finally:
         if isinstance(app, QApplication) and previous is not None:
             app.setQuitOnLastWindowClosed(previous)
-    return "retry" if box.clickedButton() == retry else "cancel" if box.clickedButton() == cancel else "exit"
+    return (
+        "retry"
+        if box.clickedButton() == retry
+        else "cancel"
+        if box.clickedButton() == cancel
+        else "exit"
+    )
 
 
 def main() -> int:

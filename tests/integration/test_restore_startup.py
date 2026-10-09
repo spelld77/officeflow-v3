@@ -70,24 +70,33 @@ def test_incomplete_restore_cannot_be_bypassed_by_cancel(tmp_path):
         manager.cancel_pending_restore()
 
 
-def test_unknown_database_revision_is_rejected_before_reservation(tmp_path):
+def test_unknown_database_revision_is_rejected_before_reservation(tmp_path, monkeypatch):
     paths, manager = _manager(tmp_path)
     with closing(sqlite3.connect(paths.database_file)) as connection:
         connection.execute("UPDATE alembic_version SET version_num='9999_future'")
         connection.commit()
-    archive = manager.create_backup()
+    with pytest.raises(BackupError, match="지원하지 않는 DB 버전"):
+        manager.create_backup()
+    # Synthetic historical archive bypasses only the new creation-time validator.
+    with monkeypatch.context() as patch:
+        patch.setattr(manager, "verify_backup", lambda *args, **kwargs: None)
+        archive = manager.create_backup()
     with pytest.raises(BackupError, match="지원하지 않는 DB 버전"):
         manager.stage_restore(archive.path)
     assert not paths.pending_restore_file.exists()
 
 
-def test_non_officeflow_database_is_not_restored(tmp_path):
+def test_non_officeflow_database_is_not_restored(tmp_path, monkeypatch):
     paths = AppPaths(tmp_path / "generic")
     paths.ensure_directories()
     with closing(sqlite3.connect(paths.database_file)) as connection:
         connection.execute("CREATE TABLE unrelated(id INTEGER)")
     manager = BackupManager(paths)
-    archive = manager.create_backup()
+    with pytest.raises(BackupError, match="OfficeFlow v3"):
+        manager.create_backup()
+    with monkeypatch.context() as patch:
+        patch.setattr(manager, "verify_backup", lambda *args, **kwargs: None)
+        archive = manager.create_backup()
     with pytest.raises(BackupError, match="OfficeFlow v3"):
         manager.stage_restore(archive.path)
 

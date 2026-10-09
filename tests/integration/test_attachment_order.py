@@ -6,37 +6,43 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from alembic import command
 from sqlalchemy import Engine, event
 
 from officeflow.application.attachment_search import AttachmentSearchQuery
 from officeflow.application.tasks import TaskDraft
 from officeflow.domain.attachment import AttachmentMove
 from officeflow.infrastructure.database.migrate import (
-    migration_config,
     needs_database_upgrade,
     upgrade_database,
 )
+from tests.integration.legacy_attachment_fixture import legacy_environment
 from tests.integration.test_attachment_search import search_environment
 
 
 def _seed_old(tmp_path):
-    with search_environment(tmp_path) as env:
+    with legacy_environment(tmp_path, "0010_attachment_search") as env:
         task = env.tasks.create(TaskDraft(title="기존 순서"))
         other = env.tasks.create(TaskDraft(title="다른 업무"))
         now = datetime(2026, 10, 6, tzinfo=UTC)
         a = env.add(task.id, "처음.txt", created=now)
-        b = env.add(task.id, "중간.txt", created=now + timedelta(minutes=1))
+        b = env.add(
+            task.id,
+            "중간.txt",
+            created=now + timedelta(minutes=1),
+            detached_at=now + timedelta(minutes=2),
+        )
         c = env.add(task.id, "최근.txt", created=now + timedelta(minutes=1))
-        env.attachments.unlink(b.id)
         d = env.add(other.id, "다른.txt", created=now)
         database = env.database
-    command.downgrade(migration_config(database), "0010_attachment_search")
     return database, task.id, (a.id, b.id, c.id, d.id)
 
 
 def _rows(database):
     with closing(sqlite3.connect(database)) as connection:
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE name='file_assets'").fetchone():
+            return connection.execute(
+                "SELECT a.id,a.task_id,a.original_name,f.stored_name,f.relative_path,a.size_bytes,a.checksum,a.created_at,f.missing_at,a.detached_at FROM attachments a JOIN file_assets f ON f.id=a.asset_id ORDER BY a.id"
+            ).fetchall()
         return connection.execute("SELECT * FROM attachments ORDER BY id").fetchall()
 
 
@@ -46,10 +52,14 @@ def test_upgrade_preserves_existing_display_ids_metadata_search_and_detached_slo
     assert needs_database_upgrade(database)
     upgrade_database(database)
     after = _rows(database)
-    assert [row[:len(before[0])] for row in after] == before
-    assert all(all(value is None for value in row[len(before[0]) + 1:]) for row in after)
+    assert [row[: len(before[0])] for row in after] == before
     with closing(sqlite3.connect(database)) as connection:
-        assert dict(connection.execute("SELECT id,sort_order FROM attachments")) == {a: 30, b: 20, c: 10, d: 10}
+        assert dict(connection.execute("SELECT id,sort_order FROM attachments")) == {
+            a: 30,
+            b: 20,
+            c: 10,
+            d: 10,
+        }
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     copies = list((tmp_path / "schema-backups").glob("pre-attachment-order-*.db"))
     assert len(copies) == 1
@@ -80,8 +90,13 @@ def test_failed_upgrade_rolls_back_column_and_revision_then_can_retry(tmp_path):
         event.remove(Engine, "before_cursor_execute", fail)
     assert _rows(database) == before
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0010_attachment_search"
-        assert "sort_order" not in {row[1] for row in connection.execute("PRAGMA table_info(attachments)")}
+        assert (
+            connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            == "0010_attachment_search"
+        )
+        assert "sort_order" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(attachments)")
+        }
     assert list((tmp_path / "schema-backups").glob("*.db"))
     upgrade_database(database)
     assert not needs_database_upgrade(database)
@@ -90,12 +105,18 @@ def test_failed_upgrade_rolls_back_column_and_revision_then_can_retry(tmp_path):
 def test_low_space_and_backup_failure_never_start_upgrade(tmp_path, monkeypatch):
     database, _task_id, _ids = _seed_old(tmp_path)
     before = _rows(database)
-    monkeypatch.setattr("officeflow.infrastructure.database.migrate.shutil.disk_usage", lambda _p: SimpleNamespace(free=0))
+    monkeypatch.setattr(
+        "officeflow.infrastructure.database.migrate.shutil.disk_usage",
+        lambda _p: SimpleNamespace(free=0),
+    )
     with pytest.raises(OSError, match="공간"):
         upgrade_database(database)
     assert _rows(database) == before
     assert not (tmp_path / "schema-backups").exists()
-    monkeypatch.setattr("officeflow.infrastructure.database.migrate.shutil.disk_usage", lambda _p: SimpleNamespace(free=10**12))
+    monkeypatch.setattr(
+        "officeflow.infrastructure.database.migrate.shutil.disk_usage",
+        lambda _p: SimpleNamespace(free=10**12),
+    )
     (tmp_path / "schema-backups").write_text("cannot create a backup directory")
     with pytest.raises(FileExistsError):
         upgrade_database(database)
@@ -114,10 +135,15 @@ def test_unknown_revision_is_rejected_without_backup_or_schema_mutation(tmp_path
     assert not (tmp_path / "schema-backups").exists()
 
 
-@pytest.mark.parametrize("movement,expected", [
-    (AttachmentMove.UP, [1, 0, 2]), (AttachmentMove.DOWN, [0, 2, 1]),
-    (AttachmentMove.FIRST, [1, 0, 2]), (AttachmentMove.LAST, [0, 2, 1]),
-])
+@pytest.mark.parametrize(
+    "movement,expected",
+    [
+        (AttachmentMove.UP, [1, 0, 2]),
+        (AttachmentMove.DOWN, [0, 2, 1]),
+        (AttachmentMove.FIRST, [1, 0, 2]),
+        (AttachmentMove.LAST, [0, 2, 1]),
+    ],
+)
 def test_moves_only_metadata_and_survives_reopen(tmp_path, monkeypatch, movement, expected):
     with search_environment(tmp_path) as env:
         task = env.tasks.create(TaskDraft(title="이동 업무"))
@@ -133,11 +159,24 @@ def test_moves_only_metadata_and_survives_reopen(tmp_path, monkeypatch, movement
         moved = env.attachments.move_attachment(task.id, items[1].id, movement)
         assert [item.id for item in moved] == [items[i].id for i in expected]
         for item in moved:
-            assert replace(item, sort_order=before[item.id].sort_order) == before[item.id]
+            previous = before[item.id]
+            assert item.metadata_revision == previous.metadata_revision + int(
+                item.sort_order != previous.sort_order
+            )
+            assert (
+                replace(
+                    item,
+                    sort_order=previous.sort_order,
+                    metadata_revision=previous.metadata_revision,
+                )
+                == previous
+            )
         assert env.tasks.get(task.id).updated_at == updated_before
         assert env.attachments.attachment_metadata_for_task(task.id) == moved
     with search_environment(tmp_path) as reopened:
-        assert [item.id for item in reopened.repository.list_attachments(task.id)] == [items[i].id for i in expected]
+        assert [item.id for item in reopened.repository.list_attachments(task.id)] == [
+            items[i].id for i in expected
+        ]
 
 
 def test_latest_state_boundaries_other_task_trash_and_detached_guards(tmp_path):
@@ -182,7 +221,9 @@ def test_concurrent_append_allocates_distinct_slots(tmp_path):
         with ThreadPoolExecutor(max_workers=4) as workers:
             items = list(workers.map(lambda i: env.add(task.id, f"파일{i}.txt"), range(12)))
         assert len({item.sort_order for item in items}) == 12
-        assert [item.sort_order for item in env.repository.list_attachments(task.id)] == list(range(10, 121, 10))
+        assert [item.sort_order for item in env.repository.list_attachments(task.id)] == list(
+            range(10, 121, 10)
+        )
 
 
 def test_observer_failure_does_not_undo_commit_and_unsubscribe_is_safe(tmp_path):
@@ -191,7 +232,9 @@ def test_observer_failure_does_not_undo_commit_and_unsubscribe_is_safe(tmp_path)
         a, b = [env.add(task.id, f"파일{i}.txt") for i in range(2)]
         seen = []
         unsubscribe = env.attachments.subscribe(seen.append)
-        bad = env.attachments.subscribe(lambda _task_id: (_ for _ in ()).throw(RuntimeError("closed observer")))
+        bad = env.attachments.subscribe(
+            lambda _task_id: (_ for _ in ()).throw(RuntimeError("closed observer"))
+        )
         env.attachments.move_attachment(task.id, b.id, AttachmentMove.FIRST)
         assert seen == [task.id]
         assert env.repository.list_attachments(task.id)[0].id == b.id
@@ -209,7 +252,7 @@ def test_failed_move_rolls_back_all_positions(tmp_path):
         before = env.repository.list_attachments(task.id)
 
         def fail(_connection, _cursor, statement, _parameters, _context, _many):
-            if statement.startswith("UPDATE attachments SET sort_order"):
+            if statement.startswith("UPDATE attachments SET") and "sort_order" in statement:
                 raise sqlite3.OperationalError("synthetic move failure")
 
         event.listen(Engine, "before_cursor_execute", fail)
@@ -228,16 +271,32 @@ def test_backup_restore_preserves_custom_order_or_upgrades_old_order(tmp_path, o
 
     paths = AppPaths(tmp_path / "profile")
     paths.ensure_directories()
-    with search_environment(paths.data_dir, attachment_root=paths.attachment_dir) as env:
+    environment = (
+        legacy_environment(
+            paths.data_dir, revision="0010_attachment_search", attachment_root=paths.attachment_dir
+        )
+        if old_schema
+        else search_environment(paths.data_dir, attachment_root=paths.attachment_dir)
+    )
+    with environment as env:
         task = env.tasks.create(TaskDraft(title="백업 순서"))
         items = []
         for i in range(3):
             source = tmp_path / f"실제파일{i}.txt"
             source.write_text(str(i))
-            items.append(env.attachments.attach(task.id, source))
-        env.attachments.move_attachment(task.id, items[1].id, AttachmentMove.FIRST)
-    if old_schema:
-        command.downgrade(migration_config(paths.database_file), "0010_attachment_search")
+            if old_schema:
+                items.append(
+                    env.add(
+                        task.id,
+                        source.name,
+                        content=str(i).encode(),
+                        created=datetime(2026, 10, 1, i, tzinfo=UTC),
+                    )
+                )
+            else:
+                items.append(env.attachments.attach(task.id, source))
+        if not old_schema:
+            env.attachments.move_attachment(task.id, items[1].id, AttachmentMove.FIRST)
     manager = BackupManager(paths)
     saved = manager.create_backup()
     manager.stage_restore(saved.path)

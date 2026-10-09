@@ -62,6 +62,7 @@ class ManagedAttachmentStorage:
         suffix = source_path.suffix if _SAFE_EXTENSION.fullmatch(source_path.suffix) else ""
         stored_name = f"{token}{suffix.lower()}"
         relative_path = f"{token[:2]}/{token[2:4]}/{stored_name}"
+        self.coordinator.assert_accessible(relative_path)
         destination = self.resolve(relative_path, require_exists=False)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{stored_name}.{uuid4().hex}.part")
@@ -109,14 +110,20 @@ class ManagedAttachmentStorage:
         return True
 
     def checksum(
-        self, relative_path: str, *, cancel_requested: Callable[[], bool] | None = None,
+        self,
+        relative_path: str,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
         progress: Callable[[int, int], None] | None = None,
     ) -> str:
+        self.coordinator.assert_accessible(relative_path)
         path = self.resolve(relative_path)
         digest = hashlib.sha256()
+
         def identity(stat: os.stat_result) -> tuple[int, int, int, int]:
             # Windows fstat/stat have different ctime semantics on Python 3.12.
             return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
         with path.open("rb") as stream:
             before = os.fstat(stream.fileno())
             completed = 0
@@ -129,11 +136,17 @@ class ManagedAttachmentStorage:
                     break
                 digest.update(chunk)
                 completed += len(chunk)
-                if progress is not None and (monotonic() - last_progress >= 0.1 or completed >= before.st_size):
+                if progress is not None and (
+                    monotonic() - last_progress >= 0.1 or completed >= before.st_size
+                ):
                     progress(completed, before.st_size)
                     last_progress = monotonic()
-            if identity(before) != identity(os.fstat(stream.fileno())) or identity(before) != identity(path.stat()):
-                raise AttachmentOperationError("검사 중 파일이 변경되었습니다. 파일 저장을 마친 뒤 다시 검사하세요.")
+            if identity(before) != identity(os.fstat(stream.fileno())) or identity(
+                before
+            ) != identity(path.stat()):
+                raise AttachmentOperationError(
+                    "검사 중 파일이 변경되었습니다. 파일 저장을 마친 뒤 다시 검사하세요."
+                )
         return digest.hexdigest()
 
     def remove(self, relative_path: str) -> None:
@@ -162,17 +175,32 @@ class ManagedAttachmentStorage:
             self._remove_empty_parents(source.parent)
             return record
 
-    def observe(self, relative_path: str, *, cancel_requested: Callable[[], bool] | None = None, progress: Callable[[int, int], None] | None = None, now: datetime | None = None) -> FileObservation:
+    def observe(
+        self,
+        relative_path: str,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        now: datetime | None = None,
+    ) -> FileObservation:
         path = self.resolve(relative_path)
         before = path.stat()
         digest = self.checksum(relative_path, cancel_requested=cancel_requested, progress=progress)
         after = path.stat()
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
-            raise AttachmentOperationError("검사 중 파일이 변경되었습니다. 저장을 마친 뒤 다시 확인하세요.")
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise AttachmentOperationError(
+                "검사 중 파일이 변경되었습니다. 저장을 마친 뒤 다시 확인하세요."
+            )
         return FileObservation(after.st_size, digest, after.st_mtime_ns, now or datetime.now(UTC))
 
     @contextmanager
     def protected_read(self, relative_path: str) -> Iterator[BinaryIO]:
+        self.coordinator.assert_accessible(relative_path)
         with protected_read(self.resolve(relative_path)) as stream:
             yield stream
 
@@ -195,7 +223,12 @@ class ManagedAttachmentStorage:
         (path.parent / "deletion.json").unlink(missing_ok=True)
         self._remove_empty_parents(path.parent)
 
-    def recover_quarantine(self, tracked: set[str]) -> tuple[str, ...]:
+    def recover_quarantine(
+        self,
+        tracked: set[str] | Callable[[str], bool],
+        *,
+        paths_for_name: Callable[[str], tuple[str, ...]] | None = None,
+    ) -> tuple[str, ...]:
         """Undo uncommitted deletions; purge only journaled, committed deletions.
 
         Legacy/unknown files are preserved unless their unique stored name maps
@@ -207,6 +240,10 @@ class ManagedAttachmentStorage:
                 return ()
             for folder in tuple(self._quarantine_root.iterdir()):
                 try:
+                    # Version-2 multi-asset jobs belong to the receipt-aware
+                    # executor. Never guess their contents using legacy names.
+                    if folder.name.startswith("delete-"):
+                        continue
                     if not folder.is_dir() or folder.is_symlink():
                         warnings.append(f"확인이 필요한 격리 파일 보존: {folder.name}")
                         continue
@@ -229,7 +266,7 @@ class ManagedAttachmentStorage:
                         ):
                             raise ValueError("invalid deletion scope")
                         record = QuarantinedAttachment(original, quarantined)
-                        if original in tracked:
+                        if tracked(original) if callable(tracked) else original in tracked:
                             if source.is_file():
                                 self.restore(record)
                             elif destination.is_file():
@@ -243,7 +280,13 @@ class ManagedAttachmentStorage:
                         for source in tuple(folder.iterdir()):
                             if not source.is_file() or source.is_symlink():
                                 continue
-                            matches = [path for path in tracked if Path(path).name == source.name]
+                            matches = (
+                                list(paths_for_name(source.name))
+                                if paths_for_name
+                                else []
+                                if callable(tracked)
+                                else [path for path in tracked if Path(path).name == source.name]
+                            )
                             if len(matches) == 1 and not self.exists(matches[0]):
                                 self.restore(
                                     QuarantinedAttachment(

@@ -246,7 +246,9 @@ class TaskRepository(Protocol):
 
     def get_occurrence_by_id(self, occurrence_id: int) -> TaskOccurrence | None: ...
 
-    def get_occurrences_by_ids(self, occurrence_ids: tuple[int, ...]) -> dict[int, TaskOccurrence]: ...
+    def get_occurrences_by_ids(
+        self, occurrence_ids: tuple[int, ...]
+    ) -> dict[int, TaskOccurrence]: ...
 
     def completed_history_page(self, query: TaskQuery) -> TaskPage: ...
 
@@ -264,7 +266,10 @@ class TaskService:
     CALENDAR_PREVIEW_LIMIT = 60
 
     def export_tasks(
-        self, query: TaskQuery, *, cancel_requested: Callable[[], bool] | None = None,
+        self,
+        query: TaskQuery,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> Iterator[Task]:
         """Stream a stable snapshot in bounded pages, including Today projections."""
         current = datetime.now(UTC)
@@ -279,6 +284,7 @@ class TaskService:
                 offset += len(page.items)
                 if not page.has_more or not page.items:
                     break
+
     CALENDAR_SUMMARY_THRESHOLD = 120
 
     def __init__(self, repository: TaskRepository, *, timezone: str = "Asia/Seoul") -> None:
@@ -457,9 +463,7 @@ class TaskService:
     def delete_permanently(self, task_id: int) -> tuple[str, ...]:
         """Delete a trashed task and return managed attachment paths to clean up."""
         if self._repository.get_deleted(task_id) is None:
-            raise TaskNotFoundError(
-                f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다."
-            )
+            raise TaskNotFoundError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
         with self._file_delete_guard(task_id) if self._file_delete_guard else nullcontext():
             return self._repository.delete_permanently(task_id)
 
@@ -507,9 +511,7 @@ class TaskService:
             else None
         )
         completed_before = (
-            datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone).astimezone(
-                UTC
-            )
+            datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone).astimezone(UTC)
             if date_to is not None
             else None
         )
@@ -593,15 +595,12 @@ class TaskService:
 
         zone = ZoneInfo(self._timezone)
         days = tuple(
-            start_date + timedelta(days=offset)
-            for offset in range((end_date - start_date).days)
+            start_date + timedelta(days=offset) for offset in range((end_date - start_date).days)
         )
         day_ranges = tuple(
             (
                 datetime.combine(day, time.min, tzinfo=zone).astimezone(UTC),
-                datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone).astimezone(
-                    UTC
-                ),
+                datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone).astimezone(UTC),
             )
             for day in days
         )
@@ -710,9 +709,7 @@ class TaskService:
         return tuple(scheduled)
 
     @staticmethod
-    def _scheduled_local_span(
-        scheduled: ScheduledTask, zone: ZoneInfo
-    ) -> tuple[date, date] | None:
+    def _scheduled_local_span(scheduled: ScheduledTask, zone: ZoneInfo) -> tuple[date, date] | None:
         start_day = scheduled.starts_at.astimezone(zone).date()
         if scheduled.ends_at is None:
             return start_day, start_day
@@ -829,19 +826,30 @@ class TaskService:
         ]
         if not recurring:
             return self._repository.query(
-                query, current=current, day_start=day_start, day_end=day_end,
+                query,
+                current=current,
+                day_start=day_start,
+                day_end=day_end,
             )
         fetch_limit = None if query.limit is None else query.offset + query.limit
         regular = self._repository.query(
             replace(query, offset=0, limit=None if fetch_limit is None else min(500, fetch_limit)),
-            current=current, day_start=day_start, day_end=day_end,
+            current=current,
+            day_start=day_start,
+            day_end=day_end,
         )
         regular_items = list(regular.items)
         # Each repository request is bounded even after many "more" clicks.
         while fetch_limit is not None and len(regular_items) < min(fetch_limit, regular.total):
             page = self._repository.query(
-                replace(query, offset=len(regular_items), limit=min(500, fetch_limit - len(regular_items))),
-                current=current, day_start=day_start, day_end=day_end,
+                replace(
+                    query,
+                    offset=len(regular_items),
+                    limit=min(500, fetch_limit - len(regular_items)),
+                ),
+                current=current,
+                day_start=day_start,
+                day_end=day_end,
             )
             if not page.items:
                 break
@@ -861,10 +869,7 @@ class TaskService:
             (not query.statuses or task.status in query.statuses)
             and (not query.priorities or task.priority in query.priorities)
             and (not query.pinned_only or task.is_pinned)
-            and (
-                query.has_attachments is None
-                or task.has_attachments is query.has_attachments
-            )
+            and (query.has_attachments is None or task.has_attachments is query.has_attachments)
         )
 
     @staticmethod
@@ -983,11 +988,15 @@ class TaskService:
 
         active = self.query(replace(query, group=TaskGroup.IN_PROGRESS), now=now)
         remaining = None if query.limit is None else query.limit - len(active.items)
-        upcoming = self.query(replace(
-            query, group=TaskGroup.UPCOMING,
-            offset=max(0, query.offset - active.total),
-            limit=remaining if remaining is None or remaining > 0 else 1,
-        ), now=now)
+        upcoming = self.query(
+            replace(
+                query,
+                group=TaskGroup.UPCOMING,
+                offset=max(0, query.offset - active.total),
+                limit=remaining if remaining is None or remaining > 0 else 1,
+            ),
+            now=now,
+        )
         combined = (*active.items, *(upcoming.items if remaining != 0 else ()))
         return TaskPage(
             items=combined,

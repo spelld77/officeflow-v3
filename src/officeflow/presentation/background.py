@@ -42,7 +42,10 @@ def finish_thread(
     label: str = "진행 중인 작업을 안전하게 마무리하고 있습니다…",
 ) -> None:
     """Wait responsively; never terminate file/DB workers or dispose their owners early."""
+    if not isValid(thread):
+        return
     if not thread.isRunning():
+        thread.wait()  # finished can precede native thread-local cleanup
         return
     loop = QEventLoop()
     progress = QProgressDialog(label, "", 0, 0, parent)
@@ -72,6 +75,8 @@ def finish_thread(
         while isValid(thread) and thread.isRunning():
             thread.wait(25)
             QCoreApplication.processEvents()
+        if isValid(thread):
+            thread.wait()
     finally:
         timer.stop()
         progress.close()

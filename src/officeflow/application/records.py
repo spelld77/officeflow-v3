@@ -202,9 +202,7 @@ class RecordService:
             occurrence = self._task_service.ensure_occurrence(task_id, occurrence_start)
             occurrence_id = occurrence.id
         priority = (
-            self._task_service.get(task_id).priority
-            if task_id is not None
-            else TaskPriority.NORMAL
+            self._task_service.get(task_id).priority if task_id is not None else TaskPriority.NORMAL
         )
         if not allow_duplicate and self._repository.has_duplicate_work_log(
             task_id=task_id,

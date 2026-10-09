@@ -1,10 +1,12 @@
 """Korean weekday labels without depending on the Windows display language."""
 
 from datetime import date, datetime
+from weakref import ref
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import QDateEdit
+from shiboken6 import isValid
 
 WEEKDAYS = ("월", "화", "수", "목", "금", "토", "일")
 
@@ -14,18 +16,21 @@ class _DateInputWidth(QObject):
 
     def __init__(self, edit: QDateEdit) -> None:
         super().__init__(edit)
-        self._edit = edit
+        self._edit_ref = ref(edit)
         edit.installEventFilter(self)
 
     def refresh(self) -> None:
-        metrics = self._edit.fontMetrics()
+        edit = self._edit_ref()
+        if edit is None or not isValid(edit):
+            return
+        metrics = edit.fontMetrics()
         text_width = max(metrics.horizontalAdvance(f"8888-88-88 ({day})") for day in WEEKDAYS)
-        self._edit.setMinimumWidth(max(self._edit.minimumSizeHint().width(), text_width + 50))
+        edit.setMinimumWidth(max(edit.minimumSizeHint().width(), text_width + 50))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() in (QEvent.Type.Polish, QEvent.Type.FontChange, QEvent.Type.StyleChange):
             self.refresh()
-        return super().eventFilter(watched, event)
+        return False
 
 
 def format_date(value: date, *, short: bool = False) -> str:

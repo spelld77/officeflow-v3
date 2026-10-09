@@ -64,7 +64,9 @@ class HourlyNotificationDialog(QDialog):
         caption.setObjectName("mutedText")
         root.addWidget(caption)
         self.early_hint = QLabel("조기출근 기록은 08시 전에 해주세요.")
-        self.early_hint.setToolTip("조기출근 초과근무라면 08시 전에 인사랑에서 출근과 업무기록을 직접 해주세요.")
+        self.early_hint.setToolTip(
+            "조기출근 초과근무라면 08시 전에 인사랑에서 출근과 업무기록을 직접 해주세요."
+        )
         self.early_hint.setWordWrap(True)
         root.addWidget(self.early_hint)
         self.next_label = QLabel()
@@ -73,7 +75,9 @@ class HourlyNotificationDialog(QDialog):
         row = QHBoxLayout()
         self.snooze_button = QPushButton("5분 뒤 알림")
         self.dismiss_button = QPushButton("닫기")
-        self.dismiss_button.setToolTip("현재 시간대의 안내만 닫습니다. 다음 시간 알림은 유지됩니다.")
+        self.dismiss_button.setToolTip(
+            "현재 시간대의 안내만 닫습니다. 다음 시간 알림은 유지됩니다."
+        )
         self.dismiss_button.setObjectName("primaryButton")
         for button in (self.snooze_button, self.dismiss_button):
             button.setAutoDefault(False)
@@ -99,9 +103,7 @@ class HourlyNotificationDialog(QDialog):
     def update_state(self, state: HourlyState) -> None:
         self._key = state.bucket.key
         self.message_label.setText(state.message)
-        self.hour_label.setText(
-            f"{state.bucket.starts_at:%H}:00 ~ {state.bucket.starts_at:%H}:59"
-        )
+        self.hour_label.setText(f"{state.bucket.starts_at:%H}:00 ~ {state.bucket.starts_at:%H}:59")
         self.next_label.setText(
             f"다음 알림 {format_next(state.next_regular_at, state.bucket.starts_at)}"
         )
@@ -114,14 +116,21 @@ class HourlyNotificationDialog(QDialog):
         if signature != self._content_signature:
             self._content_signature = signature
             width = self.width()
-            text_height = self.message_label.fontMetrics().boundingRect(
-                QRect(0, 0, width - 32, 10_000), Qt.TextFlag.TextWordWrap, state.message
-            ).height()
+            text_height = (
+                self.message_label.fontMetrics()
+                .boundingRect(
+                    QRect(0, 0, width - 32, 10_000), Qt.TextFlag.TextWordWrap, state.message
+                )
+                .height()
+            )
             self.message_label.setMinimumHeight(text_height + 4)
             layout = self.layout()
             if layout is not None:
                 layout.activate()
-                self.resize(width, max(220, layout.minimumSize().height(), layout.totalHeightForWidth(width)))
+                self.resize(
+                    width,
+                    max(220, layout.minimumSize().height(), layout.totalHeightForWidth(width)),
+                )
 
     def reject(self) -> None:
         if not self._closing:

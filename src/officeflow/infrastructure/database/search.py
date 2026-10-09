@@ -19,7 +19,7 @@ def attachment_name_predicate(value: str) -> Any:
     if len(value.strip()) < 2:
         return false()
     terms = value.strip().split()
-    name = func.lower(AttachmentRecord.original_name)
+    name = func.lower(AttachmentRecord.display_name)
     conditions = [
         func.instr(
             name,
@@ -63,7 +63,7 @@ def attachment_match_summaries(
         select(
             AttachmentRecord.task_id.label("task_id"),
             AttachmentRecord.id.label("id"),
-            AttachmentRecord.original_name.label("name"),
+            AttachmentRecord.display_name.label("name"),
             func.count().over(partition_by=AttachmentRecord.task_id).label("total"),
             func.row_number()
             .over(

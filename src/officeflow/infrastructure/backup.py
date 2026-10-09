@@ -10,7 +10,7 @@ import tempfile
 import uuid
 import zipfile
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -18,15 +18,26 @@ from typing import Any
 
 from alembic.script import ScriptDirectory
 
-from officeflow.application.file_operations import FileOperationCoordinator
+from officeflow.application.attachments import AttachmentOperationError
+from officeflow.application.file_operations import (
+    FileInUseError,
+    FileJobCanceledError,
+    FileOperationCoordinator,
+)
 from officeflow.bootstrap.paths import AppPaths
 from officeflow.infrastructure.attachments.coordination import (
     attachment_coordinator,
 )
+from officeflow.infrastructure.attachments.deletion_storage import DeletionFileStorage
+from officeflow.infrastructure.attachments.internal_storage import checked_managed_path
+from officeflow.infrastructure.attachments.read_lease import protected_read
 from officeflow.infrastructure.attachments.storage import ManagedAttachmentStorage
+from officeflow.infrastructure.database.file_references import (
+    assert_supported_sqlite_asset_references,
+)
 from officeflow.infrastructure.database.migrate import migration_config
 
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
 logger = logging.getLogger(__name__)
 
 
@@ -36,6 +47,10 @@ class BackupError(RuntimeError):
 
 class BackupCanceledError(BackupError):
     """Cooperative cancellation, not a failed backup or restore."""
+
+
+class BackupSourceIncompleteError(BackupError):
+    """Readable current metadata, but required bytes are missing or changed."""
 
 
 def _safe_attachment_relative_path(value: str) -> PurePosixPath:
@@ -59,6 +74,8 @@ class BackupFile:
     path: str
     size: int
     sha256: str
+    category: str = "recovery"
+    asset_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +88,7 @@ class BackupManifest:
     attachments: tuple[BackupFile, ...]
     settings: BackupFile | None = None
     missing_attachments: tuple[str, ...] = ()
+    recovery_partition: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,15 +161,63 @@ class DataUsageSnapshot:
 
 
 class BackupManager:
-    def __init__(self, paths: AppPaths, *, coordinator: FileOperationCoordinator | None = None) -> None:
+    def __init__(
+        self, paths: AppPaths, *, coordinator: FileOperationCoordinator | None = None
+    ) -> None:
         self._paths = paths
         self._coordinator = coordinator or attachment_coordinator(paths.attachment_dir)
         self.restore_warnings: tuple[str, ...] = ()
 
     def recover_attachment_deletions(self) -> tuple[str, ...]:
+        try:
+            return self._recover_attachment_deletions()
+        except sqlite3.Error as error:
+            raise BackupError(
+                "삭제 복구의 파일 원장을 읽지 못했습니다. 격리 자료를 보존했습니다."
+            ) from error
+
+    def _recover_attachment_deletions(self) -> tuple[str, ...]:
+        if not (self._paths.attachment_dir / ".trash").exists():
+            return ()
         with self._coordinator.gate:
-            storage = ManagedAttachmentStorage(self._paths.attachment_dir, coordinator=self._coordinator)
-            return storage.recover_quarantine(self._tracked_attachment_paths())
+            storage = ManagedAttachmentStorage(
+                self._paths.attachment_dir, coordinator=self._coordinator
+            )
+            if not self._paths.database_file.is_file():
+                return ("삭제 복구를 위한 DB가 없어 격리 파일을 보존했습니다.",)
+            with closing(
+                sqlite3.connect(f"file:{self._paths.database_file.as_posix()}?mode=ro", uri=True)
+            ) as connection:
+                normalized = bool(
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name='file_assets'"
+                    ).fetchone()
+                )
+                if normalized:
+                    _check_asset_references(connection)
+                table = "file_assets" if normalized else "attachments"
+
+                def tracked(relative: str) -> bool:
+                    state = " AND state='active'" if normalized else ""
+                    return (
+                        connection.execute(
+                            f"SELECT 1 FROM {table} WHERE relative_path=?{state} LIMIT 1",
+                            (relative,),
+                        ).fetchone()
+                        is not None
+                    )
+
+                def paths_for_name(name: str) -> tuple[str, ...]:
+                    state = " AND state='active'" if normalized else ""
+                    return tuple(
+                        str(row[0])
+                        for row in connection.execute(
+                            f"SELECT relative_path FROM {table} WHERE stored_name=?{state} LIMIT 2",
+                            (name,),
+                        )
+                    )
+
+                return storage.recover_quarantine(tracked, paths_for_name=paths_for_name)
 
     @property
     def attachment_directory(self) -> Path:
@@ -188,7 +254,9 @@ class BackupManager:
         try:
             with closing(sqlite3.connect(self._paths.database_file)) as connection:
                 connection.execute("PRAGMA busy_timeout=5000")
-                connection.set_progress_handler(lambda: int(cancel_requested is not None and cancel_requested()), 1_000)
+                connection.set_progress_handler(
+                    lambda: int(cancel_requested is not None and cancel_requested()), 1_000
+                )
                 task_row = connection.execute(
                     """
                     SELECT
@@ -204,10 +272,14 @@ class BackupManager:
                 ).fetchone()
                 attachment_rows = connection.execute(
                     """
-                    SELECT original_name, relative_path, COALESCE(observed_size_bytes, size_bytes), observed_checksum, detached_at, observed_mtime_ns, last_check_status
-                    FROM attachments
+                    SELECT a.display_name, f.relative_path, COALESCE(f.observed_size_bytes, a.size_bytes), f.observed_checksum, a.detached_at, f.observed_mtime_ns, f.last_check_status
+                    FROM attachments a JOIN file_assets f ON f.id=a.asset_id
                     """
                 ).fetchall()
+                asset_paths = {
+                    str(row[0])
+                    for row in connection.execute("SELECT relative_path FROM file_assets")
+                }
                 reminder_cleanup_candidate_count = int(
                     connection.execute(
                         """
@@ -250,7 +322,11 @@ class BackupManager:
                 if path.is_file() and relative_path.parts[0] == ".trash":
                     quarantined.append(path.stat().st_size)
                     continue
-                if not path.is_file() or any(part.startswith(".") for part in relative_path.parts):
+                if (
+                    relative_path.parts[0] == "cache"
+                    or not path.is_file()
+                    or any(part.startswith(".") for part in relative_path.parts)
+                ):
                     continue
                 stored[relative_path.as_posix()] = (path, path.stat().st_size)
 
@@ -258,7 +334,13 @@ class BackupManager:
             if detached_at is not None:
                 continue
             sample = stored.get(str(relative))
-            if sample and checksum and state in {"unchanged", "modified", "no_baseline"} and sample[1] == size and sample[0].stat().st_mtime_ns == mtime:
+            if (
+                sample
+                and checksum
+                and state in {"unchanged", "modified", "no_baseline"}
+                and sample[1] == size
+                and sample[0].stat().st_mtime_ns == mtime
+            ):
                 checksum_sizes.setdefault(str(checksum), []).append(int(size))
             else:
                 unverified_count += 1
@@ -268,7 +350,11 @@ class BackupManager:
         tracked_paths = set(tracked)
         stored_paths = set(stored)
         coordinator = self._coordinator
-        orphan_paths = {path for path in stored_paths - tracked_paths if not coordinator.is_pinned(path)}
+        orphan_paths = {
+            path
+            for path in stored_paths - asset_paths
+            if not coordinator.is_pinned(path) and not path.startswith("frozen/")
+        }
         largest = sorted(
             (
                 LargeStoredFile(
@@ -327,9 +413,7 @@ class BackupManager:
             linked_attachment_count=len(linked),
             linked_attachment_bytes=sum(stored[path][1] for path in linked if path in stored),
             detached_attachment_count=len(detached),
-            detached_attachment_bytes=sum(
-                stored[path][1] for path in detached if path in stored
-            ),
+            detached_attachment_bytes=sum(stored[path][1] for path in detached if path in stored),
             aged_detached_attachment_count=sum(
                 1
                 for _name, _size, _checksum, detached_at in detached.values()
@@ -371,7 +455,12 @@ class BackupManager:
             if not path.is_file() or any(part.startswith(".") for part in relative.parts):
                 continue
             relative_path = relative.as_posix()
-            if relative_path in tracked or self._coordinator.is_pinned(relative_path):
+            if (
+                relative_path in tracked
+                or relative.parts[0] in {"frozen", "cache"}
+                or self._coordinator.is_pinned(relative_path)
+                or self._coordinator.is_protected(relative_path)
+            ):
                 continue
             stat = path.stat()
             items.append(
@@ -392,7 +481,9 @@ class BackupManager:
     def _delete_orphan_attachment_file_locked(self, relative_path: str) -> None:
         """Delete one still-untracked file after the UI has obtained confirmation."""
         safe_relative = _safe_attachment_relative_path(relative_path)
-        if any(part.startswith(".") for part in safe_relative.parts):
+        if safe_relative.parts[0] in {"frozen", "cache"} or any(
+            part.startswith(".") for part in safe_relative.parts
+        ):
             raise BackupError("격리·작업 파일은 일반 고아 파일 정리에서 삭제할 수 없습니다.")
         if safe_relative.as_posix() in self._tracked_attachment_paths():
             raise BackupError("이 파일은 현재 업무 또는 정리 대기 기록에 연결되어 있습니다.")
@@ -412,7 +503,9 @@ class BackupManager:
                 break
             parent = parent.parent
 
-    def _tracked_attachment_paths(self, cancel_requested: Callable[[], bool] | None = None) -> set[str]:
+    def _tracked_attachment_paths(
+        self, cancel_requested: Callable[[], bool] | None = None
+    ) -> set[str]:
         if not self._paths.database_file.is_file():
             return set()
         try:
@@ -422,6 +515,21 @@ class BackupManager:
             raise BackupError(f"첨부파일 연결 정보를 확인하지 못했습니다: {error}") from error
 
     def create_backup(
+        self,
+        *,
+        reason: str = "manual",
+        keep: int | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> BackupInfo:
+        try:
+            with self._coordinator.job(cancel_requested):
+                return self._create_backup(
+                    reason=reason, keep=keep, cancel_requested=cancel_requested
+                )
+        except FileJobCanceledError as error:
+            raise BackupCanceledError(str(error)) from error
+
+    def _create_backup(
         self,
         *,
         reason: str = "manual",
@@ -457,27 +565,52 @@ class BackupManager:
                 snapshot = working / "officeflow.db"
                 captures = working / "captures"
                 captures.mkdir()
-                with self._coordinator.gate:
-                    for warning in self.recover_attachment_deletions():
-                        logger.warning(warning)
-                    missing_before = {
-                        relative
-                        for relative in self._tracked_attachment_paths(cancel_requested)
-                        if not self._managed_path(relative).is_file()
-                    }
-                    self._snapshot_database(snapshot, cancel_requested)
-                    referenced = _database_attachment_paths(snapshot, cancel_requested)
-                    missing = tuple(sorted(referenced & missing_before))
+                with ExitStack() as reservations:
+                    with self._coordinator.gate:
+                        self._snapshot_database(snapshot, cancel_requested)
+                        referenced = _database_attachment_paths(snapshot, cancel_requested)
+                        for relative in referenced:
+                            reservations.enter_context(self._coordinator.preservation_pin(relative))
+                        settings_source = working / "settings.json"
+                        if self._paths.settings_file.is_file():
+                            shutil.copy2(self._paths.settings_file, settings_source)
+                    quarantined = self._quarantined_backup_sources(snapshot, cancel_requested)
+                    missing = tuple(
+                        sorted(
+                            relative
+                            for relative in referenced
+                            if not self._managed_path(relative).is_file()
+                            and relative not in quarantined
+                        )
+                    )
+                    if missing:
+                        raise BackupSourceIncompleteError(
+                            "필요한 첨부파일이 누락되어 전체 백업하지 않았습니다: "
+                            + ", ".join(missing[:5])
+                        )
                     captured = self._capture_attachment_sources(captures, cancel_requested)
-                    if referenced - set(captured) != set(missing):
+                    for relative, source in quarantined.items():
+                        if relative not in captured and relative in referenced:
+                            target_copy = captures / PurePosixPath(relative)
+                            target_copy.parent.mkdir(parents=True, exist_ok=True)
+                            _stable_copy(source, target_copy, cancel_requested)
+                            captured[relative] = target_copy, _file_identity(target_copy)
+                    if referenced - set(captured):
                         raise BackupError(
                             "백업 도중 첨부파일이 변경되거나 사라졌습니다. 다시 백업해 주세요."
                         )
-                    settings_source = working / "settings.json"
-                    if self._paths.settings_file.is_file():
-                        shutil.copy2(self._paths.settings_file, settings_source)
                 staged = working / "attachments"
                 attachments = self._stage_attachment_sources(captured, staged, cancel_requested)
+                assets = _database_assets(snapshot, cancel_requested)
+                attachments = tuple(
+                    replace(item, category="asset", asset_id=assets[item.path][0])
+                    if item.path in assets
+                    else replace(item, category="asset")
+                    if item.path in referenced
+                    else item
+                    for item in attachments
+                )
+                _verify_asset_captures(assets, attachments)
                 table_counts = _database_counts(snapshot, cancel_requested)
                 settings = (
                     BackupFile(
@@ -497,6 +630,7 @@ class BackupManager:
                     attachments=attachments,
                     settings=settings,
                     missing_attachments=missing,
+                    recovery_partition=True,
                 )
                 with zipfile.ZipFile(
                     temporary_archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
@@ -506,7 +640,7 @@ class BackupManager:
                         _write_archive_file(
                             archive,
                             staged / PurePosixPath(item.path),
-                            f"attachments/{item.path}",
+                            _backup_member(item, manifest),
                             cancel_requested,
                         )
                     if settings is not None:
@@ -525,7 +659,7 @@ class BackupManager:
             _raise_if_canceled(cancel_requested)
             self.verify_backup(temporary_archive, cancel_requested=cancel_requested)
             os.replace(temporary_archive, target)
-        except (OSError, sqlite3.Error, zipfile.BadZipFile, ValueError) as error:
+        except (OSError, sqlite3.Error, zipfile.BadZipFile, ValueError, FileInUseError) as error:
             _raise_if_canceled(cancel_requested)
             raise BackupError(f"백업을 만들지 못했습니다: {error}") from error
         finally:
@@ -541,7 +675,9 @@ class BackupManager:
             missing_attachments=missing,
         )
 
-    def _estimated_backup_source_bytes(self, cancel_requested: Callable[[], bool] | None = None) -> int:
+    def _estimated_backup_source_bytes(
+        self, cancel_requested: Callable[[], bool] | None = None
+    ) -> int:
         _raise_if_canceled(cancel_requested)
         paths = (self._paths.database_file, self._paths.settings_file)
         total = sum(path.stat().st_size for path in paths if path.is_file())
@@ -549,7 +685,7 @@ class BackupManager:
             for path in self._paths.attachment_dir.rglob("*"):
                 _raise_if_canceled(cancel_requested)
                 parts = path.relative_to(self._paths.attachment_dir).parts
-                if path.is_file() and (parts[0] == ".trash" or not any(part.startswith(".") for part in parts)):
+                if path.is_file() and parts[0] != "cache":
                     total += path.stat().st_size
         return total
 
@@ -572,7 +708,7 @@ class BackupManager:
                     raise BackupError("백업에 필수 파일이 없습니다.")
                 manifest = _parse_manifest(archive.read("manifest.json"))
                 expected = {"manifest.json", "data/officeflow.db"}
-                expected.update(f"attachments/{item.path}" for item in manifest.attachments)
+                expected.update(_backup_member(item, manifest) for item in manifest.attachments)
                 if manifest.settings is not None:
                     expected.add("settings.json")
                 if names != expected:
@@ -583,7 +719,7 @@ class BackupManager:
                 ):
                     raise BackupError("백업 데이터베이스 체크섬이 일치하지 않습니다.")
                 for item in manifest.attachments:
-                    member = f"attachments/{item.path}"
+                    member = _backup_member(item, manifest)
                     info = archive.getinfo(member)
                     if info.file_size != item.size:
                         raise BackupError(f"첨부파일 크기가 일치하지 않습니다: {item.path}")
@@ -618,10 +754,31 @@ class BackupManager:
                         raise BackupError(
                             "백업 DB의 첨부 연결과 누락 파일 명세가 일치하지 않습니다."
                         )
+                    if manifest.format_version == 3:
+                        if manifest.missing_attachments:
+                            raise BackupError(
+                                "새 전체 백업 형식에는 필요한 파일 누락을 허용하지 않습니다."
+                            )
+                        _check_restore_schema(database, cancel_requested)
+                        _verify_asset_captures(
+                            _database_assets(database, cancel_requested), manifest.attachments
+                        )
+                    else:
+                        _verify_asset_captures(
+                            _database_assets(database, cancel_requested),
+                            manifest.attachments,
+                            strict=False,
+                        )
                 return manifest
         except BackupError:
             raise
-        except (OSError, KeyError, json.JSONDecodeError, zipfile.BadZipFile, sqlite3.Error) as error:
+        except (
+            OSError,
+            KeyError,
+            json.JSONDecodeError,
+            zipfile.BadZipFile,
+            sqlite3.Error,
+        ) as error:
             _raise_if_canceled(cancel_requested)
             raise BackupError(f"백업 검증에 실패했습니다: {error}") from error
 
@@ -667,7 +824,17 @@ class BackupManager:
             return None
         manifest = self.verify_backup(pending, check_schema=True)
         self._paths.ensure_directories()
-        pre_restore = self.create_backup(reason="pre-restore")
+        preserve_rollback = False
+        try:
+            pre_restore = self.create_backup(reason="pre-restore")
+        except BackupSourceIncompleteError:
+            # Missing/altered bytes are often the reason for restoring. Preserve
+            # the complete previous directory rather than inventing a full backup
+            # or purging those remaining bytes after the successful swap.
+            _check_restore_schema(self._paths.database_file)
+            _database_counts(self._paths.database_file)
+            pre_restore = None
+            preserve_rollback = True
         token = uuid.uuid4().hex
         rollback = self._paths.root / f".restore-rollback-{token}"
         staging = self._paths.root / f".restore-stage-{token}"
@@ -678,6 +845,7 @@ class BackupManager:
             "pending_sha256": _sha256(pending),
             "had_settings": self._paths.settings_file.is_file(),
             "old_database_sha256": _sha256(self._paths.database_file),
+            "preserve_rollback": preserve_rollback,
         }
         staging.mkdir()
         try:
@@ -753,6 +921,8 @@ class BackupManager:
                 for key in ("pending_sha256", "old_database_sha256")
             ):
                 raise ValueError("invalid restore metadata")
+            if not isinstance(state.get("preserve_rollback", False), bool):
+                raise ValueError("invalid preservation state")
             return state
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise BackupError(
@@ -791,6 +961,28 @@ class BackupManager:
         return self._restore_state_file.exists()
 
     def _cleanup_restore_transaction(self, state: dict[str, Any]) -> None:
+        if state["phase"] == "committed":
+            old_cache = self._restore_work_directory(state["rollback"]) / "attachments" / "cache"
+            if old_cache.exists():
+                new_cache = self._paths.attachment_dir / "cache"
+                if new_cache.exists():
+                    raise BackupError(
+                        "이전 보기 사본과 복원 영역이 충돌했습니다. 자료를 보존했습니다."
+                    )
+                os.replace(old_cache, new_cache)
+            marker = self._paths.attachment_dir / "cache" / "attachment-views" / "generation.json"
+            if marker.parent.is_dir():
+                # Deterministic for this restore transaction, including a crash after
+                # moving the cache but before publishing its generation marker.
+                temporary = marker.with_name(f"generation-{uuid.uuid4().hex}.part")
+                with temporary.open("x", encoding="utf-8") as stream:
+                    generation = uuid.uuid5(
+                        uuid.NAMESPACE_URL, "officeflow:restore-cache:" + state["rollback"]
+                    ).hex
+                    json.dump({"generation": generation}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, marker)
         try:
             if (
                 state["phase"] == "committed"
@@ -800,6 +992,26 @@ class BackupManager:
                 self._paths.pending_restore_file.unlink()
             for key in ("staging", "rollback"):
                 folder = self._restore_work_directory(state[key])
+                if (
+                    key == "rollback"
+                    and state["phase"] == "committed"
+                    and state.get("preserve_rollback", False)
+                ):
+                    target = self._paths.backup_dir / (
+                        "pre-restore-preserved-"
+                        + state["rollback"].removeprefix(".restore-rollback-")
+                    )
+                    if folder.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        if target.exists():
+                            raise FileExistsError(
+                                "이전 자료 보존 위치가 이미 있습니다. 덮어쓰지 않았습니다."
+                            )
+                        folder.rename(target)
+                    self.restore_warnings += (
+                        f"복원 전 자료는 파일 누락/고정 불일치로 전체 백업하지 못해 별도로 보존했습니다: {target} (정상 전체 백업 아님)",
+                    )
+                    continue
                 if folder.exists():
                     shutil.rmtree(folder)
             self._restore_state_file.unlink(missing_ok=True)
@@ -879,29 +1091,73 @@ class BackupManager:
     def _capture_attachment_sources(
         self, destination: Path, canceled: Callable[[], bool] | None
     ) -> dict[str, tuple[Path, tuple[int, int, int, int]]]:
-        """Pin immutable managed files under the short publication/deletion gate.
-
-        Hard links make this independent of file size on NTFS. Filesystems that
-        cannot link use a protected copy; compression never holds the gate.
-        """
+        """Capture independent bytes outside the publication/deletion gate."""
         captured: dict[str, tuple[Path, tuple[int, int, int, int]]] = {}
         for source in self._paths.attachment_dir.rglob("*"):
             _raise_if_canceled(canceled)
             relative = source.relative_to(self._paths.attachment_dir)
-            if not source.is_file() or (
-                relative.parts[0] != ".trash"
-                and any(part.startswith(".") for part in relative.parts)
-            ):
+            if relative.parts[0] == "cache" or not source.is_file():
                 continue
-            source = self._managed_path(relative.as_posix())
+            source = checked_managed_path(
+                self._paths.attachment_dir, relative.as_posix(), file_required=True
+            )
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.link(source, target)
-            except OSError:
+            with self._coordinator.preservation_pin(relative.as_posix()):
                 _stable_copy(source, target, canceled)
             captured[relative.as_posix()] = (target, _file_identity(target))
         return captured
+
+    def _quarantined_backup_sources(
+        self, database: Path, canceled: Callable[[], bool] | None
+    ) -> dict[str, Path]:
+        """Only an exact owned delete journal can supply a missing live asset.
+
+        Recovery bytes are additionally backed up as evidence; restore never replays it.
+        """
+        storage = DeletionFileStorage(self._paths.attachment_dir, coordinator=self._coordinator)
+        represented: set[str] = set()
+        sources: dict[str, Path] = {}
+        folder = self._paths.attachment_dir / ".trash"
+        if folder.exists():
+            with os.scandir(folder) as jobs:
+                for job in jobs:
+                    _raise_if_canceled(canceled)
+                    if not job.name.startswith("delete-"):
+                        continue
+                    try:
+                        command, entries = storage._read(job.name.removeprefix("delete-"))
+                        for entry in entries:
+                            represented.add(entry.asset.id)
+                            path = checked_managed_path(
+                                self._paths.attachment_dir,
+                                f".trash/delete-{command.job_id}/{entry.asset.id}",
+                            )
+                            if (
+                                entry.state == "prepared"
+                                and path.is_file()
+                                and _file_identity(path) == entry.identity
+                            ):
+                                if entry.asset.path in sources:
+                                    raise BackupError(
+                                        "같은 자산의 격리 자료가 중복되어 백업하지 않았습니다."
+                                    )
+                                sources[entry.asset.path] = path
+                    except (ValueError, OSError, AttachmentOperationError):
+                        # Unknown materials are preserved, but cannot supply a required asset.
+                        continue
+        with closing(sqlite3.connect(database)) as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='file_assets'"
+            ).fetchone():
+                for (asset_id,) in connection.execute(
+                    "SELECT id FROM file_assets WHERE state='pending_delete'"
+                ):
+                    if asset_id not in represented:
+                        raise BackupError(
+                            "삭제 후처리 자산의 저널이 없어 전체 백업하지 않았습니다. 자료 점검이 필요합니다."
+                        )
+        return sources
 
     def _stage_attachment_sources(
         self,
@@ -958,9 +1214,18 @@ class BackupManager:
         if _database_counts(self._paths.database_file) != manifest.table_counts:
             raise BackupError("복원된 데이터베이스의 레코드 개수가 일치하지 않습니다.")
         for item in manifest.attachments:
-            restored = self._paths.attachment_dir / PurePosixPath(item.path)
+            restored = (
+                staging / "recovery"
+                if manifest.recovery_partition and item.category == "recovery"
+                else self._paths.attachment_dir
+            ) / PurePosixPath(item.path)
             if not restored.is_file() or _sha256(restored) != item.sha256:
                 raise BackupError(f"복원된 첨부파일 검증에 실패했습니다: {item.path}")
+        if (staging / "recovery").exists():
+            recovery = self._paths.root / "recovery" / rollback.name
+            recovery.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging / "recovery", recovery)
+            self.restore_warnings += (f"중단/미분류 자료는 자동 등록하지 않았습니다: {recovery}",)
 
     def _rollback_restore(self, rollback: Path, *, had_settings: bool = True) -> None:
         if not rollback.exists():
@@ -989,11 +1254,15 @@ class BackupManager:
             self._paths.settings_file.unlink(missing_ok=True)
 
 
-def _database_counts(path: Path, cancel_requested: Callable[[], bool] | None = None) -> dict[str, int]:
+def _database_counts(
+    path: Path, cancel_requested: Callable[[], bool] | None = None
+) -> dict[str, int]:
     try:
         with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as connection:
             _raise_if_canceled(cancel_requested)
-            connection.set_progress_handler(lambda: int(cancel_requested is not None and cancel_requested()), 1_000)
+            connection.set_progress_handler(
+                lambda: int(cancel_requested is not None and cancel_requested()), 1_000
+            )
             integrity = connection.execute("PRAGMA integrity_check").fetchone()
             if integrity is None or integrity[0] != "ok":
                 raise BackupError("SQLite 무결성 검사에 실패했습니다.")
@@ -1017,15 +1286,29 @@ def _database_counts(path: Path, cancel_requested: Callable[[], bool] | None = N
         raise BackupError(f"SQLite 검증에 실패했습니다: {error}") from error
 
 
-def _database_attachment_paths(path: Path, cancel_requested: Callable[[], bool] | None = None) -> set[str]:
+def _database_attachment_paths(
+    path: Path, cancel_requested: Callable[[], bool] | None = None
+) -> set[str]:
     with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as connection:
-        connection.set_progress_handler(lambda: int(cancel_requested is not None and cancel_requested()), 1_000)
+        connection.set_progress_handler(
+            lambda: int(cancel_requested is not None and cancel_requested()), 1_000
+        )
         if not connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'"
         ).fetchone():
             return set()
         paths: set[str] = set()
-        for row in connection.execute("SELECT relative_path FROM attachments"):
+        normalized = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='file_assets' AND type='table'"
+        ).fetchone()
+        if normalized:
+            _check_asset_references(connection)
+        statement = (
+            "SELECT relative_path FROM file_assets WHERE state='active'"
+            if normalized
+            else "SELECT relative_path FROM attachments"
+        )
+        for row in connection.execute(statement):
             _raise_if_canceled(cancel_requested)
             paths.add(str(row[0]))
         return paths
@@ -1034,25 +1317,66 @@ def _database_attachment_paths(path: Path, cancel_requested: Callable[[], bool] 
 def _check_restore_schema(path: Path, cancel_requested: Callable[[], bool] | None = None) -> None:
     with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as connection:
         _raise_if_canceled(cancel_requested)
-        connection.set_progress_handler(lambda: int(cancel_requested is not None and cancel_requested()), 1_000)
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        connection.set_progress_handler(
+            lambda: int(cancel_requested is not None and cancel_requested()), 1_000
+        )
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         if not {"tasks", "attachments", "work_logs", "alembic_version"} <= tables:
             raise BackupError("OfficeFlow v3 데이터베이스 구조가 아닌 백업은 복원할 수 없습니다.")
         for table, required in (
             ("tasks", {"id", "title", "status", "created_at"}),
-            ("attachments", {"id", "task_id", "relative_path"}),
+            ("attachments", {"id", "task_id"}),
             ("work_logs", {"id", "log_date", "content"}),
         ):
             _raise_if_canceled(cancel_requested)
             columns = {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
             if not required <= columns:
                 raise BackupError(f"백업 DB의 필수 열이 누락되었습니다: {table}")
-        revisions = {row[0] for row in connection.execute("SELECT version_num FROM alembic_version")}
-        known = {revision.revision for revision in ScriptDirectory.from_config(migration_config(path)).walk_revisions()}
+            if table == "attachments" and not (
+                {"relative_path"} <= columns
+                or (
+                    {"asset_id", "family_id", "display_name"} <= columns
+                    and {"file_assets", "document_families", "attachment_versions"} <= tables
+                )
+            ):
+                raise BackupError("백업 DB의 첨부 파일 원장이 누락되었습니다.")
+        revisions = {
+            row[0] for row in connection.execute("SELECT version_num FROM alembic_version")
+        }
+        known = {
+            revision.revision
+            for revision in ScriptDirectory.from_config(migration_config(path)).walk_revisions()
+        }
         if len(revisions) != 1 or not revisions <= known:
-            raise BackupError("이 프로그램이 지원하지 않는 DB 버전입니다. 더 새로운 OfficeFlow에서 복원하세요.")
+            raise BackupError(
+                "이 프로그램이 지원하지 않는 DB 버전입니다. 더 새로운 OfficeFlow에서 복원하세요."
+            )
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise BackupError("백업 데이터베이스의 업무 연결 정보가 손상되었습니다.")
+        if "file_assets" in tables:
+            _check_asset_references(connection)
+
+
+def _check_asset_references(connection: sqlite3.Connection) -> None:
+    try:
+        assert_supported_sqlite_asset_references(connection)
+    except ValueError as error:
+        raise BackupError(str(error)) from error
+    if (
+        connection.execute("""SELECT 1 FROM attachments a
+        JOIN file_assets f ON f.id=a.asset_id JOIN document_families d ON d.id=a.family_id
+        WHERE f.state!='active' OR d.task_id!=a.task_id
+        OR (a.role='original' AND f.kind!='frozen') OR (a.role IN ('general','work') AND f.kind!='mutable') LIMIT 1""").fetchone()
+        or connection.execute("""SELECT 1 FROM attachment_versions v
+        JOIN file_assets f ON f.id=v.asset_id JOIN document_families d ON d.id=v.family_id
+        WHERE f.state!='active' OR f.kind!='frozen' OR d.task_id!=v.task_id LIMIT 1""").fetchone()
+    ):
+        raise BackupError(
+            "첨부 자산의 종류·소유·상태가 일치하지 않습니다. 자료를 보존하고 확인해 주세요."
+        )
 
 
 def _file_identity(path: Path) -> tuple[int, int, int, int]:
@@ -1062,8 +1386,10 @@ def _file_identity(path: Path) -> tuple[int, int, int, int]:
 
 def _stable_copy(source: Path, target: Path, canceled: Callable[[], bool] | None) -> None:
     before = _file_identity(source)
-    with source.open("rb") as input_stream, target.open("xb") as output_stream:
+    with protected_read(source) as input_stream, target.open("xb") as output_stream:
         _copy_stream(input_stream, output_stream, canceled)
+        output_stream.flush()
+        os.fsync(output_stream.fileno())
     if _file_identity(source) != before or target.stat().st_size != before[2]:
         raise BackupError(f"백업 사본 확보 중 파일이 변경되었습니다: {source.name}")
 
@@ -1118,7 +1444,7 @@ def _validate_archive_name(name: str) -> None:
     if not name or "\\" in name or path.is_absolute() or ".." in path.parts:
         raise BackupError("백업에 안전하지 않은 파일 경로가 있습니다.")
     allowed = name in {"manifest.json", "data/officeflow.db", "settings.json"} or (
-        len(path.parts) >= 2 and path.parts[0] == "attachments"
+        len(path.parts) >= 2 and path.parts[0] in {"attachments", "recovery"}
     )
     if not allowed:
         raise BackupError(f"백업에 알 수 없는 파일이 있습니다: {name}")
@@ -1131,9 +1457,16 @@ def _manifest_payload(manifest: BackupManifest) -> dict[str, Any]:
     return payload
 
 
+def _backup_member(item: BackupFile, manifest: BackupManifest) -> str:
+    prefix = (
+        "recovery" if manifest.recovery_partition and item.category == "recovery" else "attachments"
+    )
+    return f"{prefix}/{item.path}"
+
+
 def _parse_manifest(payload: bytes) -> BackupManifest:
     raw = json.loads(payload.decode("utf-8"))
-    if not isinstance(raw, dict) or raw.get("format_version") not in (1, _FORMAT_VERSION):
+    if not isinstance(raw, dict) or raw.get("format_version") not in (1, 2, _FORMAT_VERSION):
         raise BackupError("지원하지 않는 백업 형식입니다.")
     attachments_raw = raw.get("attachments")
     counts_raw = raw.get("table_counts")
@@ -1154,6 +1487,8 @@ def _parse_manifest(payload: bytes) -> BackupManifest:
     if settings is not None and settings.path != "settings.json":
         raise BackupError("백업 설정 파일 경로가 올바르지 않습니다.")
     try:
+        if type(raw.get("recovery_partition", False)) is not bool:
+            raise ValueError("복구 영역 명세가 올바르지 않습니다.")
         counts = {str(key): int(value) for key, value in counts_raw.items()}
         manifest = BackupManifest(
             format_version=int(raw["format_version"]),
@@ -1164,6 +1499,7 @@ def _parse_manifest(payload: bytes) -> BackupManifest:
             attachments=attachments,
             settings=settings,
             missing_attachments=tuple(missing_raw),
+            recovery_partition=raw.get("recovery_partition", False),
         )
         datetime.fromisoformat(manifest.created_at)
     except (KeyError, TypeError, ValueError) as error:
@@ -1179,7 +1515,13 @@ def _parse_file(raw: Any) -> BackupFile:
     if not isinstance(raw, dict):
         raise BackupError("백업 파일 명세가 올바르지 않습니다.")
     try:
-        item = BackupFile(path=str(raw["path"]), size=int(raw["size"]), sha256=str(raw["sha256"]))
+        item = BackupFile(
+            path=str(raw["path"]),
+            size=int(raw["size"]),
+            sha256=str(raw["sha256"]),
+            category=str(raw.get("category", "recovery")),
+            asset_id=raw.get("asset_id"),
+        )
     except (KeyError, TypeError, ValueError) as error:
         raise BackupError("백업 파일 명세 필드가 올바르지 않습니다.") from error
     _validate_archive_name(
@@ -1187,4 +1529,57 @@ def _parse_file(raw: Any) -> BackupFile:
     )
     if item.size < 0 or len(item.sha256) != 64:
         raise BackupError("백업 파일 크기 또는 체크섬이 올바르지 않습니다.")
+    if item.category not in {"asset", "recovery"} or (
+        item.asset_id is not None
+        and (not isinstance(item.asset_id, str) or len(item.asset_id) != 32)
+    ):
+        raise BackupError("백업 파일 자산 분류가 올바르지 않습니다.")
     return item
+
+
+def _database_assets(
+    path: Path, canceled: Callable[[], bool] | None = None
+) -> dict[str, tuple[str, str, int | None, str | None]]:
+    with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as connection:
+        if not connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='file_assets'"
+        ).fetchone():
+            return {}
+        _check_asset_references(connection)
+        _raise_if_canceled(canceled)
+        connection.set_progress_handler(lambda: int(canceled is not None and canceled()), 1000)
+        return {
+            str(row[0]): (str(row[1]), str(row[2]), row[3], row[4])
+            for row in connection.execute(
+                "SELECT relative_path,id,kind,fixed_size_bytes,fixed_checksum FROM file_assets WHERE state='active'"
+            )
+        }
+
+
+def _verify_asset_captures(
+    assets: dict[str, tuple[str, str, int | None, str | None]],
+    items: tuple[BackupFile, ...],
+    *,
+    strict: bool = True,
+) -> None:
+    by_path = {item.path: item for item in items}
+    if (
+        strict
+        and assets
+        and any(item.category == "asset" and item.asset_id is None for item in items)
+    ):
+        raise BackupError("미분류 파일을 정식 자산으로 복원할 수 없습니다.")
+    if strict and {
+        item.path for item in items if item.category == "asset" and item.asset_id is not None
+    } != set(assets):
+        raise BackupError("자산 원장과 백업 파일 분류가 일치하지 않습니다.")
+    for path, (asset_id, kind, size, checksum) in assets.items():
+        item = by_path.get(path)
+        if item is None and not strict:
+            continue
+        if item is None or (strict and (item.asset_id != asset_id or item.category != "asset")):
+            raise BackupError(f"자산 원장과 백업 명세가 일치하지 않습니다: {path}")
+        if kind == "frozen" and (item.size != size or item.sha256 != checksum):
+            raise BackupSourceIncompleteError(
+                f"보관 후 내용이 변경되어 백업하지 않았습니다: {path}"
+            )

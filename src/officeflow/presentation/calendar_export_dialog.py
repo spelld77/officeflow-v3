@@ -46,9 +46,7 @@ class CalendarExportDialog(QDialog):
         title = QLabel("ICS 캘린더 내보내기")
         title.setObjectName("pageTitle")
         root.addWidget(title)
-        description = QLabel(
-            "출장이나 외부 확인에 필요한 일정만 골라 iCalendar 파일로 만듭니다."
-        )
+        description = QLabel("출장이나 외부 확인에 필요한 일정만 골라 iCalendar 파일로 만듭니다.")
         description.setObjectName("mutedText")
         description.setWordWrap(True)
         root.addWidget(description)
@@ -100,9 +98,7 @@ class CalendarExportDialog(QDialog):
         self.include_recurring_check = QCheckBox("반복 일정 포함")
         self.include_recurring_check.setObjectName("calendarExportIncludeRecurring")
         self.include_recurring_check.setChecked(False)
-        self.include_recurring_check.setToolTip(
-            "선택하면 반복 규칙 전체가 ICS에 포함됩니다."
-        )
+        self.include_recurring_check.setToolTip("선택하면 반복 규칙 전체가 ICS에 포함됩니다.")
         option_layout.addWidget(self.include_recurring_check)
         self.include_completed_check = QCheckBox("완료 업무 포함")
         self.include_completed_check.setObjectName("calendarExportIncludeCompleted")
@@ -111,8 +107,7 @@ class CalendarExportDialog(QDialog):
         root.addWidget(option_box)
 
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("내보내기")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
@@ -139,9 +134,7 @@ class CalendarExportDialog(QDialog):
             scope=scope,
             query=self._query if scope is CalendarExportScope.CURRENT_LIST else None,
             selected_task_ids=(
-                self._selected_task_ids
-                if scope is CalendarExportScope.SELECTED_TASKS
-                else ()
+                self._selected_task_ids if scope is CalendarExportScope.SELECTED_TASKS else ()
             ),
             date_from=(
                 cast(date, self.date_from_edit.date().toPython())

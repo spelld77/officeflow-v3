@@ -18,6 +18,7 @@ from PySide6.QtCore import (
     QThread,
     QTimer,
     QUrl,
+    Slot,
 )
 from PySide6.QtGui import (
     QAction,
@@ -47,8 +48,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from officeflow import __version__
+from officeflow.application.attachment_documents import InternalRecoveryReport
 from officeflow.application.attachment_export import AttachmentExportService, FileReference
 from officeflow.application.attachment_search import AttachmentSearchHit, AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
@@ -176,6 +179,7 @@ class MainWindow(QMainWindow):
         task_save_service: TaskSaveService | None = None,
         reminder_preview_service: ReminderPreviewService | None = None,
         attachment_export_service: AttachmentExportService | None = None,
+        internal_recovery: Callable[[Callable[[], bool]], InternalRecoveryReport] | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -183,20 +187,42 @@ class MainWindow(QMainWindow):
         self._reminder_service = reminder_service
         self._task_save_service = task_save_service
         self._preview_result = ReminderPreviewResult((), True)
-        self._preview_controller = ReminderPreviewController(reminder_preview_service, self) if reminder_preview_service else None
-        self._day_preview_controller = ReminderPreviewController(reminder_preview_service, self) if reminder_preview_service else None
+        self._preview_controller = (
+            ReminderPreviewController(reminder_preview_service, self)
+            if reminder_preview_service
+            else None
+        )
+        self._day_preview_controller = (
+            ReminderPreviewController(reminder_preview_service, self)
+            if reminder_preview_service
+            else None
+        )
         self._preview_limit = 5000
         if self._day_preview_controller:
             self._day_preview_controller.rangeReady.connect(self._apply_day_reminder_preview)
         if self._preview_controller:
             self._preview_controller.ready.connect(self._apply_reminder_preview)
-            self._preview_controller.failed.connect(lambda error: self.statusBar().showMessage(f"알림 미리보기 조회 실패: {error}", 8000))
+            self._preview_controller.failed.connect(
+                lambda error: self.statusBar().showMessage(
+                    f"알림 미리보기 조회 실패: {error}", 8000
+                )
+            )
         self._record_service = record_service
         self._attachment_service = attachment_service
         self._attachment_export_service = attachment_export_service
-        self._attachment_export_controller = AttachmentExportController(attachment_export_service, self, initial_directory=settings.attachment_export_directory) if attachment_export_service else None
+        self._attachment_export_controller = (
+            AttachmentExportController(
+                attachment_export_service,
+                self,
+                initial_directory=settings.attachment_export_directory,
+            )
+            if attachment_export_service
+            else None
+        )
         if self._attachment_export_controller:
-            self._attachment_export_controller.savedDirectory.connect(self._remember_attachment_export_directory)
+            self._attachment_export_controller.savedDirectory.connect(
+                self._remember_attachment_export_directory
+            )
         self._attachment_search_service = attachment_search_service
         self._file_search_active = False
         self._file_page: AttachmentSearchPageWidget | None = None
@@ -245,9 +271,17 @@ class MainWindow(QMainWindow):
         self._hourly_notifications_enabled = hourly_notifications_enabled
         self._automatic_backup_thread: QThread | None = None
         self._automatic_backup_worker: OperationWorker | None = None
+        self._internal_recovery = internal_recovery
+        self._internal_recovery_thread: QThread | None = None
+        self._internal_recovery_worker: OperationWorker | None = None
+        self._internal_recovery_timer = QTimer(self)
+        self._internal_recovery_timer.setSingleShot(True)
+        self._internal_recovery_timer.timeout.connect(self._start_internal_recovery)
         self._automatic_backup_timer = QTimer(self)
         self._automatic_backup_timer.setInterval(15 * 60 * 1_000)
         self._automatic_backup_timer.timeout.connect(self._maybe_automatic_backup)
+        if internal_recovery is not None:
+            self._internal_recovery_timer.start(0)
 
         self.setWindowTitle("OfficeFlow v3")
         self.setWindowIcon(create_app_icon())
@@ -270,7 +304,8 @@ class MainWindow(QMainWindow):
         self._undo_button.hide()
         self.statusBar().addPermanentWidget(self._undo_button)
         self._hourly_controller = HourlyNotificationController(
-            hourly_settings(settings), parent=self,
+            hourly_settings(settings),
+            parent=self,
             save_settings=self._save_hourly_settings,
             other_window=lambda: self._reminder_dialog,
             clock=hourly_notification_clock,
@@ -703,7 +738,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._detail_schedule)
         self._detail_reminders_button = QPushButton("알림 설정…")
         self._detail_reminders_button.setEnabled(False)
-        self._detail_reminders_button.clicked.connect(lambda: self._open_reminder_settings(self._task_service.get(self._selected_task_id)) if self._selected_task_id else None)
+        self._detail_reminders_button.clicked.connect(
+            lambda: (
+                self._open_reminder_settings(self._task_service.get(self._selected_task_id))
+                if self._selected_task_id
+                else None
+            )
+        )
         layout.addWidget(self._detail_reminders_button)
         self._matched_file_button = QPushButton("일치한 첨부파일 열기")
         self._matched_file_button.hide()
@@ -838,7 +879,9 @@ class MainWindow(QMainWindow):
 
     def _refresh_tasks(self, *, preserve_state: bool = False) -> None:
         self._synchronize_reminder_dialog()
-        self._today_reminders.setVisible(self._preview_controller is not None and self._current_view is TaskView.TODAY)
+        self._today_reminders.setVisible(
+            self._preview_controller is not None and self._current_view is TaskView.TODAY
+        )
         if self._file_search_active and self._file_page is not None:
             self._file_page.refresh()
             return
@@ -849,21 +892,28 @@ class MainWindow(QMainWindow):
         try:
             selected_id = self._selected_task_id
             selected_start = self._selected_occurrence_start
-            selected_keys = {
-                (task.id, task.starts_at if task.recurrence_rule else None)
-                for index in self._task_list.selectionModel().selectedIndexes()
-                if (task := self._task_model.task_at(index)) is not None
-            } if preserve_state else set()
+            selected_keys = (
+                {
+                    (task.id, task.starts_at if task.recurrence_rule else None)
+                    for index in self._task_list.selectionModel().selectedIndexes()
+                    if (task := self._task_model.task_at(index)) is not None
+                }
+                if preserve_state
+                else set()
+            )
             scroll_value = self._task_list.verticalScrollBar().value()
             current = self._view_clock()
             loaded_groups = self._task_model.loaded_group_counts if preserve_state else {}
             if self._current_view is TaskView.TODAY:
                 local_day = current.astimezone(ZoneInfo(self._settings.timezone)).date()
-                self._page_title.setText(f"오늘 · {local_day.month}월 {local_day.day}일({WEEKDAYS[local_day.weekday()]})")
+                self._page_title.setText(
+                    f"오늘 · {local_day.month}월 {local_day.day}일({WEEKDAYS[local_day.weekday()]})"
+                )
                 pages = {
                     group: self._refresh_page(
                         group, max(TaskListModel.PAGE_SIZE, loaded_groups.get(group, 0)), current
-                    ) for group in (TaskGroup.OVERDUE, TaskGroup.IN_PROGRESS, TaskGroup.COMPLETED)
+                    )
+                    for group in (TaskGroup.OVERDUE, TaskGroup.IN_PROGRESS, TaskGroup.COMPLETED)
                 }
                 self._task_model.set_group_pages(
                     pages,
@@ -876,7 +926,11 @@ class MainWindow(QMainWindow):
                 self._page_caption.setText(f"남은 업무 {remaining}개 · 완료 {completed}개")
             else:
                 self._page_title.setText(self.VIEW_LABELS[self._current_view][0])
-                count = max(TaskListModel.PAGE_SIZE, self._task_model.loaded_task_count) if preserve_state else TaskListModel.PAGE_SIZE
+                count = (
+                    max(TaskListModel.PAGE_SIZE, self._task_model.loaded_task_count)
+                    if preserve_state
+                    else TaskListModel.PAGE_SIZE
+                )
                 page = self._refresh_page(None, count, current)
                 self._task_model.set_page(page, self._load_flat_page)
                 total = page.total
@@ -914,7 +968,11 @@ class MainWindow(QMainWindow):
                     for row in range(self._task_model.rowCount()):
                         candidate = self._task_model.index(row, 0)
                         task = self._task_model.task_at(candidate)
-                        if task is not None and task.id == selected_id and task.starts_at == selected_start:
+                        if (
+                            task is not None
+                            and task.id == selected_id
+                            and task.starts_at == selected_start
+                        ):
                             index = candidate
                             break
                 if index.isValid():
@@ -925,8 +983,14 @@ class MainWindow(QMainWindow):
                         for row in range(self._task_model.rowCount()):
                             candidate = self._task_model.index(row, 0)
                             task = self._task_model.task_at(candidate)
-                            if task is not None and (task.id, task.starts_at if task.recurrence_rule else None) in selected_keys:
-                                selection.select(candidate, QItemSelectionModel.SelectionFlag.Select)
+                            if (
+                                task is not None
+                                and (task.id, task.starts_at if task.recurrence_rule else None)
+                                in selected_keys
+                            ):
+                                selection.select(
+                                    candidate, QItemSelectionModel.SelectionFlag.Select
+                                )
                         self._task_list.verticalScrollBar().setValue(scroll_value)
                     return
             self._selected_task_id = None
@@ -943,8 +1007,11 @@ class MainWindow(QMainWindow):
         while len(items) < count:
             limit = min(500, count - len(items))
             query = self._build_query(offset=len(items), limit=limit)
-            page = (self._task_service.query(query, now=now) if group is None else
-                    self._task_service.today_flow_page(query, group, now=now))
+            page = (
+                self._task_service.query(query, now=now)
+                if group is None
+                else self._task_service.today_flow_page(query, group, now=now)
+            )
             total = page.total
             items.extend(page.items)
             if not page.has_more or not page.items:
@@ -956,8 +1023,12 @@ class MainWindow(QMainWindow):
             return
         current = self._view_clock()
         previous = self._view_refreshed_at
-        if (previous is not None and current >= previous
-                and current.replace(second=0, microsecond=0) == previous.replace(second=0, microsecond=0)):
+        if (
+            previous is not None
+            and current >= previous
+            and current.replace(second=0, microsecond=0)
+            == previous.replace(second=0, microsecond=0)
+        ):
             crossed = any(
                 previous <= boundary <= current
                 for row in range(self._task_model.rowCount())
@@ -981,8 +1052,11 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
-        if (event.type() in {QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange}
-                and getattr(self, "_view_refresh_ready", False) and self.isActiveWindow()):
+        if (
+            event.type() in {QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange}
+            and getattr(self, "_view_refresh_ready", False)
+            and self.isActiveWindow()
+        ):
             QTimer.singleShot(0, self._refresh_time_sensitive_view)
 
     def _refresh_calendar(self, _year: int | None = None, _month: int | None = None) -> None:
@@ -998,7 +1072,9 @@ class MainWindow(QMainWindow):
             )
             self._calendar_page.set_overview(overview)
             self._request_reminder_preview()
-            day_loaded = self._refresh_calendar_day(self._calendar_page.selected_date, request_preview=False)
+            day_loaded = self._refresh_calendar_day(
+                self._calendar_page.selected_date, request_preview=False
+            )
             mode = " · 요약 표시" if overview.summary_mode else ""
             if day_loaded:
                 self.statusBar().showMessage(f"캘린더 일정 {overview.total}개{mode}", 1800)
@@ -1016,7 +1092,9 @@ class MainWindow(QMainWindow):
             self._calendar_page.set_day_tasks(tasks)
             self._calendar_page.set_reminder_preview(self._preview_result)
             if self._day_preview_controller and request_preview:
-                self._day_preview_controller.request(selected_date, selected_date, self._settings.timezone, self._view_clock())
+                self._day_preview_controller.request(
+                    selected_date, selected_date, self._settings.timezone, self._view_clock()
+                )
             return True
         except Exception as error:
             logger.exception("Failed to refresh calendar day")
@@ -1045,7 +1123,9 @@ class MainWindow(QMainWindow):
         )
 
     def _load_flat_page(self, offset: int, limit: int) -> TaskPage:
-        return self._task_service.query(self._build_query(offset=offset, limit=limit), now=self._view_clock())
+        return self._task_service.query(
+            self._build_query(offset=offset, limit=limit), now=self._view_clock()
+        )
 
     def _load_group_page(self, group: TaskGroup, offset: int, limit: int) -> TaskPage:
         return self._task_service.today_flow_page(
@@ -1127,6 +1207,11 @@ class MainWindow(QMainWindow):
     def _open_attachment_id(self, attachment_id: int) -> None:
         if self._attachment_service is None:
             return
+        if self._attachment_service.lifecycle:
+            from officeflow.presentation.document_actions import file_actions
+
+            file_actions(self, self._attachment_service.lifecycle).open("attachment", attachment_id)
+            return
         try:
             path = self._attachment_service.path_for_open(attachment_id)
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
@@ -1169,14 +1254,19 @@ class MainWindow(QMainWindow):
         self._last_record_tab = key
 
     def _show_task_records(
-        self, task: Task, *, occurrence_start: datetime | None = None,
-        initial_tab: str | None = None, attachment_id: int | None = None,
+        self,
+        task: Task,
+        *,
+        occurrence_start: datetime | None = None,
+        initial_tab: str | None = None,
+        attachment_id: int | None = None,
     ) -> None:
         if self._record_service is None:
             return
         dialog = next(
             (
-                existing for existing in self._file_dialogs
+                existing
+                for existing in self._file_dialogs
                 if isinstance(existing, TaskRecordsDialog)
                 and existing._task_id == task.id
                 and existing._occurrence_start == occurrence_start
@@ -1186,11 +1276,15 @@ class MainWindow(QMainWindow):
         )
         if dialog is None:
             dialog = TaskRecordsDialog(
-                task, task_service=self._task_service, record_service=self._record_service,
-                attachment_service=self._attachment_service, occurrence_start=occurrence_start,
+                task,
+                task_service=self._task_service,
+                record_service=self._record_service,
+                attachment_service=self._attachment_service,
+                occurrence_start=occurrence_start,
                 attachment_export_service=self._attachment_export_service,
                 attachment_export_directory=self._settings.attachment_export_directory,
-                initial_tab=initial_tab or self._last_record_tab, parent=self,
+                initial_tab=initial_tab or self._last_record_tab,
+                parent=self,
             )
             dialog.changed.connect(self._refresh_tasks)
             self._keep_file_dialog(dialog)
@@ -1213,7 +1307,8 @@ class MainWindow(QMainWindow):
         try:
             task = self._task_service.get_including_deleted(hit.task_id)
             self._show_task_records(
-                task, initial_tab="attachments" if attachments else "result",
+                task,
+                initial_tab="attachments" if attachments else "result",
                 attachment_id=hit.attachment_id if attachments else None,
             )
         except LookupError as error:
@@ -1382,7 +1477,9 @@ class MainWindow(QMainWindow):
             records = menu.addAction("업무 기록 열기")
             records.triggered.connect(self._open_selected_records)
             checklist = menu.addAction("체크리스트 보기")
-            checklist.triggered.connect(lambda: self._open_selected_records(initial_tab="checklist"))
+            checklist.triggered.connect(
+                lambda: self._open_selected_records(initial_tab="checklist")
+            )
             work_log = menu.addAction("업무일지 보기 · 작성")
             work_log.triggered.connect(lambda: self._open_selected_records(initial_tab="work_log"))
             if self._attachment_service is not None:
@@ -1423,7 +1520,11 @@ class MainWindow(QMainWindow):
 
         if menu.actions():
             menu.addSeparator()
-        if not calendar_actions and self._attachment_service is not None and self._record_service is not None:
+        if (
+            not calendar_actions
+            and self._attachment_service is not None
+            and self._record_service is not None
+        ):
             attachments = menu.addAction("첨부파일 보기 · 관리…")
             attachments.triggered.connect(self._open_selected_attachments)
         if not calendar_actions and self._record_service is not None:
@@ -1562,13 +1663,21 @@ class MainWindow(QMainWindow):
     def _apply_general_settings(self, edited: AppSettings) -> None:
         previous = self._settings
         # A modeless editor must not overwrite date flags/view/geometry changed meanwhile.
-        updated = replace(self._settings, **{
-            key: getattr(edited, key) for key in (
-                "minimize_to_tray", "start_with_windows", "global_quick_add_shortcut",
-                "missed_reminder_grace_minutes", "automatic_backup_enabled",
-                "automatic_backup_interval_hours", "automatic_backup_keep",
-            )
-        })
+        updated = replace(
+            self._settings,
+            **{
+                key: getattr(edited, key)
+                for key in (
+                    "minimize_to_tray",
+                    "start_with_windows",
+                    "global_quick_add_shortcut",
+                    "missed_reminder_grace_minutes",
+                    "automatic_backup_enabled",
+                    "automatic_backup_interval_hours",
+                    "automatic_backup_keep",
+                )
+            },
+        )
         try:
             self._startup_manager.set_enabled(updated.start_with_windows)
         except OSError as error:
@@ -1620,7 +1729,9 @@ class MainWindow(QMainWindow):
     def _on_hourly_state(self, state: HourlyState) -> None:
         if self._shutdown_done:
             return
-        self._settings = with_hourly_settings(self._settings, self._hourly_controller.service.settings)
+        self._settings = with_hourly_settings(
+            self._settings, self._hourly_controller.service.settings
+        )
         summary = self._hourly_controller.status_text(state)
         if not state.enabled:
             short = "매시 알림 꺼짐"
@@ -1636,9 +1747,13 @@ class MainWindow(QMainWindow):
         # Size to the concise label, including menu arrow/padding: never clip the text.
         self._hourly_button.setFixedWidth(self._hourly_button.sizeHint().width())
         self._hourly_button.setToolTip(summary + (f"\n{state.error}" if state.error else ""))
-        self._hourly_button.setVisible(not state.enabled or state.reason is None or state.error is not None)
+        self._hourly_button.setVisible(
+            not state.enabled or state.reason is None or state.error is not None
+        )
         if self._tray_icon is not None:
-            self._tray_icon.setToolTip(f"OfficeFlow · {summary}" + (" · 설정/표시 오류" if state.error else ""))
+            self._tray_icon.setToolTip(
+                f"OfficeFlow · {summary}" + (" · 설정/표시 오류" if state.error else "")
+            )
 
     def _open_data_management(self, *, cleanup: bool = False) -> None:
         if self._export_service is None or self._backup_manager is None:
@@ -1725,7 +1840,9 @@ class MainWindow(QMainWindow):
         if isinstance(result, BackupInfo):
             message = f"자동 백업을 완료했습니다: {result.path.name}"
             if result.missing_attachments:
-                message += f" · 기존 누락 첨부 {len(result.missing_attachments)}개는 포함되지 않았습니다."
+                message += (
+                    f" · 기존 누락 첨부 {len(result.missing_attachments)}개는 포함되지 않았습니다."
+                )
                 logger.warning(message)
             self.statusBar().showMessage(message, 8000 if result.missing_attachments else 4000)
 
@@ -1736,6 +1853,68 @@ class MainWindow(QMainWindow):
     def _automatic_backup_finished(self) -> None:
         self._automatic_backup_worker = None
         self._automatic_backup_thread = None
+
+    @Slot()
+    def _start_internal_recovery(self) -> None:
+        if (
+            self._shutdown_done
+            or self._internal_recovery is None
+            or self._internal_recovery_thread is not None
+        ):
+            return
+        thread = QThread(self)
+        worker = OperationWorker(self._internal_recovery)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(
+            self._internal_recovery_succeeded, Qt.ConnectionType.QueuedConnection
+        )
+        worker.failed.connect(self._internal_recovery_failed, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            self._internal_recovery_finished, Qt.ConnectionType.QueuedConnection
+        )
+        self._internal_recovery_thread = thread
+        self._internal_recovery_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _internal_recovery_succeeded(self, result: object) -> None:
+        if self._shutdown_done or not isinstance(result, InternalRecoveryReport):
+            return
+        for warning in result.warnings:
+            logger.warning(warning)
+        previous = getattr(self, "_last_internal_pending", None)
+        self._last_internal_pending = result.pending
+        if not result.recovered and not result.warnings and result.pending == previous:
+            return
+        if not result.recovered and not result.pending and not result.warnings:
+            return
+        self.statusBar().showMessage(
+            f"내부 파일 작업 점검 · 완료 확인 {result.recovered}개 · 보존/추가 확인 {result.pending}개",
+            15_000,
+        )
+
+    @Slot(object)
+    def _internal_recovery_failed(self, error: object) -> None:
+        logger.error("내부 파일 작업 복구 점검 실패: %s", error)
+        if not self._shutdown_done:
+            self.statusBar().showMessage(
+                "내부 파일 작업 점검이 필요합니다. 관련 파일을 보호하고 있습니다.", 15_000
+            )
+
+    @Slot()
+    def _internal_recovery_finished(self) -> None:
+        thread = self._internal_recovery_thread
+        if thread is not None and isValid(thread):
+            thread.wait()
+        self._internal_recovery_thread = None
+        self._internal_recovery_worker = None
+        if not self._shutdown_done:
+            self._internal_recovery_timer.start(1000)
+        if thread is not None and isValid(thread):
+            thread.deleteLater()
 
     def _open_selected_task(self) -> None:
         if self._selected_task_id is None:
@@ -1817,6 +1996,13 @@ class MainWindow(QMainWindow):
     def _delete_selected_permanently(self) -> None:
         if self._selected_task_id is None:
             return
+        if self._attachment_service and self._attachment_service.lifecycle:
+            from officeflow.presentation.document_actions import file_actions
+
+            file_actions(self, self._attachment_service.lifecycle).delete(
+                "task", self._selected_task_id, self._refresh_tasks
+            )
+            return
         try:
             task = self._task_service.get_including_deleted(self._selected_task_id)
         except LookupError as error:
@@ -1886,7 +2072,9 @@ class MainWindow(QMainWindow):
         try:
             task = self._task_service.get_including_deleted(self._selected_task_id)
             self._show_task_records(
-                task, occurrence_start=self._selected_occurrence_start, initial_tab=initial_tab,
+                task,
+                occurrence_start=self._selected_occurrence_start,
+                initial_tab=initial_tab,
             )
         except Exception as error:
             self._show_error("업무 기록을 열지 못했습니다.", error)
@@ -1948,11 +2136,20 @@ class MainWindow(QMainWindow):
 
     def _open_editor(self, task: Task | None, *, initial_date: date | None = None) -> None:
         for existing in self._file_dialogs:
-            if isinstance(existing, TaskEditorDialog) and ((existing._task is None and task is None) or (existing._task is not None and task is not None and existing._task.id == task.id)):
+            if isinstance(existing, TaskEditorDialog) and (
+                (existing._task is None and task is None)
+                or (
+                    existing._task is not None and task is not None and existing._task.id == task.id
+                )
+            ):
                 existing.raise_()
                 existing.activateWindow()
                 return
-        reminders = self._reminder_service.reminders_for_task(task.id) if self._reminder_service and task and task.id else ()
+        reminders = (
+            self._reminder_service.reminders_for_task(task.id)
+            if self._reminder_service and task and task.id
+            else ()
+        )
         reminder_rules = (
             self._reminder_service.rules_for_task(task.id)
             if self._reminder_service is not None and task is not None and task.id is not None
@@ -1963,7 +2160,9 @@ class MainWindow(QMainWindow):
             task=task,
             reminder_rules=reminder_rules,
             reminders=reminders,
-            deliveries=self._reminder_service.task_deliveries(task.id) if self._reminder_service and task and task.id else (),
+            deliveries=self._reminder_service.task_deliveries(task.id)
+            if self._reminder_service and task and task.id
+            else (),
             on_save=lambda editor: self._save_editor(editor, task, reminders),
             initial_date=initial_date,
             parent=self,
@@ -1971,10 +2170,18 @@ class MainWindow(QMainWindow):
         editor.setStyleSheet(LIGHT_STYLESHEET)
         self._keep_file_dialog(editor)
 
-    def _save_editor(self, editor: TaskEditorDialog, task: Task | None, reminders: tuple[Reminder, ...]) -> None:
+    def _save_editor(
+        self, editor: TaskEditorDialog, task: Task | None, reminders: tuple[Reminder, ...]
+    ) -> None:
         if self._task_save_service:
-            saved = self._task_save_service.save(editor.draft(), task_id=task.id if task else None,
-                edits=editor.reminder_edits(), expected_task=task, expected_rules=reminders, now=self._view_clock())
+            saved = self._task_save_service.save(
+                editor.draft(),
+                task_id=task.id if task else None,
+                edits=editor.reminder_edits(),
+                expected_task=task,
+                expected_rules=reminders,
+                now=self._view_clock(),
+            )
         else:
             saved = (
                 self._task_service.create(editor.draft())
@@ -1982,7 +2189,9 @@ class MainWindow(QMainWindow):
                 else self._task_service.update(task.id, editor.draft())
             )
             if self._reminder_service and saved.id:
-                self._reminder_service.replace_rules(saved.id, editor.draft().reminder_rules, now=self._view_clock())
+                self._reminder_service.replace_rules(
+                    saved.id, editor.draft().reminder_rules, now=self._view_clock()
+                )
         self._selected_task_id = saved.id
         self._selected_occurrence_start = None
         self._refresh_tasks()
@@ -2000,17 +2209,51 @@ class MainWindow(QMainWindow):
         task_id = task.id
         reminder_service = self._reminder_service
         rules = self._reminder_service.reminders_for_task(task.id)
-        edits = tuple(ReminderEdit(ReminderRuleInput(r.relation, r.offset_minutes, r.absolute_at, r.enabled), r.id) for r in rules)
+        edits = tuple(
+            ReminderEdit(
+                ReminderRuleInput(r.relation, r.offset_minutes, r.absolute_at, r.enabled), r.id
+            )
+            for r in rules
+        )
+
         def save(edits: tuple[ReminderEdit, ...]) -> None:
-            draft = TaskDraft(title=task.title, description=task.description, priority=task.priority, status=task.status,
-                is_pinned=task.is_pinned, all_day=task.all_day, starts_at=task.starts_at, ends_at=task.ends_at,
-                timezone=task.timezone, recurrence_rule=task.recurrence_rule, reminder_rules=tuple(e.rule for e in edits))
+            draft = TaskDraft(
+                title=task.title,
+                description=task.description,
+                priority=task.priority,
+                status=task.status,
+                is_pinned=task.is_pinned,
+                all_day=task.all_day,
+                starts_at=task.starts_at,
+                ends_at=task.ends_at,
+                timezone=task.timezone,
+                recurrence_rule=task.recurrence_rule,
+                reminder_rules=tuple(e.rule for e in edits),
+            )
             if self._task_save_service:
-                self._task_save_service.save(draft, task_id=task.id, edits=edits, expected_task=task, expected_rules=rules, now=self._view_clock())
+                self._task_save_service.save(
+                    draft,
+                    task_id=task.id,
+                    edits=edits,
+                    expected_task=task,
+                    expected_rules=rules,
+                    now=self._view_clock(),
+                )
             else:
-                reminder_service.replace_rules(task_id, draft.reminder_rules, now=self._view_clock())
+                reminder_service.replace_rules(
+                    task_id, draft.reminder_rules, now=self._view_clock()
+                )
             self._refresh_tasks(preserve_state=True)
-        self._keep_file_dialog(ReminderSettingsDialog(task, edits, save=save, deliveries=reminder_service.task_deliveries(task_id), parent=self))
+
+        self._keep_file_dialog(
+            ReminderSettingsDialog(
+                task,
+                edits,
+                save=save,
+                deliveries=reminder_service.task_deliveries(task_id),
+                parent=self,
+            )
+        )
 
     def _request_reminder_preview(self) -> None:
         if not self._preview_controller or self._shutdown_done:
@@ -2018,7 +2261,9 @@ class MainWindow(QMainWindow):
         now = self._view_clock()
         if self._calendar_active:
             start, end = self._calendar_page.visible_date_range
-            self._preview_controller.request(start, end - timedelta(days=1), self._settings.timezone, now)
+            self._preview_controller.request(
+                start, end - timedelta(days=1), self._settings.timezone, now
+            )
             if self._day_preview_controller:
                 day = self._calendar_page.selected_date
                 self._day_preview_controller.request(day, day, self._settings.timezone, now)
@@ -2034,33 +2279,67 @@ class MainWindow(QMainWindow):
             self._calendar_page.set_reminder_preview(result)
         else:
             today = self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
-            self._today_reminders.set_result(ReminderPreviewResult(result.for_date(today, self._settings.timezone), result.complete))
+            self._today_reminders.set_result(
+                ReminderPreviewResult(
+                    result.for_date(today, self._settings.timezone), result.complete
+                )
+            )
 
     def _open_preview_record(self, item: ReminderPreviewItem) -> None:
-        self._show_task_records(item.task, occurrence_start=item.occurrence_start if item.task.recurrence_rule else None)
+        self._show_task_records(
+            item.task, occurrence_start=item.occurrence_start if item.task.recurrence_rule else None
+        )
 
     def _select_preview_detail(self, item: ReminderPreviewItem) -> None:
         self._selected_task_id = item.task.id
-        self._selected_occurrence_start = item.occurrence_start if item.task.recurrence_rule else None
+        self._selected_occurrence_start = (
+            item.occurrence_start if item.task.recurrence_rule else None
+        )
         self._update_detail(item.task)
-        self._detail_schedule.setText(self._detail_schedule.text() + "\n선택 알림: " + format_datetime(item.effective_at, self._settings.timezone) + " · " + item.display_status)
+        self._detail_schedule.setText(
+            self._detail_schedule.text()
+            + "\n선택 알림: "
+            + format_datetime(item.effective_at, self._settings.timezone)
+            + " · "
+            + item.display_status
+        )
         self._apply_responsive_layout()
 
-    def _apply_day_reminder_preview(self, date_range: tuple[date, date], result: ReminderPreviewResult) -> None:
-        if not self._shutdown_done and self._calendar_active and date_range[0] == self._calendar_page.selected_date:
+    def _apply_day_reminder_preview(
+        self, date_range: tuple[date, date], result: ReminderPreviewResult
+    ) -> None:
+        if (
+            not self._shutdown_done
+            and self._calendar_active
+            and date_range[0] == self._calendar_page.selected_date
+        ):
             self._calendar_page.set_day_reminder_preview(date_range[0], result)
 
     def _reload_day_reminder_preview(self) -> None:
         if self._day_preview_controller:
             self._preview_limit = min(100000, self._preview_limit * 2)
             day = self._calendar_page.selected_date
-            self._day_preview_controller.request(day, day, self._settings.timezone, self._view_clock(), limit=self._preview_limit, seconds=5.0)
+            self._day_preview_controller.request(
+                day,
+                day,
+                self._settings.timezone,
+                self._view_clock(),
+                limit=self._preview_limit,
+                seconds=5.0,
+            )
 
     def _reload_today_reminder_preview(self) -> None:
         if self._preview_controller:
             self._preview_limit = min(100000, self._preview_limit * 2)
             day = self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
-            self._preview_controller.request(day, day, self._settings.timezone, self._view_clock(), limit=self._preview_limit, seconds=5.0)
+            self._preview_controller.request(
+                day,
+                day,
+                self._settings.timezone,
+                self._view_clock(),
+                limit=self._preview_limit,
+                seconds=5.0,
+            )
 
     def _open_calendar_new(self, selected_date: date) -> None:
         self._open_editor(None, initial_date=selected_date)
@@ -2109,10 +2388,16 @@ class MainWindow(QMainWindow):
         self._apply_responsive_layout()
 
     def _update_detail(self, task: Task | None) -> None:
-        self._detail_reminders_button.setVisible(self._reminder_service is not None and task is not None and task.deleted_at is None)
+        self._detail_reminders_button.setVisible(
+            self._reminder_service is not None and task is not None and task.deleted_at is None
+        )
         self._detail_reminders_button.setEnabled(task is not None and task.deleted_at is None)
-        self._matched_file_button.setVisible(task is not None and task.matched_attachment_id is not None)
-        self._matched_file_button.setProperty("attachmentId", task.matched_attachment_id if task else None)
+        self._matched_file_button.setVisible(
+            task is not None and task.matched_attachment_id is not None
+        )
+        self._matched_file_button.setProperty(
+            "attachmentId", task.matched_attachment_id if task else None
+        )
         self._matched_file_button.setToolTip(task.matched_attachment_name if task else "")
         if task is None:
             self._detail_title.setText("업무 상세")
@@ -2177,8 +2462,20 @@ class MainWindow(QMainWindow):
                 logger.exception("업무 알림 규칙을 읽지 못했습니다.")
             else:
                 if reminder_rules:
-                    edits = tuple(ReminderEdit(rule, r.id) for rule, r in zip(reminder_rules, self._reminder_service.reminders_for_task(task.id), strict=True))
-                    reminder_text = reminder_summary(edits, task, self._view_clock(), self._reminder_service.task_deliveries(task.id))
+                    edits = tuple(
+                        ReminderEdit(rule, r.id)
+                        for rule, r in zip(
+                            reminder_rules,
+                            self._reminder_service.reminders_for_task(task.id),
+                            strict=True,
+                        )
+                    )
+                    reminder_text = reminder_summary(
+                        edits,
+                        task,
+                        self._view_clock(),
+                        self._reminder_service.task_deliveries(task.id),
+                    )
                     self._detail_schedule.setText(
                         f"{self._detail_schedule.text()}\n알림: {reminder_text}"
                     )
@@ -2289,7 +2586,9 @@ class MainWindow(QMainWindow):
                 grace_minutes=self._settings.missed_reminder_grace_minutes,
                 recover_unhandled=self._reminder_recovery_pending,
             )
-            self._reminder_timer.setInterval(1_000 if self._reminder_service.poll_pending else 30_000)
+            self._reminder_timer.setInterval(
+                1_000 if self._reminder_service.poll_pending else 30_000
+            )
             self._refresh_snoozed_indicators()
             if alerts:
                 self._present_reminder_alerts(alerts)
@@ -2305,7 +2604,12 @@ class MainWindow(QMainWindow):
 
     def _present_reminder_alerts(self, alerts: tuple[ReminderAlert, ...]) -> None:
         if self._reminder_service:
-            alerts = tuple(a for a in alerts if a.delivery.id is not None and self._reminder_service.alert_is_active(a.delivery.id))
+            alerts = tuple(
+                a
+                for a in alerts
+                if a.delivery.id is not None
+                and self._reminder_service.alert_is_active(a.delivery.id)
+            )
         if not alerts:
             return
         self._show_system_reminder(alerts)
@@ -2388,23 +2692,36 @@ class MainWindow(QMainWindow):
         delivery_id = alert.delivery.id
         assert delivery_id is not None
         for dialog in self._file_dialogs:
-            if (isinstance(dialog, QMessageBox) and dialog.isVisible()
-                    and dialog.property("reminderCompletionId") == delivery_id):
+            if (
+                isinstance(dialog, QMessageBox)
+                and dialog.isVisible()
+                and dialog.property("reminderCompletionId") == delivery_id
+            ):
                 dialog.raise_()
                 dialog.activateWindow()
                 return
         occurrence_only = bool(alert.task.recurrence_rule and alert.occurrence_start)
-        title = "이번 회차 완료" if occurrence_only else "업무 전체 완료" if alert.task.recurrence_rule else "업무 완료"
+        title = (
+            "이번 회차 완료"
+            if occurrence_only
+            else "업무 전체 완료"
+            if alert.task.recurrence_rule
+            else "업무 완료"
+        )
         scope = (alert.task.recurrence_rule, alert.occurrence_start)
         explanation = (
             "이번 반복 회차를 완료하고 이 회차의 남은 알림·재알림을 중단합니다.\n다음 반복 회차의 알림은 유지됩니다."
-            if occurrence_only else
-            "업무 자체를 완료하고 이 업무의 남은 알림·재알림을 모두 중단합니다."
+            if occurrence_only
+            else "업무 자체를 완료하고 이 업무의 남은 알림·재알림을 모두 중단합니다."
         )
         if alert.task.recurrence_rule and not occurrence_only:
-            explanation += "\n날짜 지정 알림은 특정 회차에 연결되어 있지 않아 이후 반복 알림도 모두 멈춥니다."
+            explanation += (
+                "\n날짜 지정 알림은 특정 회차에 연결되어 있지 않아 이후 반복 알림도 모두 멈춥니다."
+            )
         box = QMessageBox(
-            QMessageBox.Icon.Question, title, f"{alert.task.title}\n\n{explanation}",
+            QMessageBox.Icon.Question,
+            title,
+            f"{alert.task.title}\n\n{explanation}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             self._reminder_dialog or self,
         )
@@ -2420,15 +2737,21 @@ class MainWindow(QMainWindow):
             popup.finished.connect(box.reject)
             box.finished.connect(lambda _result: popup.finished.disconnect(box.reject))
         box.finished.connect(
-            lambda result: self._handle_reminder_action(delivery_id, "complete", confirmed_scope=scope)
-            if result == QMessageBox.StandardButton.Yes else None
+            lambda result: (
+                self._handle_reminder_action(delivery_id, "complete", confirmed_scope=scope)
+                if result == QMessageBox.StandardButton.Yes
+                else None
+            )
         )
         self._keep_file_dialog(box, always_on_top=True)
         box.raise_()
         box.activateWindow()
 
     def _handle_reminder_action(
-        self, delivery_id: int, action: str, *,
+        self,
+        delivery_id: int,
+        action: str,
+        *,
         confirmed_scope: tuple[str | None, datetime | None] | None = None,
     ) -> None:
         if self._reminder_service is None:
@@ -2436,14 +2759,18 @@ class MainWindow(QMainWindow):
         alert = self._reminder_service.alert_for_delivery(delivery_id)
         if alert is None:
             self._synchronize_reminder_dialog()
-            self.statusBar().showMessage("이미 처리되거나 변경된 알림입니다. 최신 상태를 반영했습니다.", 5000)
+            self.statusBar().showMessage(
+                "이미 처리되거나 변경된 알림입니다. 최신 상태를 반영했습니다.", 5000
+            )
             return
         if action == "complete":
             if confirmed_scope is None:
                 self._confirm_reminder_completion(alert)
                 return
             if confirmed_scope != (alert.task.recurrence_rule, alert.occurrence_start):
-                self.statusBar().showMessage("업무의 반복 범위가 변경되었습니다. 확인 후 다시 완료해 주세요.", 5000)
+                self.statusBar().showMessage(
+                    "업무의 반복 범위가 변경되었습니다. 확인 후 다시 완료해 주세요.", 5000
+                )
                 return
         snoozed_until: datetime | None = None
         action_name = action
@@ -2468,7 +2795,8 @@ class MainWindow(QMainWindow):
         self._refresh_tasks()
         messages = {
             "complete": "이번 반복 회차를 완료했습니다. 다음 회차의 알림은 유지됩니다."
-                if alert.task.recurrence_rule and alert.occurrence_start else "업무를 완료하고 남은 알림을 중단했습니다.",
+            if alert.task.recurrence_rule and alert.occurrence_start
+            else "업무를 완료하고 남은 알림을 중단했습니다.",
             "defer": "업무를 대기로 전환했습니다. 다음 예약 알림은 유지됩니다.",
             "acknowledge": "이번 알림만 확인했습니다. 업무 상태와 다른 알림은 유지됩니다.",
         }
@@ -2615,10 +2943,14 @@ class MainWindow(QMainWindow):
     def shutdown(self) -> None:
         if self._shutdown_done:
             return
+        from officeflow.presentation.document_actions import stop_file_actions
+
+        stop_file_actions(self)
         self._shutdown_done = True
         self._force_quit = True
         self.statusBar().showMessage("작업을 취소하고 자료를 안전하게 마무리한 뒤 종료합니다…")
         self._automatic_backup_timer.stop()
+        self._internal_recovery_timer.stop()
         self._view_timer.stop()
         self._hourly_controller.shutdown()
         if self._preview_controller:
@@ -2651,9 +2983,24 @@ class MainWindow(QMainWindow):
             self._automatic_backup_worker.cancel()
         if self._automatic_backup_thread is not None:
             self._automatic_backup_thread.quit()
-            finish_thread(self._automatic_backup_thread, parent=self, label="자동 백업을 안전하게 마무리하고 있습니다…")
+            finish_thread(
+                self._automatic_backup_thread,
+                parent=self,
+                label="자동 백업을 안전하게 마무리하고 있습니다…",
+            )
         self._automatic_backup_thread = None
         self._automatic_backup_worker = None
+        if self._internal_recovery_worker is not None:
+            self._internal_recovery_worker.cancel()
+        if self._internal_recovery_thread is not None:
+            self._internal_recovery_thread.quit()
+            finish_thread(
+                self._internal_recovery_thread,
+                parent=self,
+                label="내부 파일 점검을 안전하게 마무리하고 있습니다…",
+            )
+        self._internal_recovery_thread = None
+        self._internal_recovery_worker = None
         if self._global_hotkey is not None:
             self._global_hotkey.stop()
             self._global_hotkey = None
@@ -2860,11 +3207,15 @@ class MainWindow(QMainWindow):
             try:
                 self._save_settings(self._settings)
             except OSError:
-                self.statusBar().showMessage("파일은 저장되었지만 마지막 저장 폴더 설정은 저장하지 못했습니다.", 8000)
+                self.statusBar().showMessage(
+                    "파일은 저장되었지만 마지막 저장 폴더 설정은 저장하지 못했습니다.", 8000
+                )
 
     def _save_search_file(self, value: object) -> None:
         if isinstance(value, AttachmentSearchHit) and self._attachment_export_controller:
-            self._attachment_export_controller.choose((FileReference.attachment(value.attachment_id),))
+            self._attachment_export_controller.choose(
+                (FileReference.attachment(value.attachment_id),)
+            )
 
     @staticmethod
     def _named_label(text: str, object_name: str) -> QLabel:

@@ -8,15 +8,23 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from threading import RLock
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
-from officeflow.application.file_operations import FileJobCanceledError, FileOperationCoordinator
+if TYPE_CHECKING:
+    from officeflow.application.document_lifecycle import DocumentLifecycle
+
+from officeflow.application.file_operations import (
+    FileInUseError,
+    FileJobCanceledError,
+    FileOperationCoordinator,
+)
 from officeflow.application.tasks import TaskService
 from officeflow.domain.attachment import (
     Attachment,
     AttachmentCheckStatus,
     AttachmentMove,
     FileObservation,
+    validate_display_name,
 )
 
 
@@ -74,7 +82,13 @@ class AttachmentQuickSample:
 
 
 class AttachmentRepository(Protocol):
-    def update_observation_if_current(self, expected: Attachment, observation: FileObservation | None, status: AttachmentCheckStatus, checked_at: datetime) -> Attachment | None: ...
+    def update_observation_if_current(
+        self,
+        expected: Attachment,
+        observation: FileObservation | None,
+        status: AttachmentCheckStatus,
+        checked_at: datetime,
+    ) -> Attachment | None: ...
 
     def is_path_registered(self, relative_path: str) -> bool: ...
 
@@ -97,15 +111,25 @@ class AttachmentRepository(Protocol):
 
     def delete_attachment(self, attachment_id: int) -> None: ...
 
-    def move_attachment(self, task_id: int, attachment_id: int, movement: AttachmentMove) -> tuple[Attachment, ...]: ...
+    def move_attachment(
+        self, task_id: int, attachment_id: int, movement: AttachmentMove
+    ) -> tuple[Attachment, ...]: ...
 
 
 class AttachmentStorage(Protocol):
     coordinator: FileOperationCoordinator
+
     @property
     def root(self) -> Path: ...
 
-    def observe(self, relative_path: str, *, cancel_requested: Callable[[], bool] | None = None, progress: Callable[[int, int], None] | None = None, now: datetime | None = None) -> FileObservation: ...
+    def observe(
+        self,
+        relative_path: str,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        now: datetime | None = None,
+    ) -> FileObservation: ...
 
     def protected_read(self, relative_path: str) -> AbstractContextManager[BinaryIO]: ...
     def operation_lock(self) -> AbstractContextManager[bool]: ...
@@ -123,7 +147,10 @@ class AttachmentStorage(Protocol):
     def exists(self, relative_path: str) -> bool: ...
 
     def checksum(
-        self, relative_path: str, *, cancel_requested: Callable[[], bool] | None = None,
+        self,
+        relative_path: str,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
         progress: Callable[[int, int], None] | None = None,
     ) -> str: ...
 
@@ -149,10 +176,13 @@ class AttachmentService:
         self._listeners: list[Callable[[int], None]] = []
         self._listener_lock = RLock()
         self.coordinator = storage.coordinator
+        self.lifecycle: DocumentLifecycle | None = None
         task_service.set_file_delete_guard(self._task_delete_guard)
 
     @contextmanager
     def _task_delete_guard(self, task_id: int) -> Iterator[None]:
+        if self.lifecycle is not None:
+            raise AttachmentOperationError("보관본을 포함한 삭제 계획을 확인한 뒤 영구 삭제하세요.")
         with self.coordinator.gate:
             self.coordinator.assert_not_pinned(self._repository.paths_for_task(task_id))
             yield
@@ -164,34 +194,82 @@ class AttachmentService:
     def get_metadata(self, attachment_id: int) -> Attachment:
         return self._get_required(attachment_id)
 
-    def quick_samples(self, attachments: tuple[Attachment, ...], *, cancel_requested: Callable[[], bool]) -> tuple[AttachmentQuickSample, ...]:
+    def quick_samples(
+        self, attachments: tuple[Attachment, ...], *, cancel_requested: Callable[[], bool]
+    ) -> tuple[AttachmentQuickSample, ...]:
         samples = []
         for attachment in attachments:
             if cancel_requested():
                 break
             try:
                 stat = self._storage.resolve(attachment.relative_path).stat()
-                samples.append(AttachmentQuickSample(attachment.id_required, attachment.relative_path, stat.st_size, stat.st_mtime_ns, None))
+                samples.append(
+                    AttachmentQuickSample(
+                        attachment.id_required,
+                        attachment.relative_path,
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                        None,
+                    )
+                )
             except FileNotFoundError:
-                samples.append(AttachmentQuickSample(attachment.id_required, attachment.relative_path, None, None, AttachmentCheckStatus.MISSING))
+                samples.append(
+                    AttachmentQuickSample(
+                        attachment.id_required,
+                        attachment.relative_path,
+                        None,
+                        None,
+                        AttachmentCheckStatus.MISSING,
+                    )
+                )
             except (OSError, AttachmentOperationError):
-                samples.append(AttachmentQuickSample(attachment.id_required, attachment.relative_path, None, None, AttachmentCheckStatus.UNAVAILABLE))
+                samples.append(
+                    AttachmentQuickSample(
+                        attachment.id_required,
+                        attachment.relative_path,
+                        None,
+                        None,
+                        AttachmentCheckStatus.UNAVAILABLE,
+                    )
+                )
         return tuple(samples)
 
     def is_path_registered(self, relative_path: str) -> bool:
         return self._repository.is_path_registered(relative_path)
 
-    def observe_result(self, expected: Attachment, observation: FileObservation | None, status: AttachmentCheckStatus, checked_at: datetime, *, notify: bool = True) -> Attachment:
-        saved = self._repository.update_observation_if_current(expected, observation, status, checked_at)
+    def observe_result(
+        self,
+        expected: Attachment,
+        observation: FileObservation | None,
+        status: AttachmentCheckStatus,
+        checked_at: datetime,
+        *,
+        notify: bool = True,
+    ) -> Attachment:
+        saved = self._repository.update_observation_if_current(
+            expected, observation, status, checked_at
+        )
         if saved is not None:
             if notify:
                 self._notify_changed(saved.task_id)
             return saved
         return self._get_required(expected.id_required)
 
-    def record_observation(self, expected: Attachment, observation: FileObservation, *, notify: bool = True) -> Attachment:
-        state = AttachmentCheckStatus.NO_BASELINE if expected.checksum is None else AttachmentCheckStatus.UNCHANGED if expected.checksum == observation.checksum else AttachmentCheckStatus.MODIFIED
-        return self.observe_result(expected, observation, state, observation.observed_at, notify=notify)
+    def record_observation(
+        self, expected: Attachment, observation: FileObservation, *, notify: bool = True
+    ) -> Attachment:
+        baseline = expected.fixed_checksum if expected.is_frozen else expected.checksum
+        size_matches = not expected.is_frozen or expected.fixed_size_bytes == observation.size_bytes
+        state = (
+            AttachmentCheckStatus.NO_BASELINE
+            if baseline is None
+            else AttachmentCheckStatus.UNCHANGED
+            if baseline == observation.checksum and size_matches
+            else AttachmentCheckStatus.MODIFIED
+        )
+        return self.observe_result(
+            expected, observation, state, observation.observed_at, notify=notify
+        )
 
     def subscribe(self, listener: Callable[[int], None]) -> Callable[[], None]:
         """Listeners must marshal worker-thread notifications onto their UI thread."""
@@ -219,7 +297,9 @@ class AttachmentService:
         self._task_service.get_including_deleted(task_id)
         return self._repository.list_attachments(task_id)
 
-    def move_attachment(self, task_id: int, attachment_id: int, movement: AttachmentMove) -> tuple[Attachment, ...]:
+    def move_attachment(
+        self, task_id: int, attachment_id: int, movement: AttachmentMove
+    ) -> tuple[Attachment, ...]:
         self._task_service.get(task_id)
         result = self._repository.move_attachment(task_id, attachment_id, AttachmentMove(movement))
         self._notify_changed(task_id)
@@ -255,10 +335,10 @@ class AttachmentService:
             matches = [
                 item
                 for item in self._repository.list_attachments(task_id)
-                if all(term in item.original_name.lower() for term in terms)
+                if all(term in item.name.lower() for term in terms)
             ]
             if matches:
-                result[task_id] = (matches[0].id_required, matches[0].original_name, len(matches))
+                result[task_id] = (matches[0].id_required, matches[0].name, len(matches))
         return result
 
     def attach(
@@ -275,12 +355,23 @@ class AttachmentService:
         except FileJobCanceledError as error:
             raise AttachmentCanceledError(str(error)) from error
 
-    def _attach(self, task_id: int, source: Path, *, cancel_requested: Callable[[], bool] | None, now: datetime | None) -> Attachment:
+    def _attach(
+        self,
+        task_id: int,
+        source: Path,
+        *,
+        cancel_requested: Callable[[], bool] | None,
+        now: datetime | None,
+    ) -> Attachment:
         self._task_service.get(task_id)
         source_path = source.expanduser()
         pins = ExitStack()
         try:
-            stored = self._storage.import_file(source_path, cancel_requested=cancel_requested, reserve_published=lambda path: pins.enter_context(self.coordinator.pin(path)))
+            stored = self._storage.import_file(
+                source_path,
+                cancel_requested=cancel_requested,
+                reserve_published=lambda path: pins.enter_context(self.coordinator.pin(path)),
+            )
         except BaseException:
             pins.close()
             raise
@@ -301,7 +392,9 @@ class AttachmentService:
                             candidate_pin = self.coordinator.pin(candidate.relative_path)
                             lease.enter_context(candidate_pin)
                         lease.enter_context(self._storage.protected_read(candidate.relative_path))
-                        observation = self._storage.observe(candidate.relative_path, cancel_requested=cancel_requested)
+                        observation = self._storage.observe(
+                            candidate.relative_path, cancel_requested=cancel_requested
+                        )
                         self.record_observation(candidate, observation, notify=False)
                         candidates_observed = True
                         if observation.checksum == stored.checksum:
@@ -317,13 +410,21 @@ class AttachmentService:
                 with self._storage.operation_lock():
                     if duplicate is not None:
                         current = self._repository.get_attachment(duplicate.id_required)
-                        if current is not None and current.detached_at is None and current.relative_path == duplicate.relative_path:
-                            raise DuplicateAttachmentError(f"같은 내용의 파일이 이미 이 업무에 첨부되어 있습니다: {duplicate.original_name}")
+                        if (
+                            current is not None
+                            and current.detached_at is None
+                            and current.relative_path == duplicate.relative_path
+                        ):
+                            raise DuplicateAttachmentError(
+                                f"같은 내용의 파일이 이미 이 업무에 첨부되어 있습니다: {duplicate.name}"
+                            )
             finally:
                 lease.close()
             with self._storage.operation_lock():
                 if not self._storage.exists(stored.relative_path):
-                    raise AttachmentOperationError("첨부 등록 중 저장 파일이 사라졌습니다. 다시 첨부해 주세요.")
+                    raise AttachmentOperationError(
+                        "첨부 등록 중 저장 파일이 사라졌습니다. 다시 첨부해 주세요."
+                    )
                 stat = self._storage.resolve(stored.relative_path).stat()
                 timestamp = now or datetime.now(UTC)
                 attachment = Attachment(
@@ -362,6 +463,13 @@ class AttachmentService:
 
     def path_for_open(self, attachment_id: int, *, now: datetime | None = None) -> Path:
         attachment = self._get_required(attachment_id)
+        self.coordinator.assert_accessible(attachment.relative_path)
+        if attachment.is_frozen:
+            if self.lifecycle is not None:
+                return self.lifecycle.prepare_open("attachment", attachment_id)
+            raise AttachmentOperationError(
+                "고정 원본의 관리 파일은 직접 열 수 없습니다. 보기용 사본을 사용하세요."
+            )
         try:
             path = self._storage.resolve(attachment.relative_path)
         except FileNotFoundError as error:
@@ -369,46 +477,75 @@ class AttachmentService:
                 attachment_id,
                 attachment.missing_at or now or datetime.now(UTC),
             )
-            raise AttachmentMissingError(
-                f"'{attachment.original_name}' 파일을 찾을 수 없습니다."
-            ) from error
+            raise AttachmentMissingError(f"'{attachment.name}' 파일을 찾을 수 없습니다.") from error
         if attachment.missing_at is not None:
             self._repository.set_missing_at(attachment_id, None)
         return path
 
     def verify(
-        self, attachment_id: int, *, now: datetime | None = None,
+        self,
+        attachment_id: int,
+        *,
+        now: datetime | None = None,
         cancel_requested: Callable[[], bool] | None = None,
         progress: Callable[[int, int], None] | None = None,
     ) -> AttachmentVerification:
         try:
             with self.coordinator.job(cancel_requested):
-                return self._verify(attachment_id, now=now, cancel_requested=cancel_requested, progress=progress)
+                return self._verify(
+                    attachment_id, now=now, cancel_requested=cancel_requested, progress=progress
+                )
         except FileJobCanceledError as error:
             raise AttachmentCanceledError(str(error)) from error
 
-    def _verify(self, attachment_id: int, *, now: datetime | None, cancel_requested: Callable[[], bool] | None, progress: Callable[[int, int], None] | None) -> AttachmentVerification:
+    def _verify(
+        self,
+        attachment_id: int,
+        *,
+        now: datetime | None,
+        cancel_requested: Callable[[], bool] | None,
+        progress: Callable[[int, int], None] | None,
+    ) -> AttachmentVerification:
         if cancel_requested is not None and cancel_requested():
             raise AttachmentCanceledError("무결성 검사를 취소했습니다.")
         attachment = self._get_required(attachment_id)
         try:
             path = self._storage.resolve(attachment.relative_path)
             with self.coordinator.pin(attachment.relative_path):
-                observation = self._storage.observe(attachment.relative_path, cancel_requested=cancel_requested, progress=progress, now=now)
+                observation = self._storage.observe(
+                    attachment.relative_path,
+                    cancel_requested=cancel_requested,
+                    progress=progress,
+                    now=now,
+                )
             actual_checksum = observation.checksum
         except FileNotFoundError:
-            missing = self.observe_result(attachment, None, AttachmentCheckStatus.MISSING, now or datetime.now(UTC))
+            missing = self.observe_result(
+                attachment, None, AttachmentCheckStatus.MISSING, now or datetime.now(UTC)
+            )
             return AttachmentVerification(missing, AttachmentIntegrity.MISSING, None)
         except AttachmentCanceledError:
             raise
         except (OSError, AttachmentOperationError) as error:
-            state = AttachmentCheckStatus.CHANGING if isinstance(error, AttachmentOperationError) else AttachmentCheckStatus.UNAVAILABLE
+            state = (
+                AttachmentCheckStatus.CHANGING
+                if isinstance(error, AttachmentOperationError)
+                else AttachmentCheckStatus.UNAVAILABLE
+            )
             self.observe_result(attachment, None, state, now or datetime.now(UTC))
             raise
         available = self.record_observation(attachment, observation)
         integrity = (
             AttachmentIntegrity.VERIFIED
-            if attachment.checksum is None or actual_checksum == attachment.checksum
+            if (attachment.fixed_checksum if attachment.is_frozen else attachment.checksum) is None
+            or (
+                actual_checksum
+                == (attachment.fixed_checksum if attachment.is_frozen else attachment.checksum)
+                and (
+                    not attachment.is_frozen
+                    or observation.size_bytes == attachment.fixed_size_bytes
+                )
+            )
             else AttachmentIntegrity.MODIFIED
         )
         return AttachmentVerification(available, integrity, path, actual_checksum)
@@ -435,6 +572,9 @@ class AttachmentService:
         return restored
 
     def delete_file(self, attachment_id: int) -> None:
+        if self.lifecycle is not None:
+            self.lifecycle.delete(self.lifecycle.plan("attachment", attachment_id))
+            return
         task_id = self._get_required(attachment_id).task_id
         try:
             with self._storage.operation_lock():
@@ -444,13 +584,20 @@ class AttachmentService:
 
     def _delete_file_locked(self, attachment_id: int) -> None:
         attachment = self._get_required(attachment_id)
+        other_references = getattr(self._repository, "has_other_asset_references", None)
+        if other_references is not None and other_references(attachment_id):
+            self._repository.delete_attachment(attachment_id)
+            return
+        delete_record = getattr(
+            self._repository, "delete_unreferenced_attachment", self._repository.delete_attachment
+        )
         try:
             quarantined = self._storage.quarantine(attachment.relative_path)
         except FileNotFoundError:
-            self._repository.delete_attachment(attachment_id)
+            delete_record(attachment_id)
             return
         try:
-            self._repository.delete_attachment(attachment_id)
+            delete_record(attachment_id)
         except Exception:
             try:
                 self._storage.restore(quarantined)
@@ -479,10 +626,36 @@ class AttachmentService:
         failed: list[str] = []
         for relative_path in relative_paths:
             try:
+                if self._repository.is_path_registered(relative_path):
+                    continue
                 self._storage.remove(relative_path)
-            except (OSError, AttachmentOperationError):
+            except (OSError, AttachmentOperationError, FileInUseError):
                 failed.append(relative_path)
         return tuple(failed)
+
+    def rename_attachment(
+        self, attachment_id: int, display_name: str, *, expected_revision: int
+    ) -> Attachment:
+        current = self._get_required(attachment_id)
+        name = validate_display_name(display_name, extension=Path(current.name).suffix)
+        updater = getattr(self._repository, "update_metadata", None)
+        if updater is None:
+            raise AttachmentOperationError("첨부 정보 변경을 지원하지 않습니다.")
+        saved: Attachment = updater(
+            attachment_id, expected_revision=expected_revision, display_name=name
+        )
+        self._notify_changed(saved.task_id)
+        return saved
+
+    def update_memo(self, attachment_id: int, memo: str, *, expected_revision: int) -> Attachment:
+        if len(memo) > 2000:
+            raise ValueError("첨부 메모는 2,000자 이하여야 합니다.")
+        updater = getattr(self._repository, "update_metadata", None)
+        if updater is None:
+            raise AttachmentOperationError("첨부 정보 변경을 지원하지 않습니다.")
+        saved: Attachment = updater(attachment_id, expected_revision=expected_revision, memo=memo)
+        self._notify_changed(saved.task_id)
+        return saved
 
     def _get_required(self, attachment_id: int) -> Attachment:
         attachment = self._repository.get_attachment(attachment_id)

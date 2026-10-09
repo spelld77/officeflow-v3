@@ -33,8 +33,14 @@ from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.recurrence import recurrence_until_utc
 from officeflow.domain.task import Task
+from officeflow.infrastructure.database.file_references import (
+    assert_supported_asset_references,
+    asset_paths_for_task,
+    asset_reference_count,
+)
 from officeflow.infrastructure.database.models import (
     AttachmentRecord,
+    FileAssetRecord,
     ReminderDeliveryRecord,
     ReminderRecord,
     TaskOccurrenceRecord,
@@ -73,11 +79,18 @@ class SqlAlchemyTaskRepository:
             record = session.get(TaskRecord, task.id)
             if record is None or record.deleted_at is not None:
                 raise LookupError(f"업무 {task.id}을(를) 찾을 수 없습니다.")
-            reactivated = record.status not in {"active", "pending"} and task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+            reactivated = record.status not in {"active", "pending"} and task.status in {
+                TaskStatus.ACTIVE,
+                TaskStatus.PENDING,
+            }
             self._copy_to_record(task, record)
             if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELED, TaskStatus.ARCHIVED}:
-                self._close_deliveries(session, task.id, task.updated_at,
-                    status="completed" if task.status is TaskStatus.COMPLETED else "acknowledged")
+                self._close_deliveries(
+                    session,
+                    task.id,
+                    task.updated_at,
+                    status="completed" if task.status is TaskStatus.COMPLETED else "acknowledged",
+                )
             if reactivated:
                 self._reschedule_future_reminders(session, record, task.updated_at)
         return self.get_required(task.id)
@@ -146,18 +159,27 @@ class SqlAlchemyTaskRepository:
 
     def delete_permanently(self, task_id: int) -> tuple[str, ...]:
         with self._sessions.transaction() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            assert_supported_asset_references(session)
             record = session.get(TaskRecord, task_id)
             if record is None or record.deleted_at is None:
                 raise LookupError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
-            attachment_paths = tuple(
+            attachment_paths = asset_paths_for_task(session, task_id)
+            assets = tuple(
                 session.scalars(
-                    select(AttachmentRecord.relative_path).where(
-                        AttachmentRecord.task_id == task_id
+                    select(FileAssetRecord).where(
+                        FileAssetRecord.relative_path.in_(attachment_paths)
                     )
-                ).all()
+                )
             )
             session.delete(record)
             session.flush()
+            removable = []
+            for asset in assets:
+                if not asset_reference_count(session, asset.id):
+                    removable.append(asset.relative_path)
+                    session.delete(asset)
+            attachment_paths = tuple(removable)
         return attachment_paths
 
     def get_required(self, task_id: int) -> Task:
@@ -251,37 +273,56 @@ class SqlAlchemyTaskRepository:
             regular.append(self._search_predicate(search))
             # Each occurrence's result/logs must not match its siblings' results.
             content = func.lower(
-                TaskRecord.title + literal("\n") + TaskRecord.description
-                + literal("\n") + TaskOccurrenceRecord.result_note
+                TaskRecord.title
+                + literal("\n")
+                + TaskRecord.description
+                + literal("\n")
+                + TaskOccurrenceRecord.result_note
             )
             log_matches: Any = (
                 select(literal_column("rowid"))
                 .select_from(text("work_log_search"))
-                .where(text("work_log_search MATCH :history_fts").bindparams(
-                    history_fts=fts_prefix_query(search)
-                ))
+                .where(
+                    text("work_log_search MATCH :history_fts").bindparams(
+                        history_fts=fts_prefix_query(search)
+                    )
+                )
             )
-            recurring.append(or_(
-                and_(*(func.instr(content, term.lower()) > 0 for term in search.split())),
-                TaskRecord.id.in_(matching_attachment_tasks(search)),
-                select(WorkLogRecord.id).where(
-                    WorkLogRecord.occurrence_id == TaskOccurrenceRecord.id,
-                    WorkLogRecord.id.in_(log_matches),
-                ).exists(),
-            ))
+            recurring.append(
+                or_(
+                    and_(*(func.instr(content, term.lower()) > 0 for term in search.split())),
+                    TaskRecord.id.in_(matching_attachment_tasks(search)),
+                    select(WorkLogRecord.id)
+                    .where(
+                        WorkLogRecord.occurrence_id == TaskOccurrenceRecord.id,
+                        WorkLogRecord.id.in_(log_matches),
+                    )
+                    .exists(),
+                )
+            )
         keys = union_all(
             select(
-                TaskRecord.id.label("task_id"), literal(None).label("occurrence_id"),
+                TaskRecord.id.label("task_id"),
+                literal(None).label("occurrence_id"),
                 TaskRecord.completed_at.label("completed_at"),
             ).where(*regular),
             select(
-                TaskOccurrenceRecord.task_id, TaskOccurrenceRecord.id,
+                TaskOccurrenceRecord.task_id,
+                TaskOccurrenceRecord.id,
                 TaskOccurrenceRecord.completed_at,
-            ).join(TaskRecord, TaskRecord.id == TaskOccurrenceRecord.task_id).where(*recurring),
+            )
+            .join(TaskRecord, TaskRecord.id == TaskOccurrenceRecord.task_id)
+            .where(*recurring),
         ).subquery()
-        statement = select(keys).order_by(
-            keys.c.completed_at.desc(), keys.c.task_id.desc(), keys.c.occurrence_id.desc(),
-        ).offset(query.offset)
+        statement = (
+            select(keys)
+            .order_by(
+                keys.c.completed_at.desc(),
+                keys.c.task_id.desc(),
+                keys.c.occurrence_id.desc(),
+            )
+            .offset(query.offset)
+        )
         if query.limit is not None:
             statement = statement.limit(query.limit)
         with self._sessions.transaction() as session:
@@ -294,12 +335,14 @@ class SqlAlchemyTaskRepository:
                     select(TaskRecord, self._attachment_exists()).where(TaskRecord.id.in_(task_ids))
                 )
             }
-            occurrence_ids = tuple(row.occurrence_id for row in rows if row.occurrence_id is not None)
+            occurrence_ids = tuple(
+                row.occurrence_id for row in rows if row.occurrence_id is not None
+            )
             occurrences = {
                 record.id: self._occurrence_to_domain(record)
-                for record in session.scalars(select(TaskOccurrenceRecord).where(
-                    TaskOccurrenceRecord.id.in_(occurrence_ids)
-                ))
+                for record in session.scalars(
+                    select(TaskOccurrenceRecord).where(TaskOccurrenceRecord.id.in_(occurrence_ids))
+                )
             }
             items: list[Task] = []
             for row in rows:
@@ -307,9 +350,13 @@ class SqlAlchemyTaskRepository:
                 if row.occurrence_id is not None:
                     occurrence = occurrences[row.occurrence_id]
                     task = replace(
-                        task, status=TaskStatus.COMPLETED, starts_at=occurrence.starts_at,
-                        ends_at=occurrence.ends_at, result_note=occurrence.result_note,
-                        completed_at=occurrence.completed_at, occurrence_id=occurrence.id,
+                        task,
+                        status=TaskStatus.COMPLETED,
+                        starts_at=occurrence.starts_at,
+                        ends_at=occurrence.ends_at,
+                        result_note=occurrence.result_note,
+                        completed_at=occurrence.completed_at,
+                        occurrence_id=occurrence.id,
                         occurrence_start=occurrence.occurrence_start,
                     )
                 items.append(task)
@@ -481,9 +528,9 @@ class SqlAlchemyTaskRepository:
         with self._sessions.transaction() as session:
             return {
                 record.id: self._occurrence_to_domain(record)
-                for record in session.scalars(select(TaskOccurrenceRecord).where(
-                    TaskOccurrenceRecord.id.in_(occurrence_ids)
-                ))
+                for record in session.scalars(
+                    select(TaskOccurrenceRecord).where(TaskOccurrenceRecord.id.in_(occurrence_ids))
+                )
             }
 
     def save_occurrence(self, occurrence: TaskOccurrence) -> TaskOccurrence:
@@ -505,9 +552,20 @@ class SqlAlchemyTaskRepository:
             record.status = occurrence.status.value
             record.completed_at = occurrence.completed_at
             record.result_note = occurrence.result_note
-            if occurrence.status in {OccurrenceStatus.COMPLETED, OccurrenceStatus.SKIPPED, OccurrenceStatus.CANCELED}:
-                self._close_deliveries(session, occurrence.task_id, occurrence.completed_at or datetime.now().astimezone(),
-                    occurrence_start=occurrence.occurrence_start, status="completed" if occurrence.status is OccurrenceStatus.COMPLETED else "acknowledged")
+            if occurrence.status in {
+                OccurrenceStatus.COMPLETED,
+                OccurrenceStatus.SKIPPED,
+                OccurrenceStatus.CANCELED,
+            }:
+                self._close_deliveries(
+                    session,
+                    occurrence.task_id,
+                    occurrence.completed_at or datetime.now().astimezone(),
+                    occurrence_start=occurrence.occurrence_start,
+                    status="completed"
+                    if occurrence.status is OccurrenceStatus.COMPLETED
+                    else "acknowledged",
+                )
             session.flush()
             occurrence_id = record.id
         saved = self.get_occurrence(occurrence.task_id, occurrence.occurrence_start)
@@ -516,22 +574,49 @@ class SqlAlchemyTaskRepository:
         return saved
 
     @staticmethod
-    def _close_deliveries(session: Session, task_id: int, now: datetime, *, occurrence_start: datetime | None = None, status: str = "acknowledged") -> None:
-        statement = update(ReminderDeliveryRecord).where(ReminderDeliveryRecord.task_id == task_id,
-            ReminderDeliveryRecord.status.in_(("fired", "snoozed")))
+    def _close_deliveries(
+        session: Session,
+        task_id: int,
+        now: datetime,
+        *,
+        occurrence_start: datetime | None = None,
+        status: str = "acknowledged",
+    ) -> None:
+        statement = update(ReminderDeliveryRecord).where(
+            ReminderDeliveryRecord.task_id == task_id,
+            ReminderDeliveryRecord.status.in_(("fired", "snoozed")),
+        )
         if occurrence_start is not None:
             statement = statement.where(ReminderDeliveryRecord.occurrence_start == occurrence_start)
-        session.execute(statement.values(status=status, acknowledged_at=now, updated_at=now, snoozed_until=None))
+        session.execute(
+            statement.values(status=status, acknowledged_at=now, updated_at=now, snoozed_until=None)
+        )
 
     @staticmethod
     def _reschedule_future_reminders(session: Session, record: TaskRecord, now: datetime) -> None:
         from officeflow.application.reminders import ReminderService, ReminderTarget
         from officeflow.domain.enums import ReminderRelation
         from officeflow.domain.reminder import Reminder
+
         task = SqlAlchemyTaskRepository._to_domain(record)
-        for rule in session.scalars(select(ReminderRecord).where(ReminderRecord.task_id == record.id, ReminderRecord.enabled.is_(True))):
-            reminder = Reminder(rule.id, record.id, ReminderRelation(rule.relation), rule.offset_minutes, rule.absolute_at, rule.enabled)
-            candidate = ReminderService._next_candidate(ReminderTarget(reminder, task), after=now.replace(second=0, microsecond=0), inclusive=True)
+        for rule in session.scalars(
+            select(ReminderRecord).where(
+                ReminderRecord.task_id == record.id, ReminderRecord.enabled.is_(True)
+            )
+        ):
+            reminder = Reminder(
+                rule.id,
+                record.id,
+                ReminderRelation(rule.relation),
+                rule.offset_minutes,
+                rule.absolute_at,
+                rule.enabled,
+            )
+            candidate = ReminderService._next_candidate(
+                ReminderTarget(reminder, task),
+                after=now.replace(second=0, microsecond=0),
+                inclusive=True,
+            )
             rule.next_occurrence_start, rule.next_fire_at = candidate if candidate else (None, None)
             rule.schedule_initialized = True
 

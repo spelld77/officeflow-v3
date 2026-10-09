@@ -36,11 +36,16 @@ TABLES = ("tasks", "work_logs", "notes", "attachments", "app_settings")
 
 
 @pytest.fixture
-def imported_data(tmp_path: Path) -> Iterator[AppPaths]:
+def imported_data(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[AppPaths]:
     """Existing v3 data with imported provenance, without depending on an importer."""
     paths = AppPaths(tmp_path / "officeflow")
     paths.ensure_directories()
-    upgrade_database(paths.database_file)
+    older_schema = getattr(request.node, "callspec", None)
+    older_schema = bool(older_schema and older_schema.params.get("older_schema", False))
+    if older_schema:
+        command.upgrade(migration_config(paths.database_file), "0009_reminder_schedule_cache")
+    else:
+        upgrade_database(paths.database_file)
     engine = create_database_engine(paths.database_file)
     sessions = SessionFactory(engine)
     tasks = TaskService(SqlAlchemyTaskRepository(sessions))
@@ -61,7 +66,29 @@ def imported_data(tmp_path: Path) -> Iterator[AppPaths]:
     )
     source = tmp_path / "기존보고서.txt"
     source.write_text("이전된 첨부파일", encoding="utf-8")
-    attachments.attach(task.id, source, now=NOW)
+    if older_schema:
+        from uuid import uuid4
+
+        token = uuid4().hex
+        relative = f"{token[:2]}/{token[2:4]}/{token}.txt"
+        destination = paths.attachment_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO attachments(task_id,original_name,stored_name,relative_path,size_bytes,checksum,created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    task.id,
+                    source.name,
+                    destination.name,
+                    relative,
+                    source.stat().st_size,
+                    hashlib.sha256(source.read_bytes()).hexdigest(),
+                    NOW.replace(tzinfo=None).isoformat(sep=" "),
+                ),
+            )
+    else:
+        attachments.attach(task.id, source, now=NOW)
     with sessions.transaction() as session:
         row = session.get(TaskRecord, task.id)
         assert row is not None
@@ -82,10 +109,32 @@ def _snapshot(paths: AppPaths) -> dict[str, list[tuple[object, ...]]]:
     with closing(sqlite3.connect(paths.database_file)) as connection:
         result = {}
         for table in TABLES:
+            if table == "attachments":
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(attachments)")}
+                physical = "f" if "asset_id" in columns else "a"
+                join = " JOIN file_assets f ON f.id=a.asset_id" if physical == "f" else ""
+                result[table] = list(
+                    connection.execute(
+                        f"SELECT a.id,a.task_id,a.original_name,{physical}.stored_name,{physical}.relative_path,a.size_bytes,a.checksum,a.created_at,{physical}.missing_at,a.detached_at FROM attachments a{join} ORDER BY a.id"
+                    )
+                )
+                continue
             # Compare every original field across old/new schemas. The new order
             # column is separately covered by attachment migration tests.
-            added = {"sort_order", "observed_size_bytes", "observed_checksum", "observed_mtime_ns", "observed_at", "last_check_status", "last_checked_at"}
-            columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})") if row[1] not in added]
+            added = {
+                "sort_order",
+                "observed_size_bytes",
+                "observed_checksum",
+                "observed_mtime_ns",
+                "observed_at",
+                "last_check_status",
+                "last_checked_at",
+            }
+            columns = [
+                row[1]
+                for row in connection.execute(f"PRAGMA table_info({table})")
+                if row[1] not in added
+            ]
             quoted = ",".join('"' + column.replace('"', '""') + '"' for column in columns)
             result[table] = list(connection.execute(f"SELECT {quoted} FROM {table} ORDER BY rowid"))
         return result
@@ -97,7 +146,7 @@ def _attachment_hashes(paths: AppPaths) -> dict[str, str]:
             path.read_bytes()
         ).hexdigest()
         for path in paths.attachment_dir.rglob("*")
-        if path.is_file()
+        if path.is_file() and path.relative_to(paths.attachment_dir).parts[0] != "cache"
     }
 
 
@@ -106,8 +155,6 @@ def test_imported_v3_data_remains_readable_and_editable(
     imported_data: AppPaths, older_schema: bool
 ) -> None:
     paths = imported_data
-    if older_schema:
-        command.downgrade(migration_config(paths.database_file), "0009_reminder_schedule_cache")
     before = _snapshot(paths)
     files_before = _attachment_hashes(paths)
 
@@ -162,8 +209,6 @@ def test_imported_v3_backup_and_pending_restore_preserve_all_data(
     imported_data: AppPaths, tmp_path: Path, older_schema: bool
 ) -> None:
     paths = imported_data
-    if older_schema:
-        command.downgrade(migration_config(paths.database_file), "0009_reminder_schedule_cache")
     before = _snapshot(paths)
     files_before = _attachment_hashes(paths)
     manager = BackupManager(paths)
@@ -190,7 +235,7 @@ def test_imported_v3_backup_and_pending_restore_preserve_all_data(
         assert list(connection.execute("PRAGMA foreign_key_check")) == []
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0012_attachment_observation"
+            == "0013_attachment_assets"
         )
 
 

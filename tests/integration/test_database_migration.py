@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from alembic import command
 from sqlalchemy import inspect, text
 
 from officeflow.application.records import RecordService
 from officeflow.application.tasks import TaskDraft, TaskQuery, TaskService, TaskView
-from officeflow.infrastructure.database.migrate import upgrade_database
+from officeflow.infrastructure.database.migrate import migration_config, upgrade_database
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
 from officeflow.infrastructure.database.session import (
     SessionFactory,
@@ -25,9 +26,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     tables = set(inspector.get_table_names())
     task_indexes = {index["name"] for index in inspector.get_indexes("tasks")}
     occurrence_indexes = {index["name"] for index in inspector.get_indexes("task_occurrences")}
-    delivery_indexes = {
-        index["name"] for index in inspector.get_indexes("reminder_deliveries")
-    }
+    delivery_indexes = {index["name"] for index in inspector.get_indexes("reminder_deliveries")}
     reminder_indexes = {index["name"] for index in inspector.get_indexes("reminders")}
     reminder_columns = {column["name"] for column in inspector.get_columns("reminders")}
     checklist_indexes = {index["name"] for index in inspector.get_indexes("checklist_items")}
@@ -58,6 +57,10 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "task_search",
         "work_log_search",
         "attachment_search",
+        "file_assets",
+        "document_families",
+        "attachment_versions",
+        "file_operation_receipts",
     } <= tables
     assert {
         "ix_tasks_active_schedule",
@@ -79,7 +82,10 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
     } <= reminder_columns
     assert "ix_checklist_items_task_position" in checklist_indexes
     assert "ix_work_logs_date_updated" in work_log_indexes
-    assert {"ix_attachments_task_missing", "ix_attachments_detached_created"} <= attachment_indexes
+    assert {
+        "ix_attachments_family_created",
+        "ix_attachments_detached_created",
+    } <= attachment_indexes
     assert "detached_at" in attachment_columns
     assert {
         "task_search_insert",
@@ -93,7 +99,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "attachment_search_update",
         "attachment_search_delete",
     } <= triggers
-    assert revision == "0012_attachment_observation"
+    assert revision == "0013_attachment_assets"
     assert "sort_order" in attachment_columns
     assert "ix_attachments_task_order" in attachment_indexes
     assert "ix_attachments_created_id" in attachment_indexes
@@ -108,7 +114,7 @@ def test_initial_migration_is_idempotent(tmp_path: Path) -> None:
 
 def test_phase_two_database_receives_task_query_indexes(tmp_path: Path) -> None:
     database_file = tmp_path / "officeflow.db"
-    upgrade_database(database_file)
+    command.upgrade(migration_config(database_file), "0001_initial")
     engine = create_database_engine(database_file)
     index_names = (
         "ix_tasks_active_schedule",
@@ -118,7 +124,6 @@ def test_phase_two_database_receives_task_query_indexes(tmp_path: Path) -> None:
     with engine.begin() as connection:
         for name in index_names:
             connection.exec_driver_sql(f"DROP INDEX {name}")
-        connection.exec_driver_sql("UPDATE alembic_version SET version_num = '0001_initial'")
     engine.dispose()
 
     upgrade_database(database_file)
@@ -159,23 +164,13 @@ def test_phase_five_database_receives_reminder_delivery_history(tmp_path: Path) 
 
 def test_existing_database_receives_attachment_cleanup_state(tmp_path: Path) -> None:
     database_file = tmp_path / "officeflow.db"
-    upgrade_database(database_file)
-    engine = create_database_engine(database_file)
-    with engine.begin() as connection:
-        connection.exec_driver_sql("DROP INDEX ix_attachments_detached_created")
-        connection.exec_driver_sql("ALTER TABLE attachments DROP COLUMN detached_at")
-        connection.exec_driver_sql(
-            "UPDATE alembic_version SET version_num = '0006_attachment_index'"
-        )
-    engine.dispose()
+    command.upgrade(migration_config(database_file), "0006_attachment_index")
 
     upgrade_database(database_file)
     migrated_engine = create_database_engine(database_file)
     inspector = inspect(migrated_engine)
 
-    assert "detached_at" in {
-        column["name"] for column in inspector.get_columns("attachments")
-    }
+    assert "detached_at" in {column["name"] for column in inspector.get_columns("attachments")}
     assert "ix_attachments_detached_created" in {
         index["name"] for index in inspector.get_indexes("attachments")
     }
@@ -184,19 +179,16 @@ def test_existing_database_receives_attachment_cleanup_state(tmp_path: Path) -> 
 
 def test_existing_database_receives_reminder_schedule_cache(tmp_path: Path) -> None:
     database_file = tmp_path / "officeflow.db"
-    upgrade_database(database_file)
+    command.upgrade(migration_config(database_file), "0008_full_text_search")
     engine = create_database_engine(database_file)
     with engine.begin() as connection:
-        connection.exec_driver_sql("DROP TRIGGER reminder_schedule_task_changed")
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS reminder_schedule_task_changed")
         connection.exec_driver_sql("DROP INDEX ix_reminders_next_fire")
         connection.exec_driver_sql("DROP INDEX ix_reminders_schedule_pending")
         connection.exec_driver_sql("DROP INDEX ix_reminder_deliveries_cleanup")
         connection.exec_driver_sql("ALTER TABLE reminders DROP COLUMN schedule_initialized")
         connection.exec_driver_sql("ALTER TABLE reminders DROP COLUMN next_occurrence_start")
         connection.exec_driver_sql("ALTER TABLE reminders DROP COLUMN next_fire_at")
-        connection.exec_driver_sql(
-            "UPDATE alembic_version SET version_num = '0008_full_text_search'"
-        )
     engine.dispose()
 
     upgrade_database(database_file)
@@ -227,7 +219,7 @@ def test_existing_database_receives_reminder_schedule_cache(tmp_path: Path) -> N
 
 def test_existing_records_are_backfilled_into_full_text_indexes(tmp_path: Path) -> None:
     database_file = tmp_path / "officeflow.db"
-    upgrade_database(database_file)
+    command.upgrade(migration_config(database_file), "0007_attachment_cleanup")
     engine = create_database_engine(database_file)
     sessions = SessionFactory(engine)
     task_service = TaskService(SqlAlchemyTaskRepository(sessions))
@@ -248,24 +240,17 @@ def test_existing_records_are_backfilled_into_full_text_indexes(tmp_path: Path) 
             "task_search_update",
             "task_search_insert",
         ):
-            connection.exec_driver_sql(f"DROP TRIGGER {trigger}")
-        connection.exec_driver_sql("DROP TABLE work_log_search")
-        connection.exec_driver_sql("DROP TABLE task_search")
-        connection.exec_driver_sql(
-            "UPDATE alembic_version SET version_num = '0007_attachment_cleanup'"
-        )
+            connection.exec_driver_sql(f"DROP TRIGGER IF EXISTS {trigger}")
+        connection.exec_driver_sql("DROP TABLE IF EXISTS work_log_search")
+        connection.exec_driver_sql("DROP TABLE IF EXISTS task_search")
     engine.dispose()
 
     upgrade_database(database_file)
     migrated_engine = create_database_engine(database_file)
     migrated_sessions = SessionFactory(migrated_engine)
     migrated_tasks = TaskService(SqlAlchemyTaskRepository(migrated_sessions))
-    migrated_records = RecordService(
-        SqlAlchemyRecordRepository(migrated_sessions), migrated_tasks
-    )
+    migrated_records = RecordService(SqlAlchemyRecordRepository(migrated_sessions), migrated_tasks)
 
-    assert migrated_tasks.query(
-        TaskQuery(view=TaskView.ALL, search="기존 계약")
-    ).total == 1
+    assert migrated_tasks.query(TaskQuery(view=TaskView.ALL, search="기존 계약")).total == 1
     assert migrated_records.work_log_page(search="이전 업무일지").total == 1
     migrated_engine.dispose()

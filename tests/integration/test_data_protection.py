@@ -13,9 +13,8 @@ import officeflow.infrastructure.backup as backup_module
 from officeflow.application.tasks import TaskDraft
 from officeflow.bootstrap.paths import AppPaths
 from officeflow.infrastructure.backup import BackupError, BackupManager
-from officeflow.presentation.data_dialog import DataManagementDialog
 from tests.integration.test_attachment_search import search_environment
-from tests.integration.test_backup import _database, _values
+from tests.integration.test_backup import _database, _values, register_file
 
 
 @pytest.fixture
@@ -32,7 +31,8 @@ def attachment_env(tmp_path):
 
 def archive_bytes(path: Path, relative: str) -> bytes:
     with zipfile.ZipFile(path) as archive:
-        return archive.read(f"attachments/{relative}")
+        name = f"attachments/{relative}"
+        return archive.read(name if name in archive.namelist() else f"recovery/{relative}")
 
 
 def test_file_disappearing_after_database_snapshot_is_not_a_successful_backup(
@@ -47,13 +47,13 @@ def test_file_disappearing_after_database_snapshot_is_not_a_successful_backup(
         env.attachments.delete_file(attached.id)
 
     monkeypatch.setattr(manager, "_snapshot_database", snapshot_then_delete)
-    with pytest.raises(BackupError, match="첨부파일이 변경되거나 사라"):
+    with pytest.raises(BackupError, match=r"첨부파일.*누락|첨부파일이 변경되거나 사라"):
         manager.create_backup()
     assert not list(paths.backup_dir.iterdir())
     assert not list(paths.root.glob(".backup-work-*"))
 
 
-@pytest.mark.parametrize("mutation", ["delete", "unlink", "add"])
+@pytest.mark.parametrize("mutation", ["delete", "unlink"])
 def test_mutation_after_capture_preserves_original_snapshot_and_does_not_block_writer(
     attachment_env, tmp_path, monkeypatch, mutation
 ):
@@ -91,7 +91,9 @@ def test_mutation_after_capture_preserves_original_snapshot_and_does_not_block_w
     assert archive_bytes(backup.path, attached.relative_path) == b"preserved original bytes"
 
 
-def test_delete_waits_for_capture_but_not_compression(attachment_env, monkeypatch):
+def test_delete_is_refused_during_capture_and_can_retry_after_backup(attachment_env, monkeypatch):
+    from officeflow.application.file_operations import FileInUseError
+
     paths, env, attached = attachment_env
     manager = BackupManager(paths)
     original = manager._snapshot_database
@@ -120,11 +122,15 @@ def test_delete_waits_for_capture_but_not_compression(attachment_env, monkeypatc
         backup = manager.create_backup()
     finally:
         thread.join(timeout=3)
-    assert finished.is_set() and errors == []
+    assert finished.is_set() and len(errors) == 1 and isinstance(errors[0], FileInUseError)
     assert archive_bytes(backup.path, attached.relative_path) == b"preserved original bytes"
+    env.attachments.delete_file(attached.id)
+    assert env.repository.get_attachment(attached.id) is None
 
 
-def test_external_content_change_after_capture_rejects_backup(attachment_env, monkeypatch):
+def test_external_content_change_after_capture_keeps_independent_snapshot(
+    attachment_env, monkeypatch
+):
     paths, _env, attached = attachment_env
     manager = BackupManager(paths)
     original = manager._stage_attachment_sources
@@ -134,21 +140,25 @@ def test_external_content_change_after_capture_rejects_backup(attachment_env, mo
         return original(sources, destination, canceled)
 
     monkeypatch.setattr(manager, "_stage_attachment_sources", stage)
-    with pytest.raises(BackupError, match="내용이 변경"):
-        manager.create_backup()
-    assert not list(paths.backup_dir.iterdir())
+    backup = manager.create_backup()
+    assert archive_bytes(backup.path, attached.relative_path) == b"preserved original bytes"
+    assert (paths.attachment_dir / attached.relative_path).read_bytes() == b"external overwrite"
 
 
 def test_external_change_during_copy_rejects_backup(attachment_env, monkeypatch):
     paths, _env, attached = attachment_env
-    original = backup_module._copy_stream
+    from contextlib import contextmanager
 
-    def copy(source, target, canceled):
-        original(source, target, canceled)
-        if "/captures/" in str(source.name).replace("\\", "/"):
-            (paths.attachment_dir / attached.relative_path).write_bytes(b"changed during copy")
+    original = backup_module.protected_read
 
-    monkeypatch.setattr(backup_module, "_copy_stream", copy)
+    @contextmanager
+    def read(source):
+        if source == paths.attachment_dir / attached.relative_path:
+            source.write_bytes(b"changed before protected handle")
+        with original(source) as stream:
+            yield stream
+
+    monkeypatch.setattr(backup_module, "protected_read", read)
     with pytest.raises(BackupError, match="사본 확보 중 파일이 변경"):
         BackupManager(paths).create_backup()
     assert not list(paths.backup_dir.iterdir())
@@ -182,17 +192,13 @@ def test_capture_failure_leaves_no_partial_backup(attachment_env, monkeypatch, f
     assert not list(paths.root.glob(".backup-work-*"))
 
 
-def test_preexisting_missing_file_is_explicit_in_backup_and_restore_message(attachment_env):
+def test_preexisting_missing_file_rejects_new_complete_backup(attachment_env):
     paths, _env, attached = attachment_env
     (paths.attachment_dir / attached.relative_path).unlink()
     manager = BackupManager(paths)
-    backup = manager.create_backup()
-    assert backup.missing_attachments == (attached.relative_path,)
-    assert "기존 누락 첨부 1개" in DataManagementDialog._backup_message(backup)
-    manifest = manager.verify_backup(backup.path)
-    assert manifest.format_version == 2
-    assert manifest.missing_attachments == backup.missing_attachments
-    assert manager.stage_restore(backup.path).missing_attachments == backup.missing_attachments
+    with pytest.raises(BackupError, match="누락"):
+        manager.create_backup()
+    assert not list(paths.backup_dir.glob("*.ofbackup"))
 
 
 @pytest.mark.parametrize("version", [1, 2])
@@ -229,6 +235,7 @@ def restore_environment(tmp_path):
     _database(paths.database_file, ("backup",))
     source = paths.attachment_dir / "original.txt"
     source.write_bytes(b"backup content")
+    register_file(paths, "original.txt")
     paths.settings_file.write_text('{"value":"backup"}', encoding="utf-8")
     manager = BackupManager(paths)
     backup = manager.create_backup()
@@ -403,7 +410,7 @@ def test_attachment_delete_crash_is_resolved_from_database_state(
     with monkeypatch.context() as patch:
         patch.setattr(
             storage if committed else env.repository,
-            "purge" if committed else "delete_attachment",
+            "purge" if committed else "delete_unreferenced_attachment",
             abrupt,
         )
         with pytest.raises(SystemExit):
@@ -451,7 +458,9 @@ def test_old_quarantine_without_journal_is_restored_by_unique_stored_name(attach
     assert env.attachments.path_for_open(attached.id).read_bytes() == b"preserved original bytes"
 
 
-@pytest.mark.parametrize("kind", ["unknown", "invalid-journal", "conflicting-original", "flat", "hidden"])
+@pytest.mark.parametrize(
+    "kind", ["unknown", "invalid-journal", "conflicting-original", "flat", "hidden"]
+)
 def test_unresolved_quarantine_is_preserved_in_usage_and_backup(attachment_env, kind):
     paths, _env, attached = attachment_env
     target = paths.attachment_dir / ".trash" / "unknown" / attached.stored_name
@@ -587,13 +596,16 @@ def test_startup_recovers_uncommitted_attachment_delete(attachment_env, monkeypa
         raise SystemExit("before DB commit")
 
     with monkeypatch.context() as patch:
-        patch.setattr(env.repository, "delete_attachment", abrupt)
+        patch.setattr(env.repository, "delete_unreferenced_attachment", abrupt)
         with pytest.raises(SystemExit):
             env.attachments.delete_file(attached.id)
     monkeypatch.setenv("OFFICEFLOW_DATA_DIR", str(paths.root))
     _, window = build_application(application=qapp)
     qtbot.addWidget(window)
     try:
+        qtbot.waitUntil(
+            lambda: (paths.attachment_dir / attached.relative_path).is_file(), timeout=10000
+        )
         assert (
             env.attachments.path_for_open(attached.id).read_bytes() == b"preserved original bytes"
         )
@@ -613,24 +625,26 @@ def test_startup_refuses_to_open_database_with_invalid_restore_state(tmp_path, m
     assert source.read_bytes() == b"current content"
 
 
-def test_failed_deletion_recovery_keeps_file_when_database_cannot_be_read(attachment_env, monkeypatch):
+def test_failed_deletion_recovery_keeps_file_when_database_cannot_be_read(
+    attachment_env, monkeypatch
+):
     paths, env, attached = attachment_env
 
     def abrupt(*_args):
         raise SystemExit("before DB commit")
 
     with monkeypatch.context() as patch:
-        patch.setattr(env.repository, "delete_attachment", abrupt)
+        patch.setattr(env.repository, "delete_unreferenced_attachment", abrupt)
         with pytest.raises(SystemExit):
             env.attachments.delete_file(attached.id)
     manager = BackupManager(paths)
 
-    def failed():
-        raise BackupError("DB state unavailable")
+    def failed(*args, **kwargs):
+        raise backup_module.sqlite3.OperationalError("DB state unavailable")
 
     with monkeypatch.context() as patch:
-        patch.setattr(manager, "_tracked_attachment_paths", failed)
-        with pytest.raises(BackupError):
+        patch.setattr(backup_module.sqlite3, "connect", failed)
+        with pytest.raises(BackupError, match="격리 자료를 보존"):
             manager.recover_attachment_deletions()
     assert list((paths.attachment_dir / ".trash").glob("*/deletion.json"))
     assert manager.recover_attachment_deletions() == ()

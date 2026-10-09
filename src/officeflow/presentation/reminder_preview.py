@@ -71,7 +71,9 @@ class ReminderPreviewDelegate(QStyledItemDelegate):
         painter.setPen(opt.palette.text().color())
         metrics = opt.fontMetrics
         rect = opt.rect.adjusted(8, 0, -8, 0)
-        status = {"시각 지남 · 발생 기록 없음": "발생 기록 없음"}.get(item.display_status, item.display_status)
+        status = {"시각 지남 · 발생 기록 없음": "발생 기록 없음"}.get(
+            item.display_status, item.display_status
+        )
         state_width = min(metrics.horizontalAdvance(status) + 8, int(rect.width() * 0.4))
         time_width = metrics.horizontalAdvance("00:00") + 14
         painter.drawText(
@@ -287,7 +289,9 @@ class ReminderPreviewWidget(QWidget):
             else f"{len(result.items)}건 이상 · 일부 조회"
         )
         self.label.setText(
-            f"오늘 알림 · 확인할/예정 {len(pending)}건 · 처리 이력 {history}건" + (f" · 발생 기록 확인 필요 {len(attention)}건" if attention else "") + f" · {count} · {len(visible)}건 표시"
+            f"오늘 알림 · 확인할/예정 {len(pending)}건 · 처리 이력 {history}건"
+            + (f" · 발생 기록 확인 필요 {len(attention)}건" if attention else "")
+            + f" · {count} · {len(visible)}건 표시"
             if result.items
             else "오늘 예약된 알림이 없습니다"
             if result.complete

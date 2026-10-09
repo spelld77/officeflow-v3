@@ -46,7 +46,9 @@ def benchmark(
                 session.execute(
                     # Seed the deliberately downgraded schema, not the current
                     # ORM model with columns absent from that historical DB.
-                    text("INSERT INTO attachments (task_id, original_name, stored_name, relative_path, size_bytes, created_at) VALUES (:task_id, :original_name, :stored_name, :relative_path, :size_bytes, :created_at)"),
+                    text(
+                        "INSERT INTO attachments (task_id, original_name, stored_name, relative_path, size_bytes, created_at) VALUES (:task_id, :original_name, :stored_name, :relative_path, :size_bytes, :created_at)"
+                    ),
                     [
                         dict(
                             task_id=i % tasks + 1,

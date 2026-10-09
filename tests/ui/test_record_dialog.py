@@ -465,7 +465,8 @@ def test_task_records_dialog_imports_attachment_without_blocking_ui(
     assert dialog.tabs.count() == 4
     assert dialog.attachment_list.count() == 1
     dialog.attachment_list.setCurrentRow(0)
-    assert "SHA-256" in dialog.attachment_detail.text()
+    assert "SHA-256" not in dialog.attachment_detail.text()
+    assert "SHA-256" in dialog.attachment_detail.toolTip()
     engine.dispose()
 
 

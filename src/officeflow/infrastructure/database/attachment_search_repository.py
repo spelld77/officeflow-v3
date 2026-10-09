@@ -52,8 +52,10 @@ class SqlAlchemyAttachmentSearchRepository:
         statement = select(
             AttachmentRecord.id,
             AttachmentRecord.task_id,
-            AttachmentRecord.original_name,
-            func.coalesce(AttachmentRecord.observed_size_bytes, AttachmentRecord.size_bytes).label("size_bytes"),
+            AttachmentRecord.display_name.label("original_name"),
+            func.coalesce(AttachmentRecord.observed_size_bytes, AttachmentRecord.size_bytes).label(
+                "size_bytes"
+            ),
             AttachmentRecord.observed_at,
             AttachmentRecord.created_at,
             AttachmentRecord.missing_at,
@@ -80,7 +82,7 @@ class SqlAlchemyAttachmentSearchRepository:
             )
             matches = or_(
                 *(
-                    func.substr(func.lower(AttachmentRecord.original_name), -len(suffix)) == suffix
+                    func.substr(func.lower(AttachmentRecord.display_name), -len(suffix)) == suffix
                     for suffix in suffixes
                 )
             )

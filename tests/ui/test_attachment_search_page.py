@@ -395,19 +395,20 @@ def test_startup_upgrade_dialog_stays_responsive_and_propagates_failure(qtbot: Q
 def test_bootstrap_upgrades_old_database_before_search(
     qtbot: QtBot, qapp, tmp_path: Path, monkeypatch
 ) -> None:
-    from alembic import command
-
     from officeflow.bootstrap.paths import AppPaths
-    from officeflow.infrastructure.database.migrate import migration_config
     from officeflow.infrastructure.settings.store import JsonSettingsStore
     from officeflow.main import build_application
+    from tests.integration.legacy_attachment_fixture import legacy_environment
 
     paths = AppPaths(tmp_path / "bootstrap")
     paths.ensure_directories()
-    with search_environment(paths.data_dir, attachment_root=paths.attachment_dir) as env:
+    with legacy_environment(
+        paths.data_dir,
+        revision="0009_reminder_schedule_cache",
+        attachment_root=paths.attachment_dir,
+    ) as env:
         task = env.tasks.create(TaskDraft(title="이전 업무"))
         env.add(task.id, "이전보고서.pdf")
-    command.downgrade(migration_config(paths.database_file), "0009_reminder_schedule_cache")
     JsonSettingsStore(paths.settings_file).save(AppSettings(automatic_backup_enabled=False))
     monkeypatch.setenv("OFFICEFLOW_DATA_DIR", str(paths.root))
     _, window = build_application(application=qapp)
@@ -420,10 +421,13 @@ def test_bootstrap_upgrades_old_database_before_search(
     window.close()
 
 
-def test_shutdown_waits_for_modeless_attachment_import(qtbot: QtBot, tmp_path: Path, monkeypatch) -> None:
+def test_shutdown_waits_for_modeless_attachment_import(
+    qtbot: QtBot, tmp_path: Path, monkeypatch
+) -> None:
     from threading import Event
 
     from officeflow.application.attachments import AttachmentCanceledError
+
     with search_environment(tmp_path) as env:
         task = env.tasks.create(TaskDraft(title="종료 검증"))
         env.add(task.id, "기존보고서.xlsx")
@@ -442,7 +446,7 @@ def test_shutdown_waits_for_modeless_attachment_import(qtbot: QtBot, tmp_path: P
                 if cancel_requested():
                     finished.set()
                     raise AttachmentCanceledError("취소")
-                Event().wait(.01)
+                Event().wait(0.01)
             raise AssertionError("shutdown did not cancel import")
 
         monkeypatch.setattr(env.attachments, "attach", import_file)
@@ -458,8 +462,11 @@ def test_shutdown_waits_for_modeless_attachment_import(qtbot: QtBot, tmp_path: P
         window.close()
 
 
-def test_startup_failure_is_visible_and_releases_instance(qapp, tmp_path: Path, monkeypatch) -> None:
+def test_startup_failure_is_visible_and_releases_instance(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
     import officeflow.main as entry
+
     events = []
 
     class FakeCoordinator:
@@ -480,7 +487,9 @@ def test_startup_failure_is_visible_and_releases_instance(qapp, tmp_path: Path, 
     monkeypatch.setattr(entry, "SingleInstanceCoordinator", FakeCoordinator)
     monkeypatch.setattr(entry, "build_application", fail)
     monkeypatch.setattr(entry.sys, "argv", ["officeflow"])
-    monkeypatch.setattr(entry.QMessageBox, "critical", lambda _parent, _title, message: events.append(message))
+    monkeypatch.setattr(
+        entry.QMessageBox, "critical", lambda _parent, _title, message: events.append(message)
+    )
     assert entry.main() == 1
     assert "synthetic disk full" in events[0] and events[1] == "released"
     assert not (tmp_path / "start-failure" / "officeflow.running").exists()

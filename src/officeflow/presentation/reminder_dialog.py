@@ -85,7 +85,9 @@ class ReminderDialog(QDialog):
         self.acknowledge_button = self._action_button("이번 알림 확인", "acknowledge")
         self.acknowledge_button.setObjectName("primaryButton")
         self.acknowledge_button.setDefault(True)
-        self.acknowledge_button.setToolTip("이번 알림만 닫습니다. 업무 상태와 다른 알림은 바뀌지 않습니다.")
+        self.acknowledge_button.setToolTip(
+            "이번 알림만 닫습니다. 업무 상태와 다른 알림은 바뀌지 않습니다."
+        )
         actions.addWidget(self.acknowledge_button, 1)
         actions.addWidget(self.snooze_minutes)
         actions.addWidget(self.snooze_button, 1)
@@ -141,7 +143,11 @@ class ReminderDialog(QDialog):
                 ReminderRelation.END: "종료",
                 ReminderRelation.ABSOLUTE: "지정",
             }[alert.reminder.relation]
-            scheduled = format_datetime(alert.delivery.snoozed_until or alert.delivery.scheduled_at, self._timezone.key, short=True)
+            scheduled = format_datetime(
+                alert.delivery.snoozed_until or alert.delivery.scheduled_at,
+                self._timezone.key,
+                short=True,
+            )
             prefix = "놓친 알림 · " if alert.recovered else ""
             item = QListWidgetItem(f"{prefix}{alert.task.title} · {relation} {scheduled}")
             item.setData(Qt.ItemDataRole.UserRole, delivery_id)
@@ -151,7 +157,9 @@ class ReminderDialog(QDialog):
                 f"놓친 알림 {recovered}개를 복구했습니다. 이번 알림만 확인하면 다음 예약은 유지됩니다."
             )
         elif not self.caption.text():
-            self.caption.setText("이번 알림만 확인하면 다음 예약은 유지됩니다. 업무 완료와 구분해 주세요.")
+            self.caption.setText(
+                "이번 알림만 확인하면 다음 예약은 유지됩니다. 업무 완료와 구분해 주세요."
+            )
         if self.alert_list.currentRow() < 0 and self.alert_list.count():
             self.alert_list.setCurrentRow(0)
 
@@ -202,12 +210,16 @@ class ReminderDialog(QDialog):
             return
         occurrence_only = bool(alert.task.recurrence_rule and alert.occurrence_start)
         self.complete_button.setText(
-            "이번 회차 완료…" if occurrence_only
-            else "업무 전체 완료…" if alert.task.recurrence_rule else "업무 완료…"
+            "이번 회차 완료…"
+            if occurrence_only
+            else "업무 전체 완료…"
+            if alert.task.recurrence_rule
+            else "업무 완료…"
         )
         self.complete_button.setToolTip(
             "이번 반복 회차를 완료하고 이 회차의 남은 알림을 중단합니다. 다음 회차는 유지됩니다."
-            if occurrence_only else "업무 자체를 완료하고 이 업무의 남은 알림과 재알림을 모두 중단합니다."
+            if occurrence_only
+            else "업무 자체를 완료하고 이 업무의 남은 알림과 재알림을 모두 중단합니다."
         )
         schedule = format_datetime(alert.delivery.scheduled_at, self._timezone.key)
         description = alert.task.description or "설명이 없습니다."
