@@ -55,16 +55,25 @@ def test_fired_delivery_survives_closed_database_and_is_recovered_once(tmp_path:
         assert repository.get_reminder_delivery(original.delivery.id) is not None
 
     with _services(database) as (_tasks, restarted_again, _repository):
-        assert restarted_again.poll_due(
-            now=now + timedelta(minutes=4), recover_unhandled=True
-        ) == ()
+        assert (
+            restarted_again.poll_due(now=now + timedelta(minutes=4), recover_unhandled=True) == ()
+        )
 
 
 @pytest.mark.parametrize(
     "action",
     [
-        "acknowledge", "complete", "defer", "snooze", "disable", "remove_rule",
-        "task_completed", "task_canceled", "task_archived", "trash", "delete",
+        "acknowledge",
+        "complete",
+        "defer",
+        "snooze",
+        "disable",
+        "remove_rule",
+        "task_completed",
+        "task_canceled",
+        "task_archived",
+        "trash",
+        "delete",
     ],
 )
 def test_startup_filters_handled_disabled_or_inactive_deliveries(
@@ -107,7 +116,7 @@ def test_startup_filters_handled_disabled_or_inactive_deliveries(
         else:
             tasks.move_to_trash(task.id, now=now)
             if action == "delete":
-                tasks.delete_permanently(task.id)
+                tasks.delete_permanently(task.id, retained_approved=True)
 
     with _services(database) as (_tasks, restarted, _repository):
         assert restarted.poll_due(now=now + timedelta(minutes=1), recover_unhandled=True) == ()

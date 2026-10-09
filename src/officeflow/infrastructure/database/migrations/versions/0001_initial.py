@@ -38,6 +38,10 @@ def upgrade() -> None:
         "document_families",
         "file_operation_receipts",
         "attachment_versions",
+        "task_history",
+        "task_mutation_receipts",
+        "task_snapshots",
+        "snapshot_files",
     }
     Base.metadata.create_all(
         bind=bind,

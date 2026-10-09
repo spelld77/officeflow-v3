@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.reminder_runtime import ReminderRuntimeState
+from officeflow.application.task_mutations import MutationAttempt
 from officeflow.application.task_saving import ReminderEdit
 from officeflow.application.tasks import TaskDraft
 from officeflow.domain.enums import ReminderRelation, TaskPriority, TaskStatus
@@ -60,6 +61,7 @@ class TaskEditorDialog(QDialog):
         super().__init__(parent)
         self._timezone = timezone
         self._task = task
+        self.mutation_attempt = MutationAttempt()
         self._draft: TaskDraft | None = None
         self._on_save = on_save
         self._deliveries = deliveries

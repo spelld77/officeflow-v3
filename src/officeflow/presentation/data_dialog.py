@@ -717,6 +717,11 @@ class DataManagementDialog(QDialog):
             f"백업  {self._format_bytes(result.backup_bytes)} ({result.backup_count:,}개)"
         )
         self._update_backup_summary(result)
+        if result.history_count or result.snapshot_count:
+            self.usage_storage_label.setText(
+                self.usage_storage_label.text()
+                + f"\n업무 이력 {result.history_count:,}건 · 중요 보관 {result.snapshot_count:,}개 (파일 참조 {result.snapshot_file_count:,}건, 공유 파일 용량은 중복 계산하지 않음)"
+            )
         issues: list[str] = []
         if result.quarantine_file_count:
             issues.append(

@@ -22,6 +22,7 @@ from officeflow.domain.attachment import Attachment, FileObservation
 class FileReferenceKind(StrEnum):
     ATTACHMENT = "attachment"
     VERSION = "version"
+    SNAPSHOT_FILE = "snapshot_file"
     CACHE = "cache"
     ORPHAN = "orphan"
 
@@ -33,7 +34,11 @@ class FileReference:
     relative_path: str | None = None
 
     def __post_init__(self) -> None:
-        if self.kind in {FileReferenceKind.ATTACHMENT, FileReferenceKind.VERSION}:
+        if self.kind in {
+            FileReferenceKind.ATTACHMENT,
+            FileReferenceKind.VERSION,
+            FileReferenceKind.SNAPSHOT_FILE,
+        }:
             if not self.attachment_id or self.relative_path is not None:
                 raise ValueError("올바른 첨부 ID가 필요합니다.")
         elif self.kind in {FileReferenceKind.ORPHAN, FileReferenceKind.CACHE}:
@@ -61,6 +66,10 @@ class FileReference:
     @classmethod
     def version(cls, version_id: int) -> FileReference:
         return cls(FileReferenceKind.VERSION, attachment_id=version_id)
+
+    @classmethod
+    def snapshot_file(cls, identity: int) -> FileReference:
+        return cls(FileReferenceKind.SNAPSHOT_FILE, attachment_id=identity)
 
     @classmethod
     def cache(cls, relative: str) -> FileReference:
@@ -194,12 +203,19 @@ class AttachmentExportService:
 
     def resolve(self, reference: FileReference) -> ResolvedFileReference:
         root = self.attachments.storage_root
-        if reference.kind is FileReferenceKind.VERSION:
+        if reference.kind in {FileReferenceKind.VERSION, FileReferenceKind.SNAPSHOT_FILE}:
             if self.attachments.lifecycle is None or reference.attachment_id is None:
                 raise ValueError("보관본 서비스가 준비되지 않았습니다.")
-            entry = self.attachments.lifecycle.catalog.get("version", reference.attachment_id)
+            entry = self.attachments.lifecycle.catalog.get(
+                reference.kind.value, reference.attachment_id
+            )
             attachment = entry.file
-            relative, name = attachment.relative_path, self._version_name(entry.name, entry.label)
+            relative, name = (
+                attachment.relative_path,
+                self._version_name(entry.name, entry.label)
+                if reference.kind is FileReferenceKind.VERSION
+                else entry.name,
+            )
         elif reference.kind is FileReferenceKind.ATTACHMENT:
             assert reference.attachment_id is not None
             attachment = self.attachments.get_metadata(reference.attachment_id)
@@ -390,12 +406,12 @@ class AttachmentExportService:
 
     def task_id(self, reference: FileReference) -> int:
         if (
-            reference.kind is FileReferenceKind.VERSION
+            reference.kind in {FileReferenceKind.VERSION, FileReferenceKind.SNAPSHOT_FILE}
             and self.attachments.lifecycle
             and reference.attachment_id
         ):
             return self.attachments.lifecycle.catalog.get(
-                "version", reference.attachment_id
+                reference.kind.value, reference.attachment_id
             ).task_id
         if reference.attachment_id:
             return self.attachments.get_metadata(reference.attachment_id).task_id
@@ -403,12 +419,18 @@ class AttachmentExportService:
 
     def name(self, reference: FileReference) -> str:
         if (
-            reference.kind is FileReferenceKind.VERSION
+            reference.kind in {FileReferenceKind.VERSION, FileReferenceKind.SNAPSHOT_FILE}
             and self.attachments.lifecycle
             and reference.attachment_id
         ):
-            entry = self.attachments.lifecycle.catalog.get("version", reference.attachment_id)
-            return self._version_name(entry.name, entry.label)
+            entry = self.attachments.lifecycle.catalog.get(
+                reference.kind.value, reference.attachment_id
+            )
+            return (
+                self._version_name(entry.name, entry.label)
+                if reference.kind is FileReferenceKind.VERSION
+                else entry.name
+            )
         if reference.attachment_id:
             return self.attachments.get_metadata(reference.attachment_id).name
         return PurePosixPath(reference.relative_path or "첨부파일").name

@@ -55,8 +55,10 @@ def deleting(root, *, checkpoint=None):
         yield env, creation, service, repository, storage
 
 
-def request(service, kind, id, *, include_versions=False):
+def request(service, kind, id, *, include_versions=None):
     plan = service.plan(DeleteTarget(kind, id))
+    if include_versions is None:
+        include_versions = kind == "task"
     return DeleteCommand(uuid4().hex, plan.target, plan.fingerprint, include_versions)
 
 

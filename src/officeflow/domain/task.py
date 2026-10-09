@@ -55,6 +55,7 @@ class Task:
     # Read-only history projection: original occurrence identity, not effective time.
     occurrence_id: int | None = None
     occurrence_start: datetime | None = None
+    command_replayed: bool = False
 
     def __post_init__(self) -> None:
         normalized_title = self.title.strip()

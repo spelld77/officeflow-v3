@@ -6,6 +6,7 @@ from officeflow.application.task_saving import TaskSaveContext, TaskSaveService
 from officeflow.application.tasks import TaskService
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory
+from officeflow.infrastructure.database.task_mutations import TaskMutationRunner
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 
 
@@ -17,4 +18,4 @@ def task_save_service(sessions: SessionFactory, timezone: str) -> TaskSaveServic
             repository = SqlAlchemyReminderRepository(scoped)
             yield TaskSaveContext(tasks, ReminderService(repository, tasks), repository)
 
-    return TaskSaveService(unit_of_work)
+    return TaskSaveService(unit_of_work, mutation_runner=TaskMutationRunner(sessions))

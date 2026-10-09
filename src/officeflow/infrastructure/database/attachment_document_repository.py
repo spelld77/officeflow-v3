@@ -26,6 +26,7 @@ from officeflow.infrastructure.database.models import (
     DocumentFamilyRecord,
     FileAssetRecord,
     FileOperationReceiptRecord,
+    SnapshotFileRecord,
     TaskRecord,
 )
 from officeflow.infrastructure.database.session import SessionFactory
@@ -41,6 +42,46 @@ class SqlAlchemyDocumentRepository:
 
     @staticmethod
     def _source(session: Session, command: DocumentCommand) -> DocumentSource:
+        if command.source_kind == "snapshot_file":
+            row = session.get(SnapshotFileRecord, command.source_id)
+            if (
+                row is None
+                or row.asset.state != "active"
+                or row.asset.kind != "frozen"
+                or (row.fixed_size_bytes, row.fixed_checksum)
+                != (row.asset.fixed_size_bytes, row.asset.fixed_checksum)
+            ):
+                raise ValueError("중요 보관 파일의 연결/고정 기준을 확인하세요.")
+            task = session.get(TaskRecord, row.snapshot.task_id)
+            if task is None or task.deleted_at is not None:
+                raise ValueError("휴지통 업무는 먼저 복원하세요.")
+            state = dict(
+                kind="snapshot_file",
+                id=row.id,
+                snapshot=row.snapshot_id,
+                task_id=task.id,
+                asset=row.asset_id,
+                path=row.asset.relative_path,
+                family=row.family_id,
+                name=row.name,
+                size=row.fixed_size_bytes,
+                checksum=row.fixed_checksum,
+            )
+            return DocumentSource(
+                "snapshot_file",
+                row.id,
+                task.id,
+                row.family_id,
+                row.asset_id,
+                row.asset.relative_path,
+                row.name,
+                "version",
+                0,
+                fingerprint(state),
+                json.dumps(state, ensure_ascii=False),
+                row.fixed_size_bytes,
+                row.fixed_checksum,
+            )
         if command.source_kind == "cache":
             from officeflow.infrastructure.attachments.view_cache import decode_cache_source
 
@@ -259,6 +300,19 @@ class SqlAlchemyDocumentRepository:
                 session.flush()
                 result = DocumentResult(command.job_id, asset.id, version_id=version.id)
             elif command.operation is DocumentOperation.WORK:
+                if expected.kind == "snapshot_file":
+                    family = session.get(DocumentFamilyRecord, expected.family_id)
+                    if family is None:
+                        session.add(
+                            DocumentFamilyRecord(
+                                id=expected.family_id,
+                                task_id=expected.task_id,
+                                created_at=now,
+                                next_version_number=1,
+                            )
+                        )
+                    elif family.task_id != expected.task_id:
+                        raise ValueError("다른 업무의 문서 계열에 작업본을 만들 수 없습니다.")
                 slot = (
                     session.scalar(
                         select(func.max(AttachmentRecord.sort_order)).where(

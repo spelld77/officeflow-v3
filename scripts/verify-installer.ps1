@@ -22,7 +22,7 @@ function Invoke-CheckedProcess {
 }
 
 $fullTestRoot = [IO.Path]::GetFullPath($testRoot)
-if (-not $fullTestRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase)) {
+if (-not $fullTestRoot.StartsWith($projectRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "설치 검증 경로가 프로젝트 밖입니다: $fullTestRoot"
 }
 if (Test-Path -LiteralPath $fullTestRoot) {

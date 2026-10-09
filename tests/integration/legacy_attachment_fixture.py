@@ -22,7 +22,7 @@ def legacy_environment(root, revision="0012_attachment_observation", *, attachme
     command.upgrade(migration_config(database), revision)
     engine = create_database_engine(database)
     sessions = SessionFactory(engine)
-    tasks = TaskService(SqlAlchemyTaskRepository(sessions))
+    tasks = TaskService(SqlAlchemyTaskRepository(sessions), history_enabled=False)
     folder = attachment_root or root / "attachments"
     folder.mkdir(parents=True, exist_ok=True)
 

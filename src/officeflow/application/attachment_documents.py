@@ -52,7 +52,7 @@ class DocumentCommand:
         if (
             not re.fullmatch(r"[0-9a-f]{32}", self.job_id)
             or not isinstance(self.operation, DocumentOperation)
-            or self.source_kind not in {"attachment", "version", "cache"}
+            or self.source_kind not in {"attachment", "version", "cache", "snapshot_file"}
             or self.source_id <= 0
             or self.expected_revision < 0
         ):
@@ -71,7 +71,10 @@ class DocumentCommand:
                 raise ValueError("보관 이름은 1~200자, 메모는 2,000자 이하여야 합니다.")
         elif self.filename or self.label or self.memo:
             raise ValueError("원본 지정/해제는 기존 이름과 메모를 유지합니다.")
-        if self.source_kind == "version" and self.operation is not DocumentOperation.WORK:
+        if (
+            self.source_kind in {"version", "snapshot_file"}
+            and self.operation is not DocumentOperation.WORK
+        ):
             raise ValueError("보관본에서는 새 작업본만 만들 수 있습니다.")
         if (self.source_kind == "cache") != bool(self.cache_payload):
             raise ValueError("보기 사본 출처 정보가 필요합니다.")

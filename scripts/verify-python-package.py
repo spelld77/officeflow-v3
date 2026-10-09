@@ -56,6 +56,13 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "packaging/windows/OfficeFlow-사용자안내.html",
             "src/officeflow/infrastructure/database/migrations/versions/0010_attachment_search.py",
             "src/officeflow/infrastructure/database/migrations/versions/0011_attachment_sort_order.py",
+            "src/officeflow/infrastructure/database/migrations/versions/0012_attachment_observation.py",
+            "src/officeflow/infrastructure/database/migrations/versions/0013_attachment_assets.py",
+            "src/officeflow/infrastructure/database/migrations/versions/0014_task_history.py",
+            "src/officeflow/infrastructure/database/migrations/versions/0015_task_snapshots.py",
+            "src/officeflow/application/task_snapshots.py",
+            "src/officeflow/presentation/task_history_dialog.py",
+            "src/officeflow/presentation/task_snapshot_dialog.py",
             "src/officeflow/presentation/attachment_search_page.py",
             "src/officeflow/domain/hourly_notification.py",
             "src/officeflow/application/hourly_notifications.py",
@@ -126,10 +133,13 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
     with closing(sqlite3.connect(database)) as connection:
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0011_attachment_sort_order"
+            == "0015_task_snapshots"
         )
         assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM attachment_search").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM task_history").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM task_snapshots").fetchone()[0] == 0
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     print(
         f"Python package {expected}: archive safety, fresh runtime import, diagnostics and smoke test passed"

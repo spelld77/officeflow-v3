@@ -8,7 +8,7 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize("mode", ["external", "internal", "view", "backup"])
+@pytest.mark.parametrize("mode", ["external", "internal", "view", "backup", "snapshot"])
 def test_one_gib_export_has_bounded_peak_rss(tmp_path, mode):
     if shutil.disk_usage(tmp_path).free < 8 * 1024**3:
         pytest.skip("1 GiB full-backup fixture needs 8 GiB temporary free space")
@@ -31,6 +31,9 @@ from officeflow.bootstrap.paths import AppPaths
 from officeflow.infrastructure.backup import BackupManager
 from officeflow.infrastructure.attachments.view_cache import AttachmentViewCache
 from officeflow.infrastructure.database.document_catalog import DocumentCatalog
+from officeflow.infrastructure.database.task_snapshot_repository import TaskSnapshotService
+from officeflow.infrastructure.attachments.snapshot_storage import SnapshotStorage
+from officeflow.application.task_snapshots import SnapshotCommand, SnapshotSelection
 class Counters(ctypes.Structure):
     _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [(name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
 def memory():
@@ -85,6 +88,9 @@ else:
         view_cache = AttachmentViewCache(data,internal_storage.coordinator)
     if mode == 'backup':
         manager = BackupManager(paths,coordinator=internal_storage.coordinator)
+    if mode == 'snapshot':
+        snapshot_service = TaskSnapshotService(sessions,SnapshotStorage(data,internal_storage.coordinator))
+        snapshot_request = SnapshotCommand(uuid4().hex,task.id,'large bundle',(SnapshotSelection('attachment',source_id),),documents_closed=True)
 before, peak_before = memory()
 start = time.monotonic()
 if mode == "external":
@@ -97,6 +103,11 @@ elif mode == 'internal':
 elif mode == 'view':
     output = view_cache.prepare(frozen,lambda:False)
     warning = ''
+elif mode == 'snapshot':
+    result = snapshot_service.create(snapshot_request)
+    file = DocumentCatalog(sessions).snapshot_files(task.id,result.snapshot_id).items[0].file
+    output = data / file.relative_path
+    warning = result.warning
 else:
     backup = manager.create_backup()
     manifest = manager.verify_backup(backup.path)

@@ -9,9 +9,15 @@ from officeflow.infrastructure.database.models import (
     AttachmentRecord,
     AttachmentVersionRecord,
     FileAssetRecord,
+    SnapshotFileRecord,
+    TaskSnapshotRecord,
 )
 
-_SUPPORTED_REFERENCES = {("attachments", ("asset_id",)), ("attachment_versions", ("asset_id",))}
+_SUPPORTED_REFERENCES = {
+    ("attachments", ("asset_id",)),
+    ("attachment_versions", ("asset_id",)),
+    ("snapshot_files", ("asset_id",)),
+}
 
 
 def assert_supported_sqlite_asset_references(connection: sqlite3.Connection) -> None:
@@ -56,7 +62,16 @@ def asset_reference_count(
         .select_from(AttachmentVersionRecord)
         .where(AttachmentVersionRecord.asset_id == asset_id)
     )
-    return int(session.scalar(attached) or 0) + int(session.scalar(versions) or 0)
+    snapshots = (
+        select(func.count())
+        .select_from(SnapshotFileRecord)
+        .where(SnapshotFileRecord.asset_id == asset_id)
+    )
+    return (
+        int(session.scalar(attached) or 0)
+        + int(session.scalar(versions) or 0)
+        + int(session.scalar(snapshots) or 0)
+    )
 
 
 def asset_paths_for_task(session: Session, task_id: int) -> tuple[str, ...]:
@@ -70,4 +85,10 @@ def asset_paths_for_task(session: Session, task_id: int) -> tuple[str, ...]:
         .join(AttachmentVersionRecord, AttachmentVersionRecord.asset_id == FileAssetRecord.id)
         .where(AttachmentVersionRecord.task_id == task_id)
     )
-    return tuple(session.scalars(attached.union(versions)))
+    snapshots = (
+        select(FileAssetRecord.relative_path)
+        .join(SnapshotFileRecord, SnapshotFileRecord.asset_id == FileAssetRecord.id)
+        .join(TaskSnapshotRecord, TaskSnapshotRecord.id == SnapshotFileRecord.snapshot_id)
+        .where(TaskSnapshotRecord.task_id == task_id)
+    )
+    return tuple(session.scalars(attached.union(versions, snapshots)))

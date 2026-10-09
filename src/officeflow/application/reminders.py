@@ -4,10 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Protocol
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from officeflow.application.reminder_runtime import ReminderRuntimeState
+from officeflow.application.task_mutations import tracked_command
 from officeflow.application.tasks import TaskService
 from officeflow.domain.enums import (
     OccurrenceStatus,
@@ -87,10 +88,25 @@ class ReminderRepository(Protocol):
 
 
 class ReminderService:
-    def __init__(self, repository: ReminderRepository, task_service: TaskService) -> None:
+    def __init__(
+        self,
+        repository: ReminderRepository,
+        task_service: TaskService,
+        *,
+        command_context: Any = None,
+    ) -> None:
         self._repository = repository
         self._task_service = task_service
+        self._command_context = command_context
+        self._mutation_runner = getattr(task_service, "_mutation_runner", None)
         self.poll_pending = False
+
+    def _for_mutation(self, context: Any) -> ReminderService:
+        return ReminderService(
+            context.reminder_repository,
+            self._task_service._for_mutation(context),
+            command_context=context,
+        )
 
     def rules_for_task(self, task_id: int) -> tuple[ReminderRuleInput, ...]:
         return tuple(
@@ -383,7 +399,10 @@ class ReminderService:
         delivery = self._get_delivery(delivery_id)
         return self._repository.save_reminder_delivery(delivery.acknowledge(now=now))
 
-    def complete(self, delivery_id: int, *, now: datetime | None = None) -> ReminderDelivery:
+    @tracked_command
+    def complete(
+        self, delivery_id: int, *, now: datetime | None = None, command_id: str | None = None
+    ) -> ReminderDelivery:
         current = now or datetime.now(UTC)
         delivery = self._get_delivery(delivery_id)
         task = self._task_service.get(delivery.task_id)
@@ -400,7 +419,10 @@ class ReminderService:
             delivery.acknowledge(ReminderDeliveryStatus.COMPLETED, now=current)
         )
 
-    def defer(self, delivery_id: int, *, now: datetime | None = None) -> ReminderDelivery:
+    @tracked_command
+    def defer(
+        self, delivery_id: int, *, now: datetime | None = None, command_id: str | None = None
+    ) -> ReminderDelivery:
         current = now or datetime.now(UTC)
         delivery = self._get_delivery(delivery_id)
         task = self._task_service.get(delivery.task_id)

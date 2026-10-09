@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "3.0.7"
+  #define AppVersion "3.0.8"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\..\dist\OfficeFlow"

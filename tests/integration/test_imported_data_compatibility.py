@@ -48,7 +48,7 @@ def imported_data(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Ap
         upgrade_database(paths.database_file)
     engine = create_database_engine(paths.database_file)
     sessions = SessionFactory(engine)
-    tasks = TaskService(SqlAlchemyTaskRepository(sessions))
+    tasks = TaskService(SqlAlchemyTaskRepository(sessions), history_enabled=not older_schema)
     records = RecordService(SqlAlchemyRecordRepository(sessions), tasks)
     attachments = AttachmentService(
         SqlAlchemyAttachmentRepository(sessions),
@@ -235,7 +235,7 @@ def test_imported_v3_backup_and_pending_restore_preserve_all_data(
         assert list(connection.execute("PRAGMA foreign_key_check")) == []
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0013_attachment_assets"
+            == "0015_task_snapshots"
         )
 
 

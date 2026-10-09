@@ -177,7 +177,7 @@ def test_permanent_delete_cascades_related_data_and_preserves_work_log(
         work_log_id = work_log.id
 
     service.move_to_trash(task.id, now=created_at + timedelta(minutes=1))
-    attachment_paths = service.delete_permanently(task.id)
+    attachment_paths = service.delete_permanently(task.id, retained_approved=True)
 
     assert attachment_paths == ("aa/bb/delete-evidence.txt",)
     with sessions.transaction() as session:

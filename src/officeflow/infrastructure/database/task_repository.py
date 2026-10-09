@@ -43,8 +43,10 @@ from officeflow.infrastructure.database.models import (
     FileAssetRecord,
     ReminderDeliveryRecord,
     ReminderRecord,
+    TaskHistoryRecord,
     TaskOccurrenceRecord,
     TaskRecord,
+    TaskSnapshotRecord,
     WorkLogRecord,
 )
 from officeflow.infrastructure.database.search import (
@@ -58,6 +60,19 @@ from officeflow.infrastructure.database.session import SessionFactory
 class SqlAlchemyTaskRepository:
     def __init__(self, sessions: SessionFactory) -> None:
         self._sessions = sessions
+
+    def mutation_runner(self) -> Any:
+        from officeflow.infrastructure.database.task_mutations import TaskMutationRunner
+
+        return TaskMutationRunner(self._sessions)
+
+    def history_service(self) -> Any:
+        from officeflow.application.task_history import TaskHistoryService
+        from officeflow.infrastructure.database.task_history_repository import (
+            SqlAlchemyTaskHistoryRepository,
+        )
+
+        return TaskHistoryService(SqlAlchemyTaskHistoryRepository(self._sessions))
 
     @contextmanager
     def read_snapshot(self) -> Iterator[SqlAlchemyTaskRepository]:
@@ -157,13 +172,38 @@ class SqlAlchemyTaskRepository:
             self._reschedule_future_reminders(session, record, restored_at)
         return self.get_required(task_id)
 
-    def delete_permanently(self, task_id: int) -> tuple[str, ...]:
+    def delete_permanently_confirmed(self, task_id: int) -> tuple[str, ...]:
+        return self.delete_permanently(task_id, retained_approved=True)
+
+    def delete_permanently(
+        self, task_id: int, *, retained_approved: bool = False
+    ) -> tuple[str, ...]:
         with self._sessions.transaction() as session:
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             assert_supported_asset_references(session)
             record = session.get(TaskRecord, task_id)
             if record is None or record.deleted_at is None:
                 raise LookupError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
+            if (
+                not retained_approved
+                and session.scalar(
+                    select(TaskHistoryRecord.id)
+                    .where(TaskHistoryRecord.task_id == task_id)
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise ValueError("업무 이력까지 삭제하는 범위를 확인하세요.")
+            if (
+                not retained_approved
+                and session.scalar(
+                    select(TaskSnapshotRecord.id)
+                    .where(TaskSnapshotRecord.task_id == task_id)
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise ValueError("중요 보관까지 삭제하는 범위를 확인하세요.")
             attachment_paths = asset_paths_for_task(session, task_id)
             assets = tuple(
                 session.scalars(

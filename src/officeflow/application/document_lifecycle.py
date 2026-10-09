@@ -49,6 +49,12 @@ class DocumentLifecycle:
             cache,
         )
         self.changed = changed
+        from officeflow.infrastructure.attachments.snapshot_storage import SnapshotStorage
+        from officeflow.infrastructure.database.task_snapshot_repository import TaskSnapshotService
+
+        self.snapshots = TaskSnapshotService(
+            catalog.sessions, SnapshotStorage(cache.root, documents.coordinator)
+        )
 
     def create(
         self,
@@ -106,6 +112,8 @@ class DocumentLifecycle:
         task_id = (
             plan.target.id
             if plan.target.kind in {"task", "selection"}
+            else self.snapshots.task_id(plan.target.id)
+            if plan.target.kind == "snapshot"
             else self.catalog.get(
                 "version" if plan.target.kind == "version" else "attachment", plan.target.id
             ).task_id
@@ -115,6 +123,7 @@ class DocumentLifecycle:
             cancel_requested=canceled,
         )
         self.changed(task_id)
+        self.catalog.sessions.task_events.publish(task_id)
         return result
 
     def plan(self, kind: str, identity: int) -> DeletePlan:

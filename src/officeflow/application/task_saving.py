@@ -1,12 +1,15 @@
 """One transaction for task details, reminder rules and their schedules."""
 
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from officeflow.application.reminders import ReminderService, ReminderTarget
+from officeflow.application.task_mutations import tracked_command
 from officeflow.application.tasks import TaskDraft, TaskService
 from officeflow.domain.enums import ReminderRelation, TaskStatus
 from officeflow.domain.reminder import Reminder, ReminderRuleInput
@@ -42,9 +45,30 @@ class TaskSaveContext:
 
 
 class TaskSaveService:
-    def __init__(self, unit_of_work: Callable[[], AbstractContextManager[TaskSaveContext]]) -> None:
+    def __init__(
+        self,
+        unit_of_work: Callable[[], AbstractContextManager[TaskSaveContext]],
+        *,
+        mutation_runner: Any = None,
+        command_context: Any = None,
+    ) -> None:
         self._unit_of_work = unit_of_work
+        self._mutation_runner = mutation_runner
+        self._command_context = command_context
 
+    def _for_mutation(self, context: Any) -> TaskSaveService:
+        @contextmanager
+        def scoped_work() -> Iterator[TaskSaveContext]:
+            tasks = TaskService(context.task_repository, command_context=context)
+            yield TaskSaveContext(
+                tasks,
+                ReminderService(context.reminder_repository, tasks, command_context=context),
+                context.reminder_repository,
+            )
+
+        return TaskSaveService(scoped_work, command_context=context)
+
+    @tracked_command
     def save(
         self,
         draft: TaskDraft,
@@ -54,6 +78,7 @@ class TaskSaveService:
         expected_task: Task | None = None,
         expected_rules: tuple[Reminder, ...] | None = None,
         now: datetime | None = None,
+        command_id: str | None = None,
     ) -> Task:
         current = now or datetime.now(UTC)
         edits = (

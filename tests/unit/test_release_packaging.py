@@ -14,10 +14,11 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.7"
+    assert __version__ == "3.0.8"
     assert project["project"]["version"] == __version__
-    assert "FileVersion', '3.0.7'" in version_info
-    assert '#define AppVersion "3.0.7"' in installer
+    assert f"FileVersion', '{__version__}'" in version_info
+    assert f"ProductVersion', '{__version__}'" in version_info
+    assert f'#define AppVersion "{__version__}"' in installer
 
 
 def test_installer_is_per_user_upgrade_safe_and_preserves_data() -> None:
@@ -39,6 +40,8 @@ def test_release_build_verifies_package_and_installer_lifecycle() -> None:
     assert "verify-installer.ps1" in build_script
     assert "SHA256SUMS.txt" in build_script
     assert "build-python-package.ps1" in build_script
+    assert 'OfficeFlow-$version-Windows.zip' in build_script
+    assert 'Compress-Archive -LiteralPath $appDir' in build_script
     assert "database\\migrations" in build_script
     assert 'Filter "icu*.dll"' in build_script
     assert '-Filter "__pycache__"' in build_script
@@ -73,6 +76,8 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert "Python 실행 모드" in content
     assert "setup-officeflow-python.cmd" in content
     assert "%LOCALAPPDATA%\\OfficeFlow" in content
-    assert "OfficeFlow 3.0.7 사용자 안내" in content
+    assert f"OfficeFlow {__version__} 사용자 안내" in content
+    assert "0015" in content
+    assert "개발 소스에 반영되어" not in content
     assert "첨부파일 찾기" in content
     assert "다음 배포 예정" not in content

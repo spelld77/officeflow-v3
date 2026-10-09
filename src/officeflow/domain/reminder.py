@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from officeflow.domain.enums import ReminderDeliveryStatus, ReminderRelation
@@ -70,6 +70,7 @@ class ReminderDelivery:
     id: int | None
     reminder_id: int
     task_id: int
+    command_replayed: bool = field(default=False, kw_only=True)
     occurrence_start: datetime | None
     scheduled_at: datetime
     fire_key: str

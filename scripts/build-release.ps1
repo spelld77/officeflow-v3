@@ -30,7 +30,7 @@ if ($LASTEXITCODE -ne 0) {
 function Reset-GeneratedDirectory {
     param([string]$Path)
     $fullPath = [IO.Path]::GetFullPath($Path)
-    if (-not $fullPath.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $fullPath.StartsWith($projectRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw "빌드 경로가 프로젝트 밖입니다: $fullPath"
     }
     if (Test-Path -LiteralPath $fullPath) {
@@ -145,6 +145,10 @@ if (-not $SkipInstaller) {
 }
 
 & (Join-Path $projectRoot "scripts\build-python-package.ps1")
+
+# Include the entire onedir bundle: the EXE alone cannot run without _internal.
+$portableArchive = Join-Path $distRoot "OfficeFlow-$version-Windows.zip"
+Compress-Archive -LiteralPath $appDir -DestinationPath $portableArchive -CompressionLevel Optimal
 
 $releaseFiles = Get-ChildItem -LiteralPath $distRoot -File -Recurse |
     Where-Object { $_.Name -notin @("SHA256SUMS.txt", "release-manifest.json") }

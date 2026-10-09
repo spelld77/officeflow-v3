@@ -65,6 +65,7 @@ from officeflow.application.reminder_preview import (
     ReminderPreviewService,
 )
 from officeflow.application.reminders import ReminderAlert, ReminderService
+from officeflow.application.task_mutations import MutationAttempt
 from officeflow.application.task_saving import ReminderEdit, TaskSaveService
 from officeflow.application.tasks import (
     ScheduledTask,
@@ -184,6 +185,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._settings = settings
         self._task_service = task_service
+        self._transition_attempt = MutationAttempt()
+        self._quick_add_attempt = MutationAttempt()
+        self._undo_attempt = MutationAttempt()
+        self._reminder_attempt = MutationAttempt()
         self._reminder_service = reminder_service
         self._task_save_service = task_save_service
         self._preview_result = ReminderPreviewResult((), True)
@@ -1486,12 +1491,17 @@ class MainWindow(QMainWindow):
                 attachments = menu.addAction("첨부파일 보기 · 관리…")
                 attachments.triggered.connect(self._open_selected_attachments)
             menu.addSeparator()
+        if task.deleted_at is None:
+            history = menu.addAction("이력·보관…")
+            history.triggered.connect(self._open_selected_history)
         if task.matched_attachment_id is not None:
             matching_file = menu.addAction("일치한 첨부파일 열기")
             attachment_id = task.matched_attachment_id
             matching_file.triggered.connect(lambda: self._open_attachment_id(attachment_id))
             menu.addSeparator()
         if task.deleted_at is not None:
+            history = menu.addAction("이력·보관…")
+            history.triggered.connect(self._open_selected_history)
             if self._attachment_service is not None and self._record_service is not None:
                 attachments = menu.addAction("첨부파일 보기…")
                 attachments.triggered.connect(self._open_selected_attachments)
@@ -1575,20 +1585,25 @@ class MainWindow(QMainWindow):
         if undo is None:
             return
         try:
+            identity = self._undo_attempt.identify(
+                (undo.task_id, undo.occurrence_start, undo.previous_status)
+            )
             if undo.occurrence_start is not None:
                 self._task_service.transition_occurrence(
                     undo.task_id,
                     undo.occurrence_start,
                     OccurrenceStatus.PENDING,
+                    command_id=identity,
                 )
             else:
-                self._task_service.transition(undo.task_id, TaskStatus.ACTIVE)
-                if undo.previous_status is TaskStatus.PENDING:
-                    self._task_service.transition(undo.task_id, TaskStatus.PENDING)
-        except (TaskValidationError, LookupError, ValueError) as error:
+                self._task_service.undo_completion(
+                    undo.task_id, undo.previous_status, command_id=identity
+                )
+        except Exception as error:
             self._show_error("완료를 되돌리지 못했습니다.", error)
             return
         self._clear_completion_undo()
+        self._undo_attempt.succeeded()
         self._refresh_tasks()
         self.statusBar().showMessage(f"'{undo.title}' 완료를 취소했습니다.", 4000)
 
@@ -1621,7 +1636,11 @@ class MainWindow(QMainWindow):
     def _quick_add_task(self) -> None:
         title = self._quick_add_edit.text()
         try:
-            task = self._task_service.quick_add(title, view=self._current_view)
+            day = self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
+            identity = self._quick_add_attempt.identify((title, self._current_view, day))
+            task = self._task_service.quick_add(
+                title, view=self._current_view, local_date=day, command_id=identity
+            )
         except TaskValidationError as error:
             self.statusBar().showMessage(str(error), 4000)
             self._quick_add_edit.setFocus()
@@ -1631,6 +1650,7 @@ class MainWindow(QMainWindow):
             return
 
         self._quick_add_edit.clear()
+        self._quick_add_attempt.succeeded()
         if self._current_view not in {TaskView.TODAY, TaskView.ALL}:
             self._set_view(TaskView.ALL)
         self._selected_task_id = task.id
@@ -2021,6 +2041,7 @@ class MainWindow(QMainWindow):
             "삭제됩니다. 업무일지는 날짜별 기록으로 남지만 이 업무와의 연결은 "
             "해제됩니다."
         )
+        detail += "\n업무 이력·보관 자료도 함께 삭제됩니다. 남기려면 취소하세요."
         if task.recurrence_rule:
             detail += "\n반복 일정 전체와 개별 처리 상태도 삭제됩니다."
         answer = QMessageBox.question(
@@ -2034,7 +2055,9 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            attachment_paths = self._task_service.delete_permanently(self._selected_task_id)
+            attachment_paths = self._task_service.delete_permanently(
+                self._selected_task_id, retained_approved=True
+            )
         except (LookupError, ValueError, FileInUseError) as error:
             self._show_error("업무를 영구 삭제하지 못했습니다.", error)
             return
@@ -2081,6 +2104,38 @@ class MainWindow(QMainWindow):
 
     def _open_selected_result(self) -> None:
         self._open_selected_records(initial_tab="result")
+
+    def _open_selected_history(self) -> None:
+        from officeflow.presentation.task_history_dialog import TaskHistoryDialog
+
+        if self._selected_task_id is None:
+            return
+        try:
+            task = self._task_service.get_including_deleted(self._selected_task_id)
+            for existing in self._file_dialogs:
+                if (
+                    isinstance(existing, TaskHistoryDialog)
+                    and existing.task_id == task.id
+                    and existing.occurrence_start == self._selected_occurrence_start
+                    and not existing._closed
+                ):
+                    existing.show()
+                    existing.raise_()
+                    return
+            dialog = TaskHistoryDialog(
+                self._selected_task_id,
+                task.title,
+                self._task_service.history,
+                occurrence_start=self._selected_occurrence_start,
+                timezone=task.timezone,
+                read_only=task.deleted_at is not None,
+                lifecycle=self._attachment_service.lifecycle if self._attachment_service else None,
+                export_service=self._attachment_export_service,
+                parent=self,
+            )
+            self._keep_file_dialog(dialog)
+        except Exception as error:
+            self._show_error("이력을 열지 못했습니다.", error)
 
     def _open_selected_attachments(self) -> None:
         self._open_selected_records(initial_tab="attachments")
@@ -2173,29 +2228,38 @@ class MainWindow(QMainWindow):
     def _save_editor(
         self, editor: TaskEditorDialog, task: Task | None, reminders: tuple[Reminder, ...]
     ) -> None:
+        draft, edits = editor.draft(), editor.reminder_edits()
+        identity = editor.mutation_attempt.identify((draft, edits, task, reminders))
         if self._task_save_service:
             saved = self._task_save_service.save(
-                editor.draft(),
+                draft,
                 task_id=task.id if task else None,
-                edits=editor.reminder_edits(),
+                edits=edits,
                 expected_task=task,
                 expected_rules=reminders,
                 now=self._view_clock(),
+                command_id=identity,
             )
         else:
             saved = (
-                self._task_service.create(editor.draft())
+                self._task_service.create(draft, command_id=identity)
                 if task is None or task.id is None
-                else self._task_service.update(task.id, editor.draft())
+                else self._task_service.update(task.id, draft, command_id=identity)
             )
             if self._reminder_service and saved.id:
                 self._reminder_service.replace_rules(
                     saved.id, editor.draft().reminder_rules, now=self._view_clock()
                 )
         self._selected_task_id = saved.id
+        editor.mutation_attempt.succeeded()
         self._selected_occurrence_start = None
         self._refresh_tasks()
-        self.statusBar().showMessage("업무를 저장했습니다.", 2500)
+        self.statusBar().showMessage(
+            "이미 처리된 요청입니다. 현재 업무를 표시했습니다."
+            if saved.command_replayed
+            else "업무를 저장했습니다.",
+            2500,
+        )
 
     def _open_reminder_settings(self, task: Task) -> None:
         if not self._reminder_service or not task.id:
@@ -2208,6 +2272,7 @@ class MainWindow(QMainWindow):
         assert task.id is not None
         task_id = task.id
         reminder_service = self._reminder_service
+        attempt = MutationAttempt()
         rules = self._reminder_service.reminders_for_task(task.id)
         edits = tuple(
             ReminderEdit(
@@ -2238,12 +2303,14 @@ class MainWindow(QMainWindow):
                     expected_task=task,
                     expected_rules=rules,
                     now=self._view_clock(),
+                    command_id=attempt.identify((draft, edits, task, rules)),
                 )
             else:
                 reminder_service.replace_rules(
                     task_id, draft.reminder_rules, now=self._view_clock()
                 )
             self._refresh_tasks(preserve_state=True)
+            attempt.succeeded()
 
         self._keep_file_dialog(
             ReminderSettingsDialog(
@@ -2527,6 +2594,9 @@ class MainWindow(QMainWindow):
         if self._selected_task_id is None:
             return False
         try:
+            identity = self._transition_attempt.identify(
+                (self._selected_task_id, self._selected_occurrence_start, status, result_note)
+            )
             if self._selected_occurrence_start is not None:
                 occurrence_status = (
                     OccurrenceStatus.COMPLETED
@@ -2538,6 +2608,7 @@ class MainWindow(QMainWindow):
                     self._selected_occurrence_start,
                     occurrence_status,
                     result_note=result_note,
+                    command_id=identity,
                 )
                 if occurrence_status is OccurrenceStatus.SKIPPED:
                     self._selected_occurrence_start = None
@@ -2548,13 +2619,17 @@ class MainWindow(QMainWindow):
                     self._task_service.complete(
                         self._selected_task_id,
                         result_note=result_note,
+                        command_id=identity,
                     )
                 else:
-                    self._task_service.transition(self._selected_task_id, status)
-        except (TaskValidationError, LookupError, ValueError) as error:
+                    self._task_service.transition(
+                        self._selected_task_id, status, command_id=identity
+                    )
+        except Exception as error:
             self._show_error("상태를 변경하지 못했습니다.", error)
             return False
         self._refresh_tasks()
+        self._transition_attempt.succeeded()
         self.statusBar().showMessage("업무 상태를 변경했습니다.", 2500)
         return True
 
@@ -2775,10 +2850,11 @@ class MainWindow(QMainWindow):
         snoozed_until: datetime | None = None
         action_name = action
         try:
+            identity = self._reminder_attempt.identify((delivery_id, action, confirmed_scope))
             if action == "complete":
-                self._reminder_service.complete(delivery_id)
+                self._reminder_service.complete(delivery_id, command_id=identity)
             elif action == "defer":
-                self._reminder_service.defer(delivery_id)
+                self._reminder_service.defer(delivery_id, command_id=identity)
             elif action.startswith("snooze"):
                 parts = action.split(":", maxsplit=1)
                 minutes = int(parts[1]) if len(parts) == 2 else 10
@@ -2792,6 +2868,7 @@ class MainWindow(QMainWindow):
             return
         if self._reminder_dialog is not None:
             self._reminder_dialog.remove_delivery(delivery_id)
+        self._reminder_attempt.succeeded()
         self._refresh_tasks()
         messages = {
             "complete": "이번 반복 회차를 완료했습니다. 다음 회차의 알림은 유지됩니다."

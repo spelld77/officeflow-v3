@@ -14,7 +14,9 @@ from officeflow.infrastructure.database.models import (
     AttachmentRecord,
     AttachmentVersionRecord,
     DocumentFamilyRecord,
+    SnapshotFileRecord,
     TaskRecord,
+    TaskSnapshotRecord,
 )
 from officeflow.infrastructure.database.session import SessionFactory
 
@@ -87,6 +89,16 @@ class DocumentCatalog:
         )
 
     def get(self, kind: str, identity: int) -> DocumentEntry:
+        if kind == "snapshot_file":
+            with self.sessions.transaction() as session:
+                snapshot_file = session.get(SnapshotFileRecord, identity)
+                if (
+                    snapshot_file is None
+                    or snapshot_file.asset.state != "active"
+                    or snapshot_file.asset.kind != "frozen"
+                ):
+                    raise LookupError("중요 보관 파일을 찾을 수 없습니다.")
+                return self._snapshot_entry(snapshot_file)
         if kind not in {"attachment", "version"}:
             raise ValueError("첨부/보관본을 선택하세요.")
         with self.sessions.transaction() as session:
@@ -115,6 +127,70 @@ class DocumentCatalog:
                         current_source_name=f"{source_version.label} · {source_version.original_name} (보관본)",
                     )
             return entry
+
+    @staticmethod
+    def _snapshot_entry(row: SnapshotFileRecord) -> DocumentEntry:
+        asset = row.asset
+        if (asset.fixed_size_bytes, asset.fixed_checksum) != (
+            row.fixed_size_bytes,
+            row.fixed_checksum,
+        ):
+            raise ValueError("중요 보관 파일의 고정 기준이 일치하지 않습니다.")
+        file = Attachment(
+            id=None,
+            task_id=row.snapshot.task_id,
+            original_name=row.original_name,
+            stored_name=asset.stored_name,
+            relative_path=asset.relative_path,
+            size_bytes=row.fixed_size_bytes,
+            checksum=row.fixed_checksum,
+            created_at=row.snapshot.captured_at,
+            display_name=row.name,
+            role=AttachmentRole.ORIGINAL,
+            asset_id=asset.id,
+            family_id=row.family_id,
+            metadata_revision=0,
+            fixed_size_bytes=row.fixed_size_bytes,
+            fixed_checksum=row.fixed_checksum,
+            memo=row.memo,
+        )
+        return DocumentEntry(
+            "snapshot_file",
+            row.id,
+            row.snapshot.task_id,
+            row.family_id,
+            0,
+            row.name,
+            row.snapshot.label,
+            row.memo,
+            file,
+            source_name_at_creation=row.name,
+        )
+
+    def snapshot_files(
+        self, task_id: int, snapshot_id: int, *, offset: int = 0, limit: int = 50
+    ) -> DocumentPage:
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("보관 파일 페이지를 확인하세요.")
+        with self.sessions.transaction() as session:
+            rows = tuple(
+                session.scalars(
+                    select(SnapshotFileRecord)
+                    .join(
+                        TaskSnapshotRecord, TaskSnapshotRecord.id == SnapshotFileRecord.snapshot_id
+                    )
+                    .where(
+                        SnapshotFileRecord.snapshot_id == snapshot_id,
+                        TaskSnapshotRecord.task_id == task_id,
+                    )
+                    .order_by(SnapshotFileRecord.position, SnapshotFileRecord.id)
+                    .offset(offset)
+                    .limit(limit + 1)
+                )
+            )
+            return DocumentPage(
+                tuple(self._snapshot_entry(row) for row in rows[:limit]), len(rows) > limit
+            )
 
     def page(
         self,

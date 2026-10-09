@@ -63,7 +63,7 @@ def test_help_button_opens_packaged_user_guide(
     window._help_button.click()
 
     assert opened == [True]
-    assert window._version_label.text() == "OfficeFlow 3.0.7"
+    assert window._version_label.text() == "OfficeFlow 3.0.8"
 
 
 class FakeTrayIcon:
@@ -290,7 +290,7 @@ def test_task_can_move_to_trash_and_be_restored(
         action.text()
         for action in window._build_task_context_menu(deleted).actions()
         if not action.isSeparator()
-    ] == ["휴지통에서 복원", "영구 삭제…"]
+    ] == ["이력·보관…", "휴지통에서 복원", "영구 삭제…"]
 
     window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
     window._restore_selected_from_trash()
@@ -393,9 +393,7 @@ def test_quick_complete_can_be_undone(qtbot: QtBot) -> None:
 def test_quick_complete_undo_restores_pending_status(qtbot: QtBot) -> None:
     task_repository = InMemoryTaskRepository()
     task_service = TaskService(task_repository)
-    task = task_service.create(
-        TaskDraft(title="대기 업무 완료", status=TaskStatus.PENDING)
-    )
+    task = task_service.create(TaskDraft(title="대기 업무 완료", status=TaskStatus.PENDING))
     assert task.id is not None
     window = MainWindow(AppSettings(), task_service)
     qtbot.addWidget(window)
@@ -520,9 +518,7 @@ def test_window_geometry_is_saved_on_close(qtbot: QtBot, task_service: TaskServi
     assert saved[-1].window_y is not None
 
 
-def test_close_hides_to_tray_until_explicit_quit(
-    qtbot: QtBot, task_service: TaskService
-) -> None:
+def test_close_hides_to_tray_until_explicit_quit(qtbot: QtBot, task_service: TaskService) -> None:
     shutdowns: list[bool] = []
     window = MainWindow(
         AppSettings(minimize_to_tray=True),
@@ -621,15 +617,17 @@ def test_due_reminder_opens_in_app_alert_and_can_be_snoozed(qtbot: QtBot) -> Non
     assert delivery.snoozed_until == delivery.updated_at + timedelta(minutes=35)
     local_due = delivery.snoozed_until.astimezone(ZoneInfo("Asia/Seoul"))
     from officeflow.presentation.dates import format_datetime
+
     assert format_datetime(local_due, "Asia/Seoul") in window.statusBar().currentMessage()
     index = window._task_model.index_for_task(task.id)
     assert index.isValid()
     assert (
-        window._task_model.data(index, TaskListModel.SNOOZED_UNTIL_ROLE)
-        == delivery.snoozed_until
+        window._task_model.data(index, TaskListModel.SNOOZED_UNTIL_ROLE) == delivery.snoozed_until
     )
     window._task_list.setCurrentIndex(index)
-    assert f"다시 알림: {format_datetime(local_due, 'Asia/Seoul')}" in window._detail_schedule.text()
+    assert (
+        f"다시 알림: {format_datetime(local_due, 'Asia/Seoul')}" in window._detail_schedule.text()
+    )
     window._show_calendar()
     assert any(
         "재알림" in window._calendar_page.day_list.item(row).text()
@@ -662,7 +660,8 @@ def test_restart_restores_unhandled_popup_once_after_normal_or_unclean_exit(
     monkeypatch.setattr(main_window_module.ReminderDialog, "present", present)
     monkeypatch.setattr(QMessageBox, "warning", lambda *_args: None)
     window = MainWindow(
-        AppSettings(), task_service,
+        AppSettings(),
+        task_service,
         reminder_service=ReminderService(repository, task_service),
         previous_unclean_shutdown=unclean,
     )
@@ -673,7 +672,10 @@ def test_restart_restores_unhandled_popup_once_after_normal_or_unclean_exit(
         assert window._reminder_dialog is not None
         assert window._reminder_dialog.alert_list.count() == 1
         assert "놓친 알림" in window._reminder_dialog.caption.text()
-        assert window._reminder_dialog.alert_list.item(0).data(Qt.ItemDataRole.UserRole) == original.delivery.id
+        assert (
+            window._reminder_dialog.alert_list.item(0).data(Qt.ItemDataRole.UserRole)
+            == original.delivery.id
+        )
         assert window._reminder_recovery_pending is False
         for _ in range(3):
             window._check_reminders()
@@ -682,7 +684,10 @@ def test_restart_restores_unhandled_popup_once_after_normal_or_unclean_exit(
         qtbot.mouseClick(window._reminder_dialog.acknowledge_button, Qt.MouseButton.LeftButton)
         assert window._reminder_dialog is None
         assert original.delivery.id is not None
-        assert repository.deliveries[original.delivery.id].status is ReminderDeliveryStatus.ACKNOWLEDGED
+        assert (
+            repository.deliveries[original.delivery.id].status
+            is ReminderDeliveryStatus.ACKNOWLEDGED
+        )
         window._check_reminders()
         assert presentations == [True]
     finally:
@@ -749,9 +754,7 @@ def test_reminder_actions_immediately_refresh_current_view(qtbot: QtBot) -> None
     window.show()
 
     qtbot.waitUntil(lambda: window._reminder_dialog is not None, timeout=1_000)
-    overdue = window._task_model.entry_at(
-        window._task_model.index_for_group(TaskGroup.OVERDUE)
-    )
+    overdue = window._task_model.entry_at(window._task_model.index_for_group(TaskGroup.OVERDUE))
     assert isinstance(overdue, GroupHeader)
     assert overdue.total == 1
     assert window._reminder_dialog is not None
@@ -763,9 +766,7 @@ def test_reminder_actions_immediately_refresh_current_view(qtbot: QtBot) -> None
     qtbot.mouseClick(box.button(QMessageBox.StandardButton.Yes), Qt.MouseButton.LeftButton)
 
     assert not window._task_model.index_for_group(TaskGroup.OVERDUE).isValid()
-    completed = window._task_model.entry_at(
-        window._task_model.index_for_group(TaskGroup.COMPLETED)
-    )
+    completed = window._task_model.entry_at(window._task_model.index_for_group(TaskGroup.COMPLETED))
     assert isinstance(completed, GroupHeader)
     assert completed.total == 1
 
@@ -938,9 +939,7 @@ def test_search_clear_button_restores_current_task_list(
     assert window._empty_panel.isHidden()
 
 
-def test_today_filter_feedback_explains_hidden_all_day_task(
-    qtbot: QtBot, tmp_path: Path
-) -> None:
+def test_today_filter_feedback_explains_hidden_all_day_task(qtbot: QtBot, tmp_path: Path) -> None:
     repository = InMemoryTaskRepository()
     task_service = TaskService(repository, timezone="Asia/Seoul")
     zone = ZoneInfo("Asia/Seoul")
@@ -1106,17 +1105,11 @@ def test_calendar_shows_three_rows_and_marks_remaining_items(
     assert page.day_count.property("hasMany") is True
     assert page.day_more_hint.isVisible()
     assert "아래에 2개 더 있음" in page.day_more_hint.text()
-    assert (
-        page.day_list.verticalScrollBarPolicy()
-        is Qt.ScrollBarPolicy.ScrollBarAlwaysOn
-    )
+    assert page.day_list.verticalScrollBarPolicy() is Qt.ScrollBarPolicy.ScrollBarAlwaysOn
     assert page.day_list.verticalScrollBar().isVisible()
     third_item = page.day_list.item(2)
     assert third_item is not None
-    assert (
-        page.day_list.visualItemRect(third_item).bottom()
-        <= page.day_list.viewport().height()
-    )
+    assert page.day_list.visualItemRect(third_item).bottom() <= page.day_list.viewport().height()
 
 
 def test_calendar_day_list_can_expand_and_restore_splitter_ratio(

@@ -154,6 +154,7 @@ def build_application(
     maintenance = FileMaintenance(
         document_service, deletion_service, internal_storage, deletion_storage, view_cache
     )
+    maintenance.snapshots = attachment_service.lifecycle.snapshots
     export_service = ExportService(
         task_service,
         ExcelTaskExporter(),

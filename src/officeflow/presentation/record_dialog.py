@@ -65,6 +65,7 @@ from officeflow.application.attachments import (
 )
 from officeflow.application.file_operations import FileInUseError
 from officeflow.application.records import DuplicateWorkLogError, RecordService
+from officeflow.application.task_mutations import MutationAttempt
 from officeflow.application.tasks import TaskService
 from officeflow.domain.attachment import Attachment, AttachmentCheckStatus, AttachmentMove
 from officeflow.domain.records import ChecklistItem, RecordValidationError, WorkLog
@@ -298,8 +299,10 @@ class TaskRecordsDialog(QDialog):
         self._task_id = task.id
         self._read_only = task.deleted_at is not None
         self._task_service = task_service
+        self._result_attempt = MutationAttempt()
         self._record_service = record_service
         self._attachment_service = attachment_service
+        self._attachment_export_service = attachment_export_service
         self._export_controller = (
             AttachmentExportController(
                 attachment_export_service, self, initial_directory=attachment_export_directory
@@ -383,12 +386,17 @@ class TaskRecordsDialog(QDialog):
         root.addWidget(self.tabs, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        history_button = QPushButton("이력·보관")
+        history_button.setObjectName("taskHistoryButton")
+        history_button.clicked.connect(self._open_history)
+        buttons.addButton(history_button, QDialogButtonBox.ButtonRole.ActionRole)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("닫기")
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
         self._refresh_checklist()
-        self.result_edit.setPlainText(task_service.result_note(self._task_id, occurrence_start))
+        self._expected_result = task_service.result_note(self._task_id, occurrence_start)
+        self.result_edit.setPlainText(self._expected_result)
         self._refresh_work_logs()
         if attachment_service is not None:
             self._refresh_attachments()
@@ -404,6 +412,44 @@ class TaskRecordsDialog(QDialog):
 
     def _relay_attachment_change(self, task_id: int) -> None:
         self.attachmentMetadataChanged.emit(task_id)
+
+    def _open_history(self) -> None:
+        from shiboken6 import isValid
+
+        from officeflow.presentation.task_history_dialog import TaskHistoryDialog
+
+        existing = getattr(self, "_history_dialog", None)
+        if existing is not None and isValid(existing) and not existing._closed:
+            existing.show()
+            existing.raise_()
+            return
+        dialog = TaskHistoryDialog(
+            self._task_id,
+            self._task.title,
+            self._task_service.history,
+            occurrence_start=self._occurrence_start,
+            timezone=self._task.timezone,
+            read_only=self._read_only,
+            lifecycle=self._attachment_service.lifecycle if self._attachment_service else None,
+            export_service=self._attachment_export_service,
+            draft_guard=self._snapshot_draft_guard,
+            parent=self,
+        )
+        self._history_dialog = dialog
+        self.finished.connect(lambda _code: dialog.shutdown())
+        dialog.show()
+
+    def _snapshot_draft_guard(self) -> bool:
+        if self.result_edit.toPlainText().strip() == self._expected_result:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "미저장 완료 요약",
+            "완료 요약에 미저장 내용이 있습니다. DB에 저장된 내용만 보관할까요?\n취소하면 돌아가 저장할 수 있습니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     @Slot(int)
     def _attachments_changed(self, task_id: int) -> None:
@@ -877,17 +923,34 @@ class TaskRecordsDialog(QDialog):
         self.changed.emit()
 
     def _save_result(self) -> None:
+        note = self.result_edit.toPlainText()
+        identity = self._result_attempt.identify(
+            (self._task_id, self._occurrence_start, note, self._expected_result)
+        )
         try:
-            self._task_service.update_result_note(
+            saved_note = self._task_service.update_result_note(
                 self._task_id,
-                self.result_edit.toPlainText(),
+                note,
                 occurrence_start=self._occurrence_start,
+                expected_note=self._expected_result,
+                command_id=identity,
             )
-        except (LookupError, ValueError) as error:
+        except Exception as error:
             QMessageBox.warning(self, "완료 요약을 저장하지 못했습니다.", str(error))
             return
+        self._expected_result = saved_note
+        self._result_attempt.succeeded()
+        replayed = bool(getattr(saved_note, "command_replayed", False))
+        if replayed:
+            self.result_edit.setPlainText(saved_note)
         self.changed.emit()
-        QMessageBox.information(self, "저장 완료", "완료 요약을 저장했습니다.")
+        QMessageBox.information(
+            self,
+            "저장 완료",
+            "이미 처리된 요청입니다. 현재 완료 요약을 표시했습니다."
+            if replayed
+            else "완료 요약을 저장했습니다.",
+        )
 
     def _refresh_work_logs(self) -> None:
         logs = self._record_service.work_logs(

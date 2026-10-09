@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import delete, false, select
+from sqlalchemy import delete, false, func, select
 from sqlalchemy.orm import Session
 
 from officeflow.application.attachment_deletion import (
@@ -29,7 +29,10 @@ from officeflow.infrastructure.database.models import (
     AttachmentVersionRecord,
     FileAssetRecord,
     FileOperationReceiptRecord,
+    SnapshotFileRecord,
+    TaskHistoryRecord,
     TaskRecord,
+    TaskSnapshotRecord,
     WorkLogRecord,
 )
 from officeflow.infrastructure.database.session import SessionFactory
@@ -69,11 +72,37 @@ class SqlAlchemyDeletionRepository:
         elif target.kind == "version":
             attachments = attachments.where(false())
             versions = versions.where(AttachmentVersionRecord.id == target.id)
-        else:
+        elif target.kind == "task":
             attachments = attachments.where(AttachmentRecord.task_id == target.id)
             versions = versions.where(AttachmentVersionRecord.task_id == target.id)
+        else:
+            attachments = attachments.where(false())
+            versions = versions.where(false())
         attached = tuple(session.scalars(attachments.order_by(AttachmentRecord.id)))
         saved = tuple(session.scalars(versions.order_by(AttachmentVersionRecord.id)))
+        snapshots_query = select(
+            TaskSnapshotRecord.id,
+            TaskSnapshotRecord.job_id,
+            TaskSnapshotRecord.file_count,
+            TaskSnapshotRecord.task_id,
+        ).where(
+            TaskSnapshotRecord.task_id == target.id
+            if target.kind == "task"
+            else TaskSnapshotRecord.id == target.id
+            if target.kind == "snapshot"
+            else false()
+        )
+        snapshots = tuple(session.execute(snapshots_query.order_by(TaskSnapshotRecord.id)))
+        snapshot_files_query = select(
+            SnapshotFileRecord.id, SnapshotFileRecord.asset_id, SnapshotFileRecord.snapshot_id
+        ).where(
+            SnapshotFileRecord.snapshot_id.in_(
+                snapshots_query.with_only_columns(TaskSnapshotRecord.id)
+            )
+        )
+        snapshot_files = tuple(
+            session.execute(snapshot_files_query.order_by(SnapshotFileRecord.id))
+        )
         if isinstance(target, DeleteSelection) and (
             len(attached) + len(saved) != len(target.items)
             or any(row.task_id != target.id for row in attached)
@@ -85,13 +114,21 @@ class SqlAlchemyDeletionRepository:
         task_id = (
             target.id
             if target.kind in {"task", "selection"}
-            else (attached[0].task_id if attached else saved[0].task_id if saved else None)
+            else (
+                attached[0].task_id
+                if attached
+                else saved[0].task_id
+                if saved
+                else snapshots[0].task_id
+                if snapshots
+                else None
+            )
         )
         task = session.get(TaskRecord, task_id) if task_id is not None else None
         if (
             task is None
             or (target.kind == "task" and task.deleted_at is None)
-            or (target.kind != "task" and not attached and not saved)
+            or (target.kind != "task" and not attached and not saved and not snapshots)
         ):
             raise LookupError(
                 "삭제할 자료를 찾을 수 없습니다. 업무 영구 삭제는 휴지통에서만 가능합니다."
@@ -102,7 +139,8 @@ class SqlAlchemyDeletionRepository:
             )
         # Use subqueries rather than N per-file lookups or a huge SQLite IN parameter list.
         asset_ids = attachments.with_only_columns(AttachmentRecord.asset_id).union(
-            versions.with_only_columns(AttachmentVersionRecord.asset_id)
+            versions.with_only_columns(AttachmentVersionRecord.asset_id),
+            snapshot_files_query.with_only_columns(SnapshotFileRecord.asset_id),
         )
         refs_a = tuple(
             session.execute(
@@ -130,9 +168,23 @@ class SqlAlchemyDeletionRepository:
         )
         selected_a = {row.id for row in attached}
         selected_v = {row.id for row in saved}
-        outside = {row.asset_id for row in refs_a if row.id not in selected_a} | {
-            row.asset_id for row in refs_v if row.id not in selected_v
-        }
+        selected_s = {row.id for row in snapshot_files}
+        refs_s = tuple(
+            session.execute(
+                select(
+                    SnapshotFileRecord.asset_id,
+                    SnapshotFileRecord.id,
+                    SnapshotFileRecord.snapshot_id,
+                )
+                .where(SnapshotFileRecord.asset_id.in_(asset_ids))
+                .order_by(SnapshotFileRecord.id)
+            )
+        )
+        outside = (
+            {row.asset_id for row in refs_a if row.id not in selected_a}
+            | {row.asset_id for row in refs_v if row.id not in selected_v}
+            | {row.asset_id for row in refs_s if row.id not in selected_s}
+        )
         assets = tuple(
             session.scalars(
                 select(FileAssetRecord)
@@ -205,6 +257,17 @@ class SqlAlchemyDeletionRepository:
             "logs": logs,
             "kept_versions": kept_versions,
         }
+        history_count = 0
+        if target.kind == "task":
+            history_count, last_history = session.execute(
+                select(func.count(), func.max(TaskHistoryRecord.id)).where(
+                    TaskHistoryRecord.task_id == task.id
+                )
+            ).one()
+            # Append-only IDs guard against a new change after confirmation.
+            state["retained_v2"] = [history_count, last_history]
+        state["snapshots"] = [[row.id, row.job_id, row.file_count] for row in snapshots]
+        state["refs_s"] = [list(row) for row in refs_s]
         return DeletePlan(
             target,
             fingerprint(state),
@@ -213,6 +276,9 @@ class SqlAlchemyDeletionRepository:
             len(saved),
             kept_versions,
             len(logs),
+            history_count,
+            len(snapshots),
+            len(snapshot_files),
         )
 
     def committed(self, command: DeleteCommand) -> DeleteCommit | None:
@@ -224,7 +290,7 @@ class SqlAlchemyDeletionRepository:
         receipt = session.get(FileOperationReceiptRecord, command.job_id)
         if receipt is None:
             return None
-        if receipt.operation_kind != "delete_assets" or receipt.payload_version != 1:
+        if receipt.operation_kind != "delete_assets" or receipt.payload_version not in {1, 2}:
             raise ValueError("다른 종류의 파일 작업에 사용한 ID입니다.")
         raw = json.loads(receipt.payload)
         if raw.get("request") != command.request_fingerprint:
@@ -233,6 +299,9 @@ class SqlAlchemyDeletionRepository:
         if len({asset.id for asset in assets}) != len(assets):
             raise ValueError("삭제 완료 기록의 자산이 중복되었습니다.")
         counts = [raw[key] for key in ("attachment_count", "version_count", "work_log_count")]
+        counts += [
+            raw.get(key, 0) for key in ("history_count", "snapshot_count", "snapshot_file_count")
+        ]
         if any(type(value) is not int or value < 0 for value in counts):
             raise ValueError("삭제 완료 기록의 개수가 올바르지 않습니다.")
         return DeleteCommit(command, assets, *counts)
@@ -250,10 +319,12 @@ class SqlAlchemyDeletionRepository:
                 )
             if (
                 command.target.kind == "task"
-                and current.version_count
+                and (current.version_count or current.history_count or current.snapshot_count)
                 and not command.include_versions
             ):
-                raise AttachmentOperationError("보관본 삭제 범위를 확인하지 않았습니다.")
+                raise AttachmentOperationError(
+                    "보관본·업무 이력·중요 보관 삭제 범위를 확인하지 않았습니다."
+                )
             if isinstance(command.target, DeleteSelection):
                 session.execute(
                     delete(AttachmentRecord).where(
@@ -278,6 +349,10 @@ class SqlAlchemyDeletionRepository:
                     delete(AttachmentVersionRecord).where(
                         AttachmentVersionRecord.id == command.target.id
                     )
+                )
+            elif command.target.kind == "snapshot":
+                session.execute(
+                    delete(TaskSnapshotRecord).where(TaskSnapshotRecord.id == command.target.id)
                 )
             else:
                 session.execute(delete(TaskRecord).where(TaskRecord.id == command.target.id))
@@ -309,14 +384,21 @@ class SqlAlchemyDeletionRepository:
                         )
                     )
             commit = DeleteCommit(
-                command, plan.assets, plan.attachment_count, plan.version_count, plan.work_log_count
+                command,
+                plan.assets,
+                plan.attachment_count,
+                plan.version_count,
+                plan.work_log_count,
+                plan.history_count,
+                plan.snapshot_count,
+                plan.snapshot_file_count,
             )
             session.add(
                 FileOperationReceiptRecord(
                     job_id=command.job_id,
                     operation_kind="delete_assets",
                     committed_at=datetime.now(UTC),
-                    payload_version=1,
+                    payload_version=2,
                     payload=json.dumps(
                         {
                             "request": command.request_fingerprint,
@@ -324,6 +406,9 @@ class SqlAlchemyDeletionRepository:
                             "attachment_count": plan.attachment_count,
                             "version_count": plan.version_count,
                             "work_log_count": plan.work_log_count,
+                            "history_count": plan.history_count,
+                            "snapshot_count": plan.snapshot_count,
+                            "snapshot_file_count": plan.snapshot_file_count,
                         },
                         ensure_ascii=False,
                     ),

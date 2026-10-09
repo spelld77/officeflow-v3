@@ -7,6 +7,8 @@ from pathlib import Path
 from sqlalchemy import Connection, Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
+from officeflow.application.task_events import TaskChangeEvents
+
 
 def sqlite_url(database_file: Path) -> str:
     return f"sqlite:///{database_file.resolve().as_posix()}"
@@ -28,9 +30,12 @@ def create_database_engine(database_file: Path, *, echo: bool = False) -> Engine
 
 
 class SessionFactory:
-    def __init__(self, engine: Engine | Connection) -> None:
+    def __init__(
+        self, engine: Engine | Connection, *, events: TaskChangeEvents | None = None
+    ) -> None:
         self._bind = engine
         self._factory = sessionmaker(bind=engine, expire_on_commit=False)
+        self.task_events = events or TaskChangeEvents()
 
     @contextmanager
     def write_unit_of_work(self) -> Iterator[SessionFactory]:
@@ -40,7 +45,7 @@ class SessionFactory:
         with self._bind.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             try:
-                yield SessionFactory(connection)
+                yield SessionFactory(connection, events=self.task_events)
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -55,7 +60,7 @@ class SessionFactory:
             # sqlite3's legacy transaction mode does not BEGIN for SELECT.
             connection.exec_driver_sql("BEGIN")
             try:
-                yield SessionFactory(connection)
+                yield SessionFactory(connection, events=self.task_events)
             finally:
                 connection.rollback()
 

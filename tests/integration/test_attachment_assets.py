@@ -248,7 +248,7 @@ def test_frozen_asset_constraints_and_reference_safe_deletion(tmp_path):
             assert json.loads(version.source_payload)["name"] == "서식.txt"
         assert original.relative_path in env.repository.paths_for_task(task.id)
         env.tasks.move_to_trash(task.id)
-        paths = env.tasks.delete_permanently(task.id)
+        paths = env.tasks.delete_permanently(task.id, retained_approved=True)
         assert env.attachments.remove_files_after_task_delete(paths) == ()
         assert not path.exists()
 

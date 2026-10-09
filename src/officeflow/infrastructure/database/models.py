@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     select,
+    text,
 )
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -67,6 +68,122 @@ class TaskRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class TaskHistoryRecord(Base):
+    __tablename__ = "task_history"
+    __table_args__ = (
+        UniqueConstraint("task_id", "command_id", "scope_key", "event_type"),
+        CheckConstraint("scope IN ('task','occurrence')", name="history_scope"),
+        CheckConstraint("event_type IN ('created','baseline','change')", name="history_event"),
+        CheckConstraint("payload_version=1", name="history_payload_version"),
+        CheckConstraint(
+            "(scope='task' AND scope_key='task' AND occurrence_start IS NULL) OR (scope='occurrence' AND scope_key LIKE 'occ:%' AND occurrence_start IS NOT NULL)",
+            name="history_scope_values",
+        ),
+        Index("ix_task_history_time", "task_id", "recorded_at", "id"),
+        Index("ix_task_history_scope_time", "task_id", "scope_key", "recorded_at", "id"),
+        Index("ix_task_history_scope_id", "task_id", "scope_key", "id"),
+        Index(
+            "ux_task_history_initial",
+            "task_id",
+            "scope_key",
+            unique=True,
+            sqlite_where=text("event_type IN ('created','baseline')"),
+        ),
+        {"sqlite_autoincrement": True},
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    scope: Mapped[str] = mapped_column(String(16))
+    scope_key: Mapped[str] = mapped_column(String(64))
+    occurrence_start: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    command_id: Mapped[str] = mapped_column(String(64))
+    event_type: Mapped[str] = mapped_column(String(16))
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    changed_fields: Mapped[str] = mapped_column(Text)
+    before_payload: Mapped[str | None] = mapped_column(Text)
+    after_payload: Mapped[str] = mapped_column(Text)
+    payload_version: Mapped[int] = mapped_column(Integer, default=1)
+    summary: Mapped[str] = mapped_column(String(200))
+
+
+class TaskSnapshotRecord(Base):
+    __tablename__ = "task_snapshots"
+    __table_args__ = (
+        UniqueConstraint("task_id", "ordinal"),
+        CheckConstraint(
+            "scope IN ('task','occurrence') AND payload_version=1", name="snapshot_scope_version"
+        ),
+        CheckConstraint(
+            "length(trim(label)) BETWEEN 1 AND 200 AND ordinal>0 AND file_count BETWEEN 0 AND 100",
+            name="snapshot_values",
+        ),
+        Index("ix_task_snapshots_time", "task_id", "captured_at", "id"),
+        Index("ix_task_snapshots_scope_time", "task_id", "scope_key", "captured_at", "id"),
+        {"sqlite_autoincrement": True},
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    scope: Mapped[str] = mapped_column(String(16))
+    scope_key: Mapped[str] = mapped_column(String(64))
+    occurrence_start: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    label: Mapped[str] = mapped_column(String(200))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    committed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    job_id: Mapped[str] = mapped_column(String(32), unique=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    payload_version: Mapped[int] = mapped_column(Integer, default=1)
+    info_payload: Mapped[str] = mapped_column(Text)
+    file_count: Mapped[int] = mapped_column(Integer)
+    summary: Mapped[str] = mapped_column(String(200))
+
+
+class SnapshotFileRecord(Base):
+    __tablename__ = "snapshot_files"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "position"),
+        UniqueConstraint("snapshot_id", "source_kind", "source_id"),
+        CheckConstraint(
+            "position>=0 AND fixed_size_bytes>=0 AND length(fixed_checksum)=64 AND payload_version=1",
+            name="snapshot_file_values",
+        ),
+        {"sqlite_autoincrement": True},
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("task_snapshots.id", ondelete="CASCADE"), index=True
+    )
+    asset_id: Mapped[str] = mapped_column(
+        ForeignKey("file_assets.id", ondelete="RESTRICT"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(500))
+    original_name: Mapped[str] = mapped_column(String(500))
+    role: Mapped[str] = mapped_column(String(16))
+    memo: Mapped[str] = mapped_column(Text)
+    family_id: Mapped[str] = mapped_column(String(32))  # provenance, not a deletion cascade
+    source_kind: Mapped[str] = mapped_column(String(32))
+    source_id: Mapped[int] = mapped_column(Integer)
+    source_payload: Mapped[str] = mapped_column(Text)
+    fixed_size_bytes: Mapped[int] = mapped_column(Integer)
+    fixed_checksum: Mapped[str] = mapped_column(String(64))
+    payload_version: Mapped[int] = mapped_column(Integer, default=1)
+    asset: Mapped[FileAssetRecord] = relationship(lazy="joined")
+    snapshot: Mapped[TaskSnapshotRecord] = relationship(lazy="select")
+
+
+class TaskMutationReceiptRecord(Base):
+    __tablename__ = "task_mutation_receipts"
+    __table_args__ = (CheckConstraint("payload_version=1", name="mutation_payload_version"),)
+    command_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    command_kind: Mapped[str] = mapped_column(String(64))
+    committed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    payload_version: Mapped[int] = mapped_column(Integer, default=1)
+    result_payload: Mapped[str] = mapped_column(Text)
 
 
 class TaskOccurrenceRecord(Base):

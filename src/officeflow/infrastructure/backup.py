@@ -149,6 +149,9 @@ class DataUsageSnapshot:
     quarantine_bytes: int = 0
     unverified_attachment_count: int = 0
     unavailable_attachment_count: int = 0
+    history_count: int = 0
+    snapshot_count: int = 0
+    snapshot_file_count: int = 0
 
     @property
     def total_bytes(self) -> int:
@@ -280,6 +283,14 @@ class BackupManager:
                     str(row[0])
                     for row in connection.execute("SELECT relative_path FROM file_assets")
                 }
+                retained_counts = {}
+                for table in ("task_history", "task_snapshots", "snapshot_files"):
+                    if connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    ).fetchone():
+                        retained_counts[table] = int(
+                            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                        )
                 reminder_cleanup_candidate_count = int(
                     connection.execute(
                         """
@@ -437,6 +448,9 @@ class BackupManager:
             quarantine_bytes=sum(quarantined),
             unverified_attachment_count=unverified_count,
             unavailable_attachment_count=len(tracked_paths - stored_paths),
+            history_count=retained_counts.get("task_history", 0),
+            snapshot_count=retained_counts.get("task_snapshots", 0),
+            snapshot_file_count=retained_counts.get("snapshot_files", 0),
         )
 
     def list_orphan_attachment_files(
@@ -1377,6 +1391,16 @@ def _check_asset_references(connection: sqlite3.Connection) -> None:
         raise BackupError(
             "첨부 자산의 종류·소유·상태가 일치하지 않습니다. 자료를 보존하고 확인해 주세요."
         )
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshot_files'"
+    ).fetchone():
+        if connection.execute("""SELECT 1 FROM snapshot_files s JOIN file_assets f ON f.id=s.asset_id
+            WHERE f.state!='active' OR f.kind!='frozen' OR f.fixed_size_bytes!=s.fixed_size_bytes
+            OR f.fixed_checksum!=s.fixed_checksum LIMIT 1""").fetchone():
+            raise BackupError("중요 보관 파일의 연결/고정 기준이 일치하지 않습니다.")
+        if connection.execute("""SELECT 1 FROM task_snapshots s WHERE s.file_count !=
+            (SELECT COUNT(*) FROM snapshot_files f WHERE f.snapshot_id=s.id) LIMIT 1""").fetchone():
+            raise BackupError("중요 보관의 파일 개수가 일치하지 않습니다.")
 
 
 def _file_identity(path: Path) -> tuple[int, int, int, int]:

@@ -20,7 +20,7 @@ class DeleteTarget:
 
     def __post_init__(self) -> None:
         if (
-            self.kind not in {"attachment", "version", "task"}
+            self.kind not in {"attachment", "version", "task", "snapshot"}
             or type(self.id) is not int
             or self.id < 1
         ):
@@ -87,6 +87,9 @@ class DeletePlan:
     version_count: int
     kept_versions: int
     work_log_count: int
+    history_count: int = 0
+    snapshot_count: int = 0
+    snapshot_file_count: int = 0
 
     @property
     def removable_count(self) -> int:
@@ -126,6 +129,9 @@ class DeleteCommit:
     attachment_count: int
     version_count: int
     work_log_count: int
+    history_count: int = 0
+    snapshot_count: int = 0
+    snapshot_file_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,12 +221,12 @@ class AttachmentDeletionService:
                         "삭제할 자료가 변경되었습니다. 삭제 범위를 다시 확인하세요."
                     )
                 if (
-                    plan.version_count
+                    (plan.version_count or plan.history_count or plan.snapshot_count)
                     and command.target.kind == "task"
                     and not command.include_versions
                 ):
                     raise AttachmentOperationError(
-                        "보관본까지 삭제하는 범위를 별도로 확인해 주세요."
+                        "보관본·업무 이력·중요 보관까지 삭제하는 범위를 별도로 확인해 주세요."
                     )
                 intent = self.coordinator.deletion_intent(
                     tuple(asset.path for asset in plan.assets), owner="delete:" + command.job_id

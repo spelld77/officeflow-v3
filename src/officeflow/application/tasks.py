@@ -6,9 +6,11 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
+from officeflow.application.task_history import TaskHistoryService
+from officeflow.application.task_mutations import tracked_command
 from officeflow.domain.enums import OccurrenceStatus, TaskPriority, TaskStatus
 from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.recurrence import expand_recurrence, next_recurrence_start
@@ -287,15 +289,44 @@ class TaskService:
 
     CALENDAR_SUMMARY_THRESHOLD = 120
 
-    def __init__(self, repository: TaskRepository, *, timezone: str = "Asia/Seoul") -> None:
+    def __init__(
+        self,
+        repository: TaskRepository,
+        *,
+        timezone: str = "Asia/Seoul",
+        command_context: Any = None,
+        history_enabled: bool = True,
+    ) -> None:
         self._repository = repository
         self._timezone = timezone
+        self._command_context = command_context
+        factory = getattr(repository, "mutation_runner", None)
+        self._mutation_runner = (
+            factory()
+            if factory is not None and command_context is None and history_enabled
+            else None
+        )
         self._file_delete_guard: Callable[[int], AbstractContextManager[None]] | None = None
+
+    def _for_mutation(self, context: Any) -> TaskService:
+        return TaskService(
+            context.task_repository, timezone=self._timezone, command_context=context
+        )
+
+    @property
+    def history(self) -> TaskHistoryService:
+        factory = getattr(self._repository, "history_service", None)
+        if factory is None:
+            raise ValueError("이력 조회를 지원하지 않는 저장소입니다.")
+        return cast(TaskHistoryService, factory())
 
     def set_file_delete_guard(self, guard: Callable[[int], AbstractContextManager[None]]) -> None:
         self._file_delete_guard = guard
 
-    def create(self, draft: TaskDraft, *, now: datetime | None = None) -> Task:
+    @tracked_command
+    def create(
+        self, draft: TaskDraft, *, now: datetime | None = None, command_id: str | None = None
+    ) -> Task:
         task = Task.create(
             title=draft.title,
             description=draft.description,
@@ -318,6 +349,7 @@ class TaskService:
         view: TaskView,
         local_date: date | None = None,
         now: datetime | None = None,
+        command_id: str | None = None,
     ) -> Task:
         starts_at: datetime | None = None
         ends_at: datetime | None = None
@@ -339,9 +371,18 @@ class TaskService:
                 timezone=self._timezone,
             ),
             now=now,
+            command_id=command_id,
         )
 
-    def update(self, task_id: int, draft: TaskDraft, *, now: datetime | None = None) -> Task:
+    @tracked_command
+    def update(
+        self,
+        task_id: int,
+        draft: TaskDraft,
+        *,
+        now: datetime | None = None,
+        command_id: str | None = None,
+    ) -> Task:
         task = self.get(task_id)
         updated = task.update_details(
             title=draft.title,
@@ -358,16 +399,26 @@ class TaskService:
         )
         return self._repository.update(updated)
 
-    def transition(self, task_id: int, status: TaskStatus, *, now: datetime | None = None) -> Task:
+    @tracked_command
+    def transition(
+        self,
+        task_id: int,
+        status: TaskStatus,
+        *,
+        now: datetime | None = None,
+        command_id: str | None = None,
+    ) -> Task:
         task = self.get(task_id)
         return self._repository.update(task.transition_to(status, now=now or datetime.now(UTC)))
 
+    @tracked_command
     def complete(
         self,
         task_id: int,
         *,
         result_note: str | None = None,
         now: datetime | None = None,
+        command_id: str | None = None,
     ) -> Task:
         """Complete a regular task and persist its optional result in one write."""
         current = now or datetime.now(UTC)
@@ -382,6 +433,27 @@ class TaskService:
             return task.result_note
         occurrence = self._repository.get_occurrence(task_id, occurrence_start)
         return occurrence.result_note if occurrence is not None else ""
+
+    @tracked_command
+    def undo_completion(
+        self,
+        task_id: int,
+        previous_status: TaskStatus,
+        *,
+        now: datetime | None = None,
+        command_id: str | None = None,
+    ) -> Task:
+        """One semantic undo; pending's intermediate active state is not a separate event."""
+        if previous_status not in {TaskStatus.ACTIVE, TaskStatus.PENDING}:
+            raise ValueError("완료 전 진행/대기 상태만 되돌릴 수 있습니다.")
+        if self.get(task_id).status is not TaskStatus.COMPLETED:
+            raise ValueError("다른 창에서 업무 상태가 바뀌었습니다. 다시 확인하세요.")
+        task = self.transition(task_id, TaskStatus.ACTIVE, now=now)
+        return (
+            self.transition(task_id, TaskStatus.PENDING, now=now)
+            if previous_status is TaskStatus.PENDING
+            else task
+        )
 
     def occurrence(
         self,
@@ -408,6 +480,7 @@ class TaskService:
             return occurrence
         return self._repository.save_occurrence(occurrence)
 
+    @tracked_command
     def update_result_note(
         self,
         task_id: int,
@@ -415,7 +488,16 @@ class TaskService:
         *,
         occurrence_start: datetime | None = None,
         now: datetime | None = None,
+        command_id: str | None = None,
+        expected_note: str | None = None,
     ) -> str:
+        if (
+            expected_note is not None
+            and self.result_note(task_id, occurrence_start) != expected_note
+        ):
+            raise ValueError(
+                "결과메모가 다른 창에서 변경되었습니다. 입력을 보존하고 다시 확인하세요."
+            )
         task = self.get(task_id)
         if occurrence_start is None:
             saved = self._repository.update(
@@ -460,11 +542,17 @@ class TaskService:
             restored_at=now or datetime.now(UTC),
         )
 
-    def delete_permanently(self, task_id: int) -> tuple[str, ...]:
+    def delete_permanently(
+        self, task_id: int, *, retained_approved: bool = False
+    ) -> tuple[str, ...]:
         """Delete a trashed task and return managed attachment paths to clean up."""
         if self._repository.get_deleted(task_id) is None:
             raise TaskNotFoundError(f"휴지통에서 업무 {task_id}을(를) 찾을 수 없습니다.")
         with self._file_delete_guard(task_id) if self._file_delete_guard else nullcontext():
+            if retained_approved:
+                confirmed = getattr(self._repository, "delete_permanently_confirmed", None)
+                if confirmed is not None:
+                    return cast(tuple[str, ...], confirmed(task_id))
             return self._repository.delete_permanently(task_id)
 
     def query(self, query: TaskQuery, *, now: datetime | None = None) -> TaskPage:
@@ -716,6 +804,7 @@ class TaskService:
         inclusive_end = scheduled.ends_at.astimezone(zone) - timedelta(microseconds=1)
         return start_day, max(start_day, inclusive_end.date())
 
+    @tracked_command
     def transition_occurrence(
         self,
         task_id: int,
@@ -724,6 +813,7 @@ class TaskService:
         *,
         now: datetime | None = None,
         result_note: str | None = None,
+        command_id: str | None = None,
     ) -> TaskOccurrence:
         task = self.get(task_id)
         occurrence = self._validated_occurrence(task, occurrence_start)

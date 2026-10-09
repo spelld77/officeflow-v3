@@ -49,6 +49,7 @@ class FileMaintenance:
         self.known: set[tuple[str, str]] = set()
         self.warnings: dict[str, str] = {}
         self._reported: tuple[str, ...] = ()
+        self.snapshots: Any = None
 
     def _scan(self) -> None:
         for kind, path in (
@@ -72,15 +73,29 @@ class FileMaintenance:
                 self.scans.pop(0)
                 continue
             count += 1
+            if kind == "internal" and entry.name.startswith("snapshot-"):
+                kind = "snapshot"
             if kind == "delete" and not entry.name.startswith("delete-"):
                 continue
-            identity = entry.name.removeprefix("delete-") if kind == "delete" else entry.name
+            identity = (
+                entry.name.removeprefix("delete-")
+                if kind == "delete"
+                else entry.name.removeprefix("snapshot-")
+                if kind == "snapshot"
+                else entry.name
+            )
             if (kind, identity) in self.known:
                 continue
             self.known.add((kind, identity))
             heapq.heappush(self.queue, (time(), kind, identity))
             try:
-                (self.internal if kind == "internal" else self.trash).protect_pending(identity)
+                (
+                    self.internal
+                    if kind == "internal"
+                    else self.internal.snapshot_storage
+                    if kind == "snapshot"
+                    else self.trash
+                ).protect_pending(identity)
             except Exception as error:
                 self.warnings[kind + identity] = str(error)
         if self.scans:
@@ -98,6 +113,10 @@ class FileMaintenance:
                     report = self.documents.recover_confirmed(
                         (item,), cancel_requested=canceled, background=True
                     )
+                elif kind == "snapshot":
+                    if self.snapshots is None:
+                        raise ValueError("중요 보관 복구 서비스를 확인하세요.")
+                    report = self.snapshots.recover(identity, canceled, background=True)
                 else:
                     command, _entries = self.trash._read(identity, with_states=False)
                     report = self.deletion.recover(

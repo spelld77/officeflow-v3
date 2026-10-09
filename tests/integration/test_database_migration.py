@@ -99,7 +99,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "attachment_search_update",
         "attachment_search_delete",
     } <= triggers
-    assert revision == "0013_attachment_assets"
+    assert revision == "0015_task_snapshots"
     assert "sort_order" in attachment_columns
     assert "ix_attachments_task_order" in attachment_indexes
     assert "ix_attachments_created_id" in attachment_indexes
@@ -222,7 +222,7 @@ def test_existing_records_are_backfilled_into_full_text_indexes(tmp_path: Path) 
     command.upgrade(migration_config(database_file), "0007_attachment_cleanup")
     engine = create_database_engine(database_file)
     sessions = SessionFactory(engine)
-    task_service = TaskService(SqlAlchemyTaskRepository(sessions))
+    task_service = TaskService(SqlAlchemyTaskRepository(sessions), history_enabled=False)
     record_service = RecordService(SqlAlchemyRecordRepository(sessions), task_service)
     task = task_service.create(TaskDraft(title="기존 계약 검색"))
     assert task.id is not None

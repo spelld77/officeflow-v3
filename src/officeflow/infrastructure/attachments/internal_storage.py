@@ -123,6 +123,9 @@ class InternalFileStorage:
         self.coordinator = coordinator
         self._checkpoint = checkpoint
         self._open_targets: dict[str, BinaryIO] = {}
+        from officeflow.infrastructure.attachments.snapshot_storage import SnapshotStorage
+
+        self.snapshot_storage = SnapshotStorage(self.root, coordinator)
 
     @staticmethod
     def owner(job_id: str) -> str:
@@ -477,6 +480,13 @@ class InternalFileStorage:
                     )
                     break
                 try:
+                    if entry.name.startswith("snapshot-"):
+                        items.append(
+                            self.snapshot_storage.protect_pending(
+                                entry.name.removeprefix("snapshot-")
+                            )
+                        )
+                        continue
                     if not _ID.fullmatch(entry.name):
                         raise ValueError("소유가 불명확한 내부 작업 폴더")
                     payload = self._read(entry.name)

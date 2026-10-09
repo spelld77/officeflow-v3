@@ -17,6 +17,7 @@ class TaskOccurrence:
     status: OccurrenceStatus = OccurrenceStatus.PENDING
     completed_at: datetime | None = None
     result_note: str = ""
+    command_replayed: bool = False
 
     @property
     def starts_at(self) -> datetime:

@@ -361,12 +361,14 @@ class FileActionController(QObject):
             listing.setObjectName("fileDeleteTargetNames")
             root.addWidget(listing, 1)
         text = QLabel(
-            f"연결 {plan.attachment_count}개 · 보관본 {plan.version_count}개\n실제 파일 {plan.removable_count}개 삭제 / 다른 참조 파일 {plan.kept_asset_count}개 유지\n남는 보관본 {plan.kept_versions}개\n외부 사본과 기존 백업은 삭제하지 않습니다. 되돌릴 수 없습니다."
+            f"연결 {plan.attachment_count}개 · 보관본 {plan.version_count}개\n업무 이력 {plan.history_count}건 · 중요 보관 {plan.snapshot_count}개\n실제 파일 {plan.removable_count}개 삭제 / 다른 참조 파일 {plan.kept_asset_count}개 유지\n남는 보관본 {plan.kept_versions}개\n외부 사본과 기존 백업은 삭제하지 않습니다. 되돌릴 수 없습니다."
         )
         text.setWordWrap(True)
         root.addWidget(text)
-        scope = QCheckBox("업무에 속한 보관본도 함께 삭제합니다")
-        scope.setVisible(kind == "task" and plan.version_count > 0)
+        scope = QCheckBox("보관본·업무 이력·중요 보관도 함께 삭제합니다")
+        scope.setVisible(
+            kind == "task" and bool(plan.version_count or plan.history_count or plan.snapshot_count)
+        )
         root.addWidget(scope)
         consent = QCheckBox("삭제 범위를 확인했습니다")
         consent.setObjectName("fileDeleteConsent")
