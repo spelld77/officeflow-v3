@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QSignalBlocker,
+    QSize,
     Qt,
     QThread,
     QTimer,
@@ -40,6 +42,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -64,6 +67,7 @@ from officeflow.application.attachments import (
     AttachmentVerification,
 )
 from officeflow.application.file_operations import FileInUseError
+from officeflow.application.folder_links import FolderLinkService
 from officeflow.application.records import DuplicateWorkLogError, RecordService
 from officeflow.application.task_mutations import MutationAttempt
 from officeflow.application.tasks import TaskService
@@ -72,9 +76,20 @@ from officeflow.domain.records import ChecklistItem, RecordValidationError, Work
 from officeflow.domain.task import Task
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_metadata import AttachmentMetadataDialog
+from officeflow.presentation.attachment_thumbnails import (
+    AttachmentImageCoordinator,
+    ThumbnailFileDelegate,
+    visible_items,
+)
 from officeflow.presentation.background import OperationWorker, finish_thread
 from officeflow.presentation.dates import date_with_weekday, format_date, format_datetime
 from officeflow.presentation.file_list import compact_file_list, set_file_row
+from officeflow.presentation.folder_links import FolderLinksPanel
+from officeflow.presentation.image_attachments import (
+    ClipboardAttachmentDialog,
+    ImagePreviewDialog,
+    is_image_name,
+)
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
@@ -276,7 +291,7 @@ class TaskRecordsDialog(QDialog):
     tabChanged = Signal(str)
     attachmentMetadataChanged = Signal(int)
     exportDirectoryChanged = Signal(str)
-    TAB_KEYS = ("checklist", "result", "work_log", "attachments")
+    TAB_KEYS = ("checklist", "result", "work_log", "attachments", "folders")
 
     def __init__(
         self,
@@ -289,6 +304,8 @@ class TaskRecordsDialog(QDialog):
         attachment_export_directory: str | None = None,
         occurrence_start: datetime | None = None,
         initial_tab: str | None = None,
+        folder_link_service: FolderLinkService | None = None,
+        image_coordinator: AttachmentImageCoordinator | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -322,6 +339,22 @@ class TaskRecordsDialog(QDialog):
         self._loading_checklist = False
         self._attachments_by_id: dict[int, Attachment] = {}
         self._selected_attachment_id: int | None = None
+        self._clipboard_dialog: ClipboardAttachmentDialog | None = None
+        self._image_preview: ImagePreviewDialog | None = None
+        self._image_coordinator = image_coordinator or AttachmentImageCoordinator(self)
+        self._owns_image_coordinator = image_coordinator is None
+        self._thumbnail_client = self._image_coordinator.register()
+        self.attachment_view_mode = self._image_coordinator.default_view
+        self._thumbnail_epoch = 0
+        self._thumbnail_force_epoch = -1
+        self._thumbnail_closed = False
+        self._image_action_pending = False
+        self._image_action_resuming = False
+        self._thumbnail_timer = QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.setInterval(100)
+        self._thumbnail_timer.timeout.connect(self._load_visible_thumbnails)
+        self._image_coordinator.updated.connect(self._thumbnail_updated)
         self._samples: dict[int, AttachmentQuickSample] = {}
         self._cache_states: dict[str, str] = {}
         self._sample_thread: QThread | None = None
@@ -377,16 +410,27 @@ class TaskRecordsDialog(QDialog):
         self.tabs.addTab(self._build_checklist_tab(), "체크리스트")
         self.tabs.addTab(self._build_result_tab(), "완료 요약")
         self.tabs.addTab(self._build_work_log_tab(), "업무일지")
+        self._tab_keys = ["checklist", "result", "work_log"]
         if attachment_service is not None:
             self.tabs.addTab(self._build_attachment_tab(), "첨부파일")
+            self._tab_keys.append("attachments")
+        self.folder_panel: FolderLinksPanel | None = None
+        if folder_link_service is not None:
+            self.folder_panel = FolderLinksPanel(
+                folder_link_service, self._task_id, read_only=self._read_only, parent=self
+            )
+            self.folder_panel.changed.connect(self.changed)
+            self.tabs.addTab(self.folder_panel, "폴더")
+            self._tab_keys.append("folders")
         if initial_tab is not None:
             self.select_tab(initial_tab)
         self.tabs.currentChanged.connect(lambda _index: self.tabChanged.emit(self.current_tab_key))
         self.tabs.currentChanged.connect(lambda _index: self._schedule_file_samples())
+        self.tabs.currentChanged.connect(lambda _index: self._schedule_thumbnails(recheck=True))
         root.addWidget(self.tabs, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        history_button = QPushButton("이력·보관")
+        history_button = QPushButton("이력·시점 보관")
         history_button.setObjectName("taskHistoryButton")
         history_button.clicked.connect(self._open_history)
         buttons.addButton(history_button, QDialogButtonBox.ButtonRole.ActionRole)
@@ -520,22 +564,53 @@ class TaskRecordsDialog(QDialog):
             | QAbstractItemView.EditTrigger.EditKeyPressed
         )
         self.checklist_list.itemChanged.connect(self._checklist_changed)
+        self.checklist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.checklist_list.customContextMenuRequested.connect(self._show_checklist_menu)
         layout.addWidget(self.checklist_list, 1)
 
         actions = QHBoxLayout()
-        up_button = QPushButton("위로")
-        up_button.clicked.connect(lambda: self._move_checklist(-1))
-        down_button = QPushButton("아래로")
-        down_button.clicked.connect(lambda: self._move_checklist(1))
         delete_button = QPushButton("선택 삭제")
         delete_button.setObjectName("deleteChecklistButton")
         delete_button.clicked.connect(self._delete_checklist)
-        actions.addWidget(up_button)
-        actions.addWidget(down_button)
         actions.addStretch()
         actions.addWidget(delete_button)
         layout.addLayout(actions)
         return tab
+
+    def _build_checklist_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet(LIGHT_STYLESHEET)
+        row = self.checklist_list.currentRow()
+        editable = row >= 0 and not self._read_only
+        edit = menu.addAction("수정")
+        edit.setEnabled(editable)
+        edit.triggered.connect(self._edit_checklist)
+        menu.addSeparator()
+        for label, direction in (("위로 이동", -1), ("아래로 이동", 1)):
+            action = menu.addAction(label)
+            action.setEnabled(editable and 0 <= row + direction < self.checklist_list.count())
+            action.triggered.connect(
+                lambda _checked=False, step=direction: self._move_checklist(step)
+            )
+        menu.addSeparator()
+        delete = menu.addAction("삭제")
+        delete.setEnabled(editable)
+        delete.triggered.connect(self._delete_checklist)
+        return menu
+
+    def _edit_checklist(self) -> None:
+        item = self.checklist_list.currentItem()
+        if item is not None and not self._read_only:
+            self.checklist_list.editItem(item)
+
+    def _show_checklist_menu(self, position: QPoint) -> None:
+        item = self.checklist_list.itemAt(position)
+        if item is None:
+            return
+        self.checklist_list.setCurrentItem(item)
+        menu = self._build_checklist_menu()
+        menu.exec(self.checklist_list.viewport().mapToGlobal(position))
+        menu.deleteLater()
 
     def _open_document_browser(self) -> None:
         if (
@@ -559,6 +634,8 @@ class TaskRecordsDialog(QDialog):
         file_actions(self, self._attachment_service.lifecycle).keep(dialog)
 
     def _create_document(self, operation: str) -> None:
+        if self._defer_image_action(lambda: self._create_document(operation)):
+            return
         if (
             not self._attachment_metadata_enabled()
             or not self._attachment_service
@@ -678,34 +755,41 @@ class TaskRecordsDialog(QDialog):
         self.attachment_drop_hint.setObjectName("mutedText")
         self.attachment_drop_hint.setToolTip(help_text)
         self.attachment_drop_hint.setWordWrap(True)
-        layout.addWidget(self.attachment_drop_hint)
+        header = QHBoxLayout()
+        header.addWidget(self.attachment_drop_hint, 1)
+        self.list_view_button = QPushButton("목록")
+        self.thumbnail_view_button = QPushButton("썸네일")
+        for button in (self.list_view_button, self.thumbnail_view_button):
+            button.setCheckable(True)
+            button.setAutoDefault(False)
+            header.addWidget(button)
+        self.list_view_button.clicked.connect(lambda: self._set_attachment_view("list"))
+        self.thumbnail_view_button.clicked.connect(lambda: self._set_attachment_view("thumbnails"))
+        layout.addLayout(header)
 
-        self.add_attachment_button = QPushButton("파일 선택 (여러 개)")
+        self.add_attachment_button = QPushButton("파일 추가")
+        self.add_attachment_button.setToolTip(
+            "파일 선택 창에서 여러 파일을 함께 선택할 수 있습니다."
+        )
         self.add_attachment_button.setObjectName("addAttachmentButton")
         self.add_attachment_button.setProperty("primaryAction", True)
         self.add_attachment_button.clicked.connect(self._choose_attachment)
-        order_actions = QHBoxLayout()
-        order_actions.addWidget(self.add_attachment_button)
-        order_actions.addStretch()
-        self.move_attachment_up_button = QPushButton("위로")
-        self.move_attachment_down_button = QPushButton("아래로")
-        self.move_attachment_up_button.setObjectName("moveAttachmentUpButton")
-        self.move_attachment_down_button.setObjectName("moveAttachmentDownButton")
-        self.move_attachment_up_button.clicked.connect(
-            lambda: self._move_attachment(AttachmentMove.UP)
-        )
-        self.move_attachment_down_button.clicked.connect(
-            lambda: self._move_attachment(AttachmentMove.DOWN)
-        )
-        order_actions.addWidget(self.move_attachment_up_button)
-        order_actions.addWidget(self.move_attachment_down_button)
-        layout.addLayout(order_actions)
+        add_actions = QHBoxLayout()
+        add_actions.addWidget(self.add_attachment_button)
+        self.clipboard_image_button = QPushButton("클립보드 이미지")
+        self.clipboard_image_button.setToolTip("캡처한 사진을 이름·미리보기 확인 후 첨부")
+        self.clipboard_image_button.clicked.connect(self._add_clipboard_image)
+        self.clipboard_image_button.setEnabled(not self._read_only)
+        add_actions.addWidget(self.clipboard_image_button)
+        add_actions.addStretch()
+        layout.addLayout(add_actions)
 
         self.attachment_list = AttachmentListWidget()
         compact_file_list(self.attachment_list)
         self.attachment_list.setMinimumHeight(180)
         self.attachment_list.setObjectName("attachmentList")
         self.attachment_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.attachment_list.viewport().installEventFilter(self)
         self.attachment_list.currentItemChanged.connect(self._attachment_selected)
         self.attachment_list.itemSelectionChanged.connect(
             lambda: self._attachment_selected(self.attachment_list.currentItem(), None)
@@ -713,6 +797,9 @@ class TaskRecordsDialog(QDialog):
         self.attachment_list.itemSelectionChanged.connect(self._schedule_file_samples)
         self.attachment_list.verticalScrollBar().valueChanged.connect(
             lambda _value: self._schedule_file_samples()
+        )
+        self.attachment_list.verticalScrollBar().valueChanged.connect(
+            lambda _value: self._schedule_thumbnails()
         )
         self.attachment_list.itemDoubleClicked.connect(self._open_clicked_attachment)
         self.attachment_list.filesDropped.connect(self._add_attachment_sources)
@@ -733,6 +820,12 @@ class TaskRecordsDialog(QDialog):
         self.attachment_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         summary = QHBoxLayout()
         summary.addWidget(self.attachment_detail, 1)
+        self.image_preview_button = QPushButton("미리보기")
+        self.image_preview_button.setEnabled(False)
+        self.image_preview_button.clicked.connect(self._show_image_preview)
+        # Kept as an internal command for compatibility, not a visible per-file button.
+        self.image_preview_button.setParent(self)
+        self.image_preview_button.hide()
         self.preserve_view_button = QPushButton("수정본 저장…")
         self.preserve_view_button.setObjectName("preserveViewButton")
         self.preserve_view_button.clicked.connect(self._open_view_copies)
@@ -777,6 +870,9 @@ class TaskRecordsDialog(QDialog):
         self.more_attachment_button = QPushButton("더보기")
         self.more_attachment_button.setObjectName("moreAttachmentButton")
         more = QMenu(self.more_attachment_button)
+        self.image_expand_action = more.addAction("이미지 확대…", self._show_image_preview)
+        more.addAction("썸네일 새로고침", self._refresh_thumbnails)
+        more.addSeparator()
         metadata_actions = (
             more.addAction("이름 변경…", lambda: self._edit_attachment_metadata()),
             more.addAction("메모…", lambda: self._edit_attachment_metadata(edit_memo=True)),
@@ -793,6 +889,7 @@ class TaskRecordsDialog(QDialog):
             file_actions.append(action)
 
         def update_more() -> None:
+            self.image_expand_action.setEnabled(self.image_preview_button.isEnabled())
             for action in metadata_actions:
                 action.setEnabled(self._attachment_metadata_enabled())
             for action, button in zip(
@@ -853,9 +950,12 @@ class TaskRecordsDialog(QDialog):
         self._checklist_by_id = {item.id: item for item in items if item.id is not None}
         for checklist in items:
             item = QListWidgetItem(checklist.content)
-            item.setFlags(
-                item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEditable
-            )
+            flags = item.flags()
+            if not self._read_only:
+                flags |= Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEditable
+            else:
+                flags &= ~Qt.ItemFlag.ItemIsUserCheckable & ~Qt.ItemFlag.ItemIsEditable
+            item.setFlags(flags)
             item.setCheckState(
                 Qt.CheckState.Checked if checklist.is_done else Qt.CheckState.Unchecked
             )
@@ -864,6 +964,8 @@ class TaskRecordsDialog(QDialog):
         self._loading_checklist = False
 
     def _add_checklist(self) -> None:
+        if self._read_only:
+            return
         try:
             self._record_service.add_checklist_item(self._task_id, self.checklist_edit.text())
         except (RecordValidationError, LookupError) as error:
@@ -895,17 +997,26 @@ class TaskRecordsDialog(QDialog):
         self.changed.emit()
 
     def _delete_checklist(self) -> None:
+        if self._read_only:
+            return
         item = self.checklist_list.currentItem()
         if item is None:
             return
         item_id = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(item_id, int):
             return
-        self._record_service.delete_checklist_item(item_id)
+        try:
+            self._record_service.delete_checklist_item(item_id)
+        except (RecordValidationError, LookupError) as error:
+            QMessageBox.warning(self, "체크리스트를 삭제하지 못했습니다.", str(error))
+            self._refresh_checklist()
+            return
         self._refresh_checklist()
         self.changed.emit()
 
     def _move_checklist(self, direction: int) -> None:
+        if self._read_only:
+            return
         row = self.checklist_list.currentRow()
         target = row + direction
         if row < 0 or target < 0 or target >= self.checklist_list.count():
@@ -915,11 +1026,16 @@ class TaskRecordsDialog(QDialog):
             for index in range(self.checklist_list.count())
         ]
         item_ids[row], item_ids[target] = item_ids[target], item_ids[row]
-        self._record_service.reorder_checklist(
-            self._task_id, tuple(item_id for item_id in item_ids if isinstance(item_id, int))
-        )
+        try:
+            self._record_service.reorder_checklist(
+                self._task_id, tuple(item_id for item_id in item_ids if isinstance(item_id, int))
+            )
+        except Exception as error:
+            QMessageBox.warning(self, "체크리스트 순서를 바꾸지 못했습니다.", str(error))
+            return
         self._refresh_checklist()
         self.checklist_list.setCurrentRow(target)
+        self.checklist_list.scrollToItem(self.checklist_list.item(target))
         self.changed.emit()
 
     def _save_result(self) -> None:
@@ -1042,11 +1158,11 @@ class TaskRecordsDialog(QDialog):
 
     @property
     def current_tab_key(self) -> str:
-        return self.TAB_KEYS[self.tabs.currentIndex()]
+        return self._tab_keys[self.tabs.currentIndex()]
 
     def select_tab(self, key: str) -> None:
-        if key in self.TAB_KEYS:
-            index = self.TAB_KEYS.index(key)
+        if key in self._tab_keys:
+            index = self._tab_keys.index(key)
             if index < self.tabs.count():
                 self.tabs.setCurrentIndex(index)
 
@@ -1068,7 +1184,7 @@ class TaskRecordsDialog(QDialog):
         selected_ids = {
             item.data(Qt.ItemDataRole.UserRole) for item in self.attachment_list.selectedItems()
         }
-        scroll = self.attachment_list.verticalScrollBar().value()
+        anchor = self._attachment_scroll_anchor()
         detail = self.attachment_detail.text()
         previous_selected = (
             self._attachments_by_id.get(selected_id) if selected_id is not None else None
@@ -1095,8 +1211,9 @@ class TaskRecordsDialog(QDialog):
         self.attachment_drop_hint.setText(
             f"첨부 {len(attachments)}개 · 모든 반복 회차에서 공유"
             if self._task.recurrence_rule
-            else f"첨부 {len(attachments)}개 · Ctrl/Shift로 선택 · 파일을 끌어놓아 추가"
+            else f"첨부 {len(attachments)}개"
         )
+        self.attachment_drop_hint.setToolTip("Ctrl/Shift로 여러 파일 선택 · 파일을 끌어놓아 추가")
         self._selected_attachment_id = None
         self.attachment_detail.setText(
             "첨부파일이 없습니다."
@@ -1112,8 +1229,10 @@ class TaskRecordsDialog(QDialog):
             and previous_selected == self._attachments_by_id.get(selected_id)
         ):
             self.attachment_detail.setText(detail)
-        self.attachment_list.verticalScrollBar().setValue(scroll)
+        self._configure_attachment_view()
+        self._restore_attachment_anchor(anchor)
         self._schedule_file_samples()
+        self._schedule_thumbnails(recheck=True)
 
     def _update_attachment_row(self, item: QListWidgetItem, attachment: Attachment) -> None:
         role = {"general": "일반", "original": "원본", "work": "작업본"}[attachment.role.value]
@@ -1128,6 +1247,8 @@ class TaskRecordsDialog(QDialog):
         versions = getattr(self, "_document_counts", {}).get(attachment.family_id, 0)
         if versions:
             state.append(f"보관 {versions}")
+        if self.attachment_view_mode == "thumbnails" and attachment.memo.strip():
+            state.append("메모 있음")
         set_file_row(
             item,
             attachment.name,
@@ -1224,18 +1345,8 @@ class TaskRecordsDialog(QDialog):
             item.data(Qt.ItemDataRole.UserRole)
             for item in self.attachment_list.selectedItems()[:100]
         }
-        start_row = max(0, self.attachment_list.indexAt(QPoint(0, 0)).row())
-        for row in range(start_row, self.attachment_list.count()):
-            item = self.attachment_list.item(row)
-            if (
-                self.attachment_list.visualItemRect(item).top()
-                > self.attachment_list.viewport().rect().bottom()
-            ):
-                break
-            if self.attachment_list.visualItemRect(item).intersects(
-                self.attachment_list.viewport().rect()
-            ):
-                ids.add(item.data(Qt.ItemDataRole.UserRole))
+        for item in visible_items(self.attachment_list):
+            ids.add(item.data(Qt.ItemDataRole.UserRole))
             if len(ids) >= 100:
                 break
         samples = tuple(
@@ -1305,7 +1416,204 @@ class TaskRecordsDialog(QDialog):
             self, "_sample_timer"
         ):
             self._schedule_file_samples()
+            self._schedule_thumbnails(recheck=True)
+        if event.type() in {QEvent.Type.Hide, QEvent.Type.WindowStateChange} and hasattr(
+            self, "_thumbnail_timer"
+        ):
+            self._schedule_thumbnails()
         return super().event(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.Resize
+            and hasattr(self, "attachment_list")
+            and watched is self.attachment_list.viewport()
+        ):
+            if self.attachment_view_mode == "thumbnails":
+                self._configure_attachment_view()
+            self._schedule_thumbnails()
+        return super().eventFilter(watched, event)
+
+    def _attachment_scroll_anchor(self) -> int | None:
+        if not hasattr(self, "attachment_list"):
+            return None
+        items = visible_items(self.attachment_list)
+        return items[0].data(Qt.ItemDataRole.UserRole) if items else None
+
+    def _restore_attachment_anchor(self, identity: int | None) -> None:
+        if identity is None:
+            return
+        self.attachment_list.doItemsLayout()
+        for row in range(self.attachment_list.count()):
+            item = self.attachment_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == identity:
+                self.attachment_list.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtTop)
+                break
+
+    def _set_attachment_view(self, mode: str) -> None:
+        anchor = self._attachment_scroll_anchor()
+        self.attachment_view_mode = mode
+        self._image_coordinator.remember_mode(mode)
+        self._configure_attachment_view()
+        for row in range(self.attachment_list.count()):
+            item = self.attachment_list.item(row)
+            attachment = self._attachments_by_id.get(item.data(Qt.ItemDataRole.UserRole))
+            if attachment:
+                self._update_attachment_row(item, attachment)
+        self._restore_attachment_anchor(anchor)
+        self._schedule_thumbnails(recheck=self._thumbnail_force_epoch != self._thumbnail_epoch)
+
+    def _configure_attachment_view(self) -> None:
+        listing = self.attachment_list
+        thumbnails = self.attachment_view_mode == "thumbnails"
+        self.list_view_button.setChecked(not thumbnails)
+        self.thumbnail_view_button.setChecked(thumbnails)
+        if thumbnails:
+            if not isinstance(listing.itemDelegate(), ThumbnailFileDelegate):
+                old = listing.itemDelegate()
+                listing.setItemDelegate(
+                    ThumbnailFileDelegate(listing, self._image_coordinator, self._thumbnail_client)
+                )
+                old.deleteLater()
+                listing.setViewMode(QListView.ViewMode.IconMode)
+            listing.setFlow(QListView.Flow.LeftToRight)
+            listing.setWrapping(True)
+            listing.setResizeMode(QListView.ResizeMode.Adjust)
+            width = max(176, listing.viewport().width())
+            columns = min(4, max(1, width // 200))
+            cell = QSize(min(240, width // columns), 134 + 2 * (listing.fontMetrics().height() + 4))
+            if listing.gridSize() != cell:
+                listing.setGridSize(cell)
+        else:
+            if isinstance(listing.itemDelegate(), ThumbnailFileDelegate):
+                old = listing.itemDelegate()
+                compact_file_list(listing)
+                old.deleteLater()
+            listing.setViewMode(QListView.ViewMode.ListMode)
+            listing.setFlow(QListView.Flow.TopToBottom)
+            listing.setWrapping(False)
+            listing.setGridSize(QSize())
+        listing.setMovement(QListView.Movement.Static)
+        listing.setWordWrap(False)
+        listing.setUniformItemSizes(True)
+        listing.setDragEnabled(False)
+        listing.setAcceptDrops(True)
+        listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        listing.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+    def _schedule_thumbnails(self, *, recheck: bool = False) -> None:
+        if self._thumbnail_closed or not hasattr(self, "attachment_list"):
+            return
+        if recheck:
+            self._thumbnail_epoch += 1
+        if (
+            self.attachment_view_mode != "thumbnails"
+            or self.current_tab_key != "attachments"
+            or not self.isVisible()
+            or self.isMinimized()
+        ):
+            self._thumbnail_timer.stop()
+            self._image_coordinator.sync(self._thumbnail_client, ())
+            return
+        self._thumbnail_timer.start()
+
+    def _load_visible_thumbnails(self) -> None:
+        service = self._attachment_service
+        if not service or self._thumbnail_closed or self._image_action_pending:
+            return
+        if (
+            not self.isVisible()
+            or self.isMinimized()
+            or self.current_tab_key != "attachments"
+            or self.attachment_view_mode != "thumbnails"
+        ):
+            self._image_coordinator.sync(self._thumbnail_client, ())
+            return
+        ratio = self.attachment_list.devicePixelRatioF()
+        target = QSize(
+            int((self.attachment_list.gridSize().width() - 26) * ratio), int(104 * ratio)
+        )
+        values = []
+        for item in visible_items(self.attachment_list):
+            attachment = self._attachments_by_id.get(item.data(Qt.ItemDataRole.UserRole))
+            if attachment and is_image_name(attachment.name):
+                values.append((service, attachment, target))
+        self._image_coordinator.sync(
+            self._thumbnail_client,
+            tuple(values),
+            epoch=self._thumbnail_epoch,
+            force=self._thumbnail_force_epoch == self._thumbnail_epoch,
+        )
+
+    @Slot(int)
+    def _thumbnail_updated(self, client: int) -> None:
+        if client == self._thumbnail_client and not self._thumbnail_closed:
+            for item in visible_items(self.attachment_list):
+                state = self._image_coordinator.state_for(
+                    client, item.data(Qt.ItemDataRole.UserRole)
+                )
+                attachment = self._attachments_by_id.get(item.data(Qt.ItemDataRole.UserRole))
+                if state and state.error and attachment:
+                    item.setToolTip(
+                        self._attachment_information(attachment) + "\n이미지: " + state.error
+                    )
+            self.attachment_list.viewport().update()
+
+    def _refresh_thumbnails(self) -> None:
+        self._thumbnail_epoch += 1
+        self._thumbnail_force_epoch = self._thumbnail_epoch
+        self._image_coordinator.invalidate(self._thumbnail_client)
+        self._schedule_thumbnails()
+
+    def _stop_thumbnails(self) -> None:
+        if self._thumbnail_closed:
+            return
+        self._thumbnail_closed = True
+        self._thumbnail_timer.stop()
+        self._image_coordinator.unregister(self._thumbnail_client)
+        self._image_coordinator.updated.disconnect(self._thumbnail_updated)
+        if self._owns_image_coordinator:
+            self._image_coordinator.shutdown()
+
+    def _defer_image_action(self, action: Callable[[], None]) -> bool:
+        if self._image_action_resuming:
+            return False
+        if self._image_action_pending:
+            return True
+        ids = tuple(
+            item.data(Qt.ItemDataRole.UserRole) for item in self.attachment_list.selectedItems()
+        )
+        assets = frozenset(
+            self._attachments_by_id[identity].asset_id
+            for identity in ids
+            if identity in self._attachments_by_id
+        )
+
+        def resume() -> None:
+            self._image_action_pending = False
+            if self._thumbnail_closed or self._owner_shutting_down:
+                return
+            current = tuple(
+                item.data(Qt.ItemDataRole.UserRole) for item in self.attachment_list.selectedItems()
+            )
+            if current != ids:
+                self.attachment_detail.setText(
+                    "선택이 바뀌었습니다. 원하는 파일에서 다시 실행하세요."
+                )
+                return
+            self._image_action_resuming = True
+            try:
+                self._set_attachment_actions_enabled(len(ids) == 1)
+                action()
+            finally:
+                self._image_action_resuming = False
+
+        if self._image_coordinator.after_read(self._thumbnail_client, assets, resume):
+            self._image_action_pending = True
+            self._set_attachment_actions_enabled(False)
+            self.attachment_detail.setText("이미지 읽기를 마무리한 뒤 요청을 실행합니다…")
+            return True
+        return False
 
     def _stop_file_samples(self) -> None:
         self._sample_generation += 1
@@ -1327,6 +1635,7 @@ class TaskRecordsDialog(QDialog):
     def _attachment_move_enabled(self, movement: AttachmentMove) -> bool:
         if (
             self._read_only
+            or self._image_action_pending
             or self._owner_shutting_down
             or self._attachment_thread is not None
             or self._verification_thread is not None
@@ -1378,6 +1687,9 @@ class TaskRecordsDialog(QDialog):
                 self.delete_attachment_button.text(), self._delete_attachment
             ).setEnabled(self._attachment_delete_enabled())
             return menu
+        menu.addAction("이미지 확대…", self._show_image_preview).setEnabled(
+            self.image_preview_button.isEnabled()
+        )
         if self._attachment_service and self._attachment_service.lifecycle:
             for label, operation in (
                 ("새 작업본…", "create_work"),
@@ -1436,6 +1748,7 @@ class TaskRecordsDialog(QDialog):
     def _attachment_metadata_enabled(self) -> bool:
         if (
             self._read_only
+            or self._image_action_pending
             or self._owner_shutting_down
             or self._attachment_service is None
             or self._attachment_thread is not None
@@ -1500,10 +1813,14 @@ class TaskRecordsDialog(QDialog):
             return
         for index in range(self.attachment_list.count()):
             if self.attachment_list.item(index).data(Qt.ItemDataRole.UserRole) == attachment_id:
-                self.attachment_list.setCurrentRow(index)
+                self.attachment_list.setCurrentRow(
+                    index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+                )
                 return
 
     def _save_attachment_copy(self) -> None:
+        if self._defer_image_action(self._save_attachment_copy):
+            return
         if self._export_controller is None:
             return
         references = tuple(
@@ -1638,6 +1955,8 @@ class TaskRecordsDialog(QDialog):
         thread.start()
 
     def reject(self) -> None:
+        if self.folder_panel:
+            self.folder_panel.shutdown()
         if self._defer_close_for_verification() or self._defer_close_for_attachment_import():
             return
         if self._export_controller:
@@ -1650,6 +1969,10 @@ class TaskRecordsDialog(QDialog):
 
     def shutdown(self) -> None:
         """Finish a modeless dialog's import before its owner disposes the DB."""
+        self._close_image_dialogs()
+        self._stop_thumbnails()
+        if self.folder_panel:
+            self.folder_panel.shutdown()
         from officeflow.presentation.document_actions import stop_file_actions
 
         stop_file_actions(self)
@@ -1687,6 +2010,9 @@ class TaskRecordsDialog(QDialog):
         self.reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._close_image_dialogs()
+        if self.folder_panel:
+            self.folder_panel.shutdown()
         if self._defer_close_for_verification() or self._defer_close_for_attachment_import():
             event.ignore()
             return
@@ -1804,6 +2130,7 @@ class TaskRecordsDialog(QDialog):
         _previous: QListWidgetItem | None,
     ) -> None:
         selected = self.attachment_list.selectedItems()
+        self._update_image_preview()
         count = len(selected)
         self.preserve_view_button.hide()
         if count > 1:
@@ -1851,6 +2178,8 @@ class TaskRecordsDialog(QDialog):
         self._set_attachment_actions_enabled(True)
 
     def _open_attachment(self) -> None:
+        if self._defer_image_action(self._open_attachment):
+            return
         if (
             self._selected_attachment_id is None
             or self._attachment_service is None
@@ -1878,6 +2207,8 @@ class TaskRecordsDialog(QDialog):
             )
 
     def _verify_attachment(self) -> None:
+        if self._defer_image_action(self._verify_attachment):
+            return
         if self._selected_attachment_id is None or self._attachment_service is None:
             return
         if self._verification_thread is not None or self._attachment_thread is not None:
@@ -1976,6 +2307,8 @@ class TaskRecordsDialog(QDialog):
         return True
 
     def _unlink_attachment(self) -> None:
+        if self._defer_image_action(self._unlink_attachment):
+            return
         if self._selected_attachment_id is None or self._attachment_service is None:
             return
         attachment = self._attachments_by_id.get(self._selected_attachment_id)
@@ -2003,6 +2336,8 @@ class TaskRecordsDialog(QDialog):
         )
 
     def _delete_attachment(self) -> None:
+        if self._defer_image_action(self._delete_attachment):
+            return
         if not self._attachment_delete_enabled() or self._attachment_service is None:
             return
         selected = self.attachment_list.selectedItems()
@@ -2053,6 +2388,7 @@ class TaskRecordsDialog(QDialog):
         count = len(self.attachment_list.selectedItems())
         if (
             self._read_only
+            or self._image_action_pending
             or self._owner_shutting_down
             or not 1 <= count <= 100
             or self._attachment_service is None
@@ -2069,8 +2405,20 @@ class TaskRecordsDialog(QDialog):
             return False
 
     def _set_attachment_actions_enabled(self, enabled: bool) -> None:
+        selected = self._attachments_by_id.get(self._selected_attachment_id or -1)
+        self.image_preview_button.setEnabled(
+            enabled and selected is not None and is_image_name(selected.name)
+        )
+        self.image_expand_action.setEnabled(self.image_preview_button.isEnabled())
+        self.clipboard_image_button.setEnabled(
+            not self._read_only
+            and self._attachment_thread is None
+            and self._verification_thread is None
+            and not self._owner_shutting_down
+        )
         enabled = (
             enabled
+            and not self._image_action_pending
             and self._verification_thread is None
             and self._attachment_thread is None
             and not (self._export_controller and self._export_controller.busy)
@@ -2081,13 +2429,69 @@ class TaskRecordsDialog(QDialog):
         self.unlink_attachment_button.setEnabled(enabled and not self._read_only)
         self.delete_attachment_button.setEnabled(self._attachment_delete_enabled())
         self.save_attachment_button.setEnabled(enabled and self._export_controller is not None)
-        self.more_attachment_button.setEnabled(enabled)
-        self.move_attachment_up_button.setEnabled(
-            enabled and self._attachment_move_enabled(AttachmentMove.UP)
+        self.more_attachment_button.setEnabled(
+            not self._owner_shutting_down and not self._image_action_pending
         )
-        self.move_attachment_down_button.setEnabled(
-            enabled and self._attachment_move_enabled(AttachmentMove.DOWN)
+
+    def _add_clipboard_image(self) -> None:
+        if (
+            self._read_only
+            or self._attachment_service is None
+            or self._attachment_thread
+            or self._verification_thread
+        ):
+            return
+        if self._clipboard_dialog and self._clipboard_dialog.isVisible():
+            self._clipboard_dialog.raise_()
+            return
+        dialog = ClipboardAttachmentDialog(self._attachment_service, self._task_id, self)
+        self._clipboard_dialog = dialog
+        dialog.changed.connect(self._refresh_attachments)
+        dialog.changed.connect(self.changed)
+        dialog.notice.connect(self.attachment_detail.setText)
+        dialog.finished.connect(lambda _result: dialog.deleteLater())
+        dialog.finished.connect(lambda _result: setattr(self, "_clipboard_dialog", None))
+        dialog.show()
+
+    def _show_image_preview(self) -> None:
+        if self._image_preview is None:
+            self._image_preview = ImagePreviewDialog(self, coordinator=self._image_coordinator)
+        self._image_preview.show()
+        self._image_preview.raise_()
+        self._update_image_preview()
+
+    def _update_image_preview(self) -> None:
+        viewer = self._image_preview
+        if viewer is None or not viewer.isVisible():
+            return
+        if self._image_action_pending:
+            viewer.clear("파일 작업을 기다리는 중입니다…")
+            return
+        selected = self.attachment_list.selectedItems()
+        attachment = (
+            self._attachments_by_id.get(selected[0].data(Qt.ItemDataRole.UserRole))
+            if len(selected) == 1
+            else None
         )
+        if (
+            attachment is None
+            or self._attachment_service is None
+            or not is_image_name(attachment.name)
+        ):
+            viewer.clear()
+        else:
+            viewer.load(self._attachment_service, attachment.id_required, attachment.name)
+
+    def _close_image_dialogs(self) -> None:
+        if self._clipboard_dialog:
+            self._clipboard_dialog.reject()
+        if self._image_preview:
+            self._image_preview.reject()
+
+    def done(self, result: int) -> None:
+        self._close_image_dialogs()
+        self._stop_thumbnails()
+        super().done(result)
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -2113,6 +2517,8 @@ class WorkLogBrowserDialog(QDialog):
         attachment_service: AttachmentService | None = None,
         attachment_export_service: AttachmentExportService | None = None,
         attachment_export_directory: str | None = None,
+        folder_link_service: FolderLinkService | None = None,
+        image_coordinator: AttachmentImageCoordinator | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2122,6 +2528,9 @@ class WorkLogBrowserDialog(QDialog):
         self._record_dialogs: list[TaskRecordsDialog] = []
         self._attachment_export_service = attachment_export_service
         self._attachment_export_directory = attachment_export_directory
+        self._folder_link_service = folder_link_service
+        self._image_coordinator = image_coordinator or AttachmentImageCoordinator(self)
+        self._owns_image_coordinator = image_coordinator is None
         self._groups_by_key: dict[tuple[str, int], _RecordGroup] = {}
         self._selected_group_key: tuple[str, int] | None = None
         self._selected_task_context: tuple[int, datetime | None] | None = None
@@ -2208,7 +2617,7 @@ class WorkLogBrowserDialog(QDialog):
         self.detail.setMaximumHeight(220)
         self.detail.setPlainText("날짜를 선택하면 기록을 확인할 수 있습니다.")
         root.addWidget(self.detail)
-        self.open_records_button = QPushButton("완료 요약 · 기록 열기")
+        self.open_records_button = QPushButton("업무 보기")
         self.open_records_button.setObjectName("workLogOpenRecordsButton")
         self.open_records_button.setEnabled(False)
         self.open_records_button.clicked.connect(self._open_selected_records)
@@ -2586,6 +2995,8 @@ class WorkLogBrowserDialog(QDialog):
             attachment_export_service=self._attachment_export_service,
             attachment_export_directory=self._attachment_export_directory,
             initial_tab="result",
+            folder_link_service=self._folder_link_service,
+            image_coordinator=self._image_coordinator,
             parent=self,
         )
         self._record_dialogs.append(dialog)
@@ -2607,6 +3018,8 @@ class WorkLogBrowserDialog(QDialog):
         self._search_timer.stop()
         for dialog in tuple(self._record_dialogs):
             dialog.shutdown()
+        if self._owns_image_coordinator:
+            self._image_coordinator.shutdown()
         super().done(result)
 
     def shutdown(self) -> None:

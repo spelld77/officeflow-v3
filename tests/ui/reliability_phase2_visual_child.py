@@ -70,7 +70,8 @@ with tempfile.TemporaryDirectory(prefix="officeflow-phase2-visual-") as temporar
             dialog.close_button,
             dialog.search_button,
         ):
-            assert dialog.rect().contains(button.mapTo(dialog, button.rect().bottomRight()))
+            if button.isVisible():
+                assert dialog.rect().contains(button.mapTo(dialog, button.rect().bottomRight()))
         assert (
             dialog.list.viewport()
             .grab()

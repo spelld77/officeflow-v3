@@ -268,15 +268,19 @@ def test_presentation_failure_no_repeated_window_creation(qtbot: QtBot, monkeypa
 @pytest.fixture
 def windows_test_fonts() -> Iterator[None]:
     # Offscreen Qt does not discover Windows system fonts automatically.
-    fonts = [QFontDatabase.addApplicationFont(str(path)) for path in (
-        Path("C:/Windows/Fonts/malgun.ttf"), Path("C:/Windows/Fonts/segoeui.ttf")
-    ) if path.exists()]
+    fonts = [
+        QFontDatabase.addApplicationFont(str(path))
+        for path in (Path("C:/Windows/Fonts/malgun.ttf"), Path("C:/Windows/Fonts/segoeui.ttf"))
+        if path.exists()
+    ]
     yield
     for font in fonts:
         QFontDatabase.removeApplicationFont(font)
 
 
-def test_long_message_and_advanced_settings_render_with_scrolling(qtbot: QtBot, windows_test_fonts) -> None:
+def test_long_message_and_advanced_settings_render_with_scrolling(
+    qtbot: QtBot, windows_test_fonts
+) -> None:
     control = controller(qtbot, FakeClock())
     control.service.update_settings(
         replace(control.service.settings, message="인사랑 업무기록 확인 " * 16), control.clock.now()
@@ -310,13 +314,27 @@ def test_hourly_off_does_not_disable_task_reminders_or_modify_tasks(qtbot: QtBot
     reminder_service = ReminderService(reminders, service)
     now = datetime.now(ZoneInfo("Asia/Seoul"))
     task = service.create(TaskDraft(title="업무 알림", starts_at=now - timedelta(minutes=1)))
-    reminder_service.replace_rules(task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),))
-    window = MainWindow(AppSettings(), service, reminder_service=reminder_service,
-                        hourly_notifications_enabled=True, hourly_notification_clock=FakeClock())
+    reminder_service.replace_rules(
+        task.id, (ReminderRuleInput(ReminderRelation.START, offset_minutes=0),)
+    )
+    window = MainWindow(
+        AppSettings(),
+        service,
+        reminder_service=reminder_service,
+        hourly_notifications_enabled=True,
+        hourly_notification_clock=FakeClock(),
+    )
     qtbot.addWidget(window)
     window.show()
-    qtbot.waitUntil(lambda: window._hourly_controller.dialog is not None and window._reminder_dialog is not None)
-    before = (dict(tasks.tasks), dict(reminders.reminders), dict(reminders.deliveries), len(tasks.queries))
+    qtbot.waitUntil(
+        lambda: window._hourly_controller.dialog is not None and window._reminder_dialog is not None
+    )
+    before = (
+        dict(tasks.tasks),
+        dict(reminders.reminders),
+        dict(reminders.deliveries),
+        len(tasks.queries),
+    )
     window._hourly_controller.enabled_action.trigger()
     for _ in range(5):
         window._hourly_controller.poll()
@@ -329,31 +347,55 @@ def test_hourly_off_does_not_disable_task_reminders_or_modify_tasks(qtbot: QtBot
     window.shutdown()
 
 
-def test_unclean_warning_before_hourly_and_shutdown_before_pending_start(qtbot: QtBot, task_service: TaskService, monkeypatch) -> None:
+def test_unclean_warning_before_hourly_and_shutdown_before_pending_start(
+    qtbot: QtBot, task_service: TaskService, monkeypatch
+) -> None:
     seen = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda parent, *_args: seen.append(parent._hourly_controller.dialog is None))
-    window = MainWindow(AppSettings(), task_service, previous_unclean_shutdown=True,
-                        hourly_notifications_enabled=True, hourly_notification_clock=FakeClock())
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda parent, *_args: seen.append(parent._hourly_controller.dialog is None),
+    )
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        previous_unclean_shutdown=True,
+        hourly_notifications_enabled=True,
+        hourly_notification_clock=FakeClock(),
+    )
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window._hourly_controller.dialog is not None)
     assert seen == [True]
     window.shutdown()
-    pending = MainWindow(AppSettings(), task_service, hourly_notifications_enabled=True,
-                         hourly_notification_clock=FakeClock())
+    pending = MainWindow(
+        AppSettings(),
+        task_service,
+        hourly_notifications_enabled=True,
+        hourly_notification_clock=FakeClock(),
+    )
     qtbot.addWidget(pending)
     pending.shutdown()
     qtbot.wait(10)
     assert pending._hourly_controller.dialog is None
 
 
-def test_small_main_status_does_not_overlap_undo_and_close_survives_settings_error(qtbot: QtBot, task_service: TaskService) -> None:
+def test_small_main_status_does_not_overlap_undo_and_close_survives_settings_error(
+    qtbot: QtBot, task_service: TaskService
+) -> None:
     calls = []
+
     def fail(_settings: AppSettings) -> None:
         raise OSError("disk full")
-    window = MainWindow(AppSettings(), task_service, save_settings=fail,
-                        on_shutdown=lambda: calls.append(True), hourly_notifications_enabled=True,
-                        hourly_notification_clock=FakeClock())
+
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        save_settings=fail,
+        on_shutdown=lambda: calls.append(True),
+        hourly_notifications_enabled=True,
+        hourly_notification_clock=FakeClock(),
+    )
     qtbot.addWidget(window)
     window.resize(760, 560)
     window.show()
@@ -372,8 +414,12 @@ def test_compact_status_shows_next_time_without_clipped_hour_action(
     qtbot: QtBot, task_service: TaskService, windows_test_fonts, closed: bool
 ) -> None:
     clock = FakeClock()
-    window = MainWindow(AppSettings(), task_service, hourly_notifications_enabled=True,
-                        hourly_notification_clock=clock)
+    window = MainWindow(
+        AppSettings(),
+        task_service,
+        hourly_notifications_enabled=True,
+        hourly_notification_clock=clock,
+    )
     qtbot.addWidget(window)
     window.resize(760, 560)
     window.show()
@@ -408,15 +454,15 @@ def test_morning_setting_positive_wording_keeps_default_rule_and_roundtrips(qtbo
     control.open_settings()
     editor = control.settings_dialog
     assert editor is not None
-    assert editor.morning_check.text() == "늦게 켜도 08시 알림 받기"
+    assert editor.morning_check.text() == "평일 08시: 늦게 켜도 알림 받기"
     assert not editor.morning_check.isChecked()
-    assert "08시 전부터" in editor.schedule_explanation.text()
+    assert "08시 전부터" in editor.morning_option_hint.text()
     assert editor.morning_button.text() == "오늘 08시 알림 받기"
     assert editor.morning_resume_hint.isVisible()
     editor._save()
     assert control.service.settings.morning_continuation_required
     editor.morning_check.setChecked(True)
-    assert "처음 켜도" in editor.schedule_explanation.text()
+    assert "최초 실행도 대상" in editor.behavior_help.label.text()
     editor._save()
     assert not control.service.settings.morning_continuation_required
     editor.close()

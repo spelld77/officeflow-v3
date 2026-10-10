@@ -25,6 +25,7 @@ from officeflow.presentation.dates import format_datetime
 class ReminderDialog(QDialog):
     actionRequested = Signal(int, str)
     snoozeRequested = Signal(int, int)
+    taskViewRequested = Signal(int)
 
     def __init__(
         self,
@@ -93,6 +94,14 @@ class ReminderDialog(QDialog):
         actions.addWidget(self.snooze_button, 1)
         root.addLayout(actions)
         task_actions = QHBoxLayout()
+        self.view_task_button = QPushButton("업무 보기")
+        self.view_task_button.setObjectName("viewReminderTaskButton")
+        self.view_task_button.setAutoDefault(False)
+        self.view_task_button.setToolTip(
+            "기록·체크리스트·첨부를 엽니다. 이번 알림은 처리하지 않습니다."
+        )
+        self.view_task_button.clicked.connect(self._emit_task_view)
+        task_actions.addWidget(self.view_task_button)
         task_actions.addWidget(self.complete_button)
         task_actions.addWidget(self.defer_button)
         task_actions.addStretch()
@@ -196,6 +205,11 @@ class ReminderDialog(QDialog):
             self.snooze_minutes.value(),
         )
 
+    def _emit_task_view(self) -> None:
+        item = self.alert_list.currentItem()
+        if item is not None:
+            self.taskViewRequested.emit(int(item.data(Qt.ItemDataRole.UserRole)))
+
     def _update_detail(
         self,
         current: QListWidgetItem | None,
@@ -203,11 +217,14 @@ class ReminderDialog(QDialog):
     ) -> None:
         if current is None:
             self.detail.clear()
+            self.view_task_button.setEnabled(False)
             return
         alert = self._alerts.get(int(current.data(Qt.ItemDataRole.UserRole)))
         if alert is None:
             self.detail.clear()
+            self.view_task_button.setEnabled(False)
             return
+        self.view_task_button.setEnabled(True)
         occurrence_only = bool(alert.task.recurrence_rule and alert.occurrence_start)
         self.complete_button.setText(
             "이번 회차 완료…"

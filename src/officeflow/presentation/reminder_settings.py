@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
+from itertools import pairwise
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -21,7 +22,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QPushButton,
     QSpinBox,
-    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +34,7 @@ from officeflow.domain.reminder import Reminder, ReminderDelivery
 from officeflow.domain.reminder import ReminderRuleInput as Rule
 from officeflow.domain.task import Task
 from officeflow.presentation.dates import date_with_weekday, format_datetime
+from officeflow.presentation.input_controls import TimeInput, WheelScrollGuard, default_start_at
 
 
 def candidate(edit: ReminderEdit, task: Task, now: datetime) -> datetime | None:
@@ -221,6 +222,8 @@ def reminder_summary(
     now: datetime,
     deliveries: tuple[ReminderDelivery, ...] = (),
     runtime: ReminderRuntimeState | None = None,
+    *,
+    compact: bool = False,
 ) -> str:
     if runtime:
         task, deliveries = runtime.task, runtime.deliveries
@@ -246,6 +249,19 @@ def reminder_summary(
     ]
     dates.extend(d.snoozed_until for d in active if d.snoozed_until is not None)
     disabled = sum(not e.rule.enabled for e in edits)
+    if compact:
+        title = f"{'반복 알림' if task.recurrence_rule else '알림'} {len(edits)}개"
+        next_text = (
+            "다음 " + format_datetime(min(dates), task.timezone, short=True)
+            if dates
+            else "다음 예약 없음"
+        )
+        notes = []
+        if disabled:
+            notes.append(f"사용 안 함 {disabled}개")
+        if any(d.status is ReminderDeliveryStatus.FIRED for d in active):
+            notes.append("확인할 알림 있음")
+        return title + " · " + next_text + ("\n" + " · ".join(notes) if notes else "")
     text = f"{'반복 알림 ' if task.recurrence_rule else ''}설정 {len(edits)}개"
     if disabled:
         text += f" · 사용 안 함 {disabled}개"
@@ -281,11 +297,19 @@ class ReminderRuleDialog(QDialog):
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.time_edit = QTimeEdit()
-        self.time_edit.setDisplayFormat("HH:mm")
+        self.time_input = TimeInput(QTime(0, 0), self)
+        self.time_edit = self.time_input.edit
+        self.time_input.can_step_day = lambda days: (
+            self.date_edit.minimumDate()
+            <= self.date_edit.date().addDays(days)
+            <= self.date_edit.maximumDate()
+        )
+        self.time_input.dayStepped.connect(
+            lambda days: self.date_edit.setDate(self.date_edit.date().addDays(days))
+        )
         self.date_edit.installEventFilter(self)
         self.time_edit.installEventFilter(self)
-        default = datetime.now(ZoneInfo(task.timezone)) + timedelta(hours=1)
+        default = default_start_at(datetime.now(ZoneInfo(task.timezone)))
         existing_time = edit.rule.absolute_at if edit else None
         if edit and edit.rule.relation is not ReminderRelation.ABSOLUTE:
             existing_time = candidate(edit, task, datetime.now(UTC))
@@ -329,7 +353,7 @@ class ReminderRuleDialog(QDialog):
         self.date_row = date_with_weekday(self.date_edit)
         form.addRow("방식", self.mode)
         form.addRow("날짜", self.date_row)
-        form.addRow("시각", self.time_edit)
+        form.addRow("시각", self.time_input)
         form.addRow("빠른 선택", self.quick)
         form.addRow("간격", self.interval_row)
         form.addRow("", self.enabled)
@@ -342,6 +366,19 @@ class ReminderRuleDialog(QDialog):
         self.error.setWordWrap(True)
         self.error.setStyleSheet("color:#C62828")
         layout.addWidget(self.error)
+        self.time_edit.invalidEntry.connect(self.error.setText)
+        self.time_edit.textEdited.connect(lambda _text: self.error.clear())
+        self._wheel_guard = WheelScrollGuard(self)
+        for field in (
+            self.date_edit,
+            self.time_edit,
+            self.mode,
+            self.offset,
+            self.unit,
+            self.direction,
+            self.quick,
+        ):
+            field.installEventFilter(self._wheel_guard)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -350,12 +387,27 @@ class ReminderRuleDialog(QDialog):
         buttons.accepted.connect(self._accept_rule)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        tab_order = (
+            self.mode,
+            self.date_edit,
+            self.time_edit,
+            self.quick,
+            self.offset,
+            self.unit,
+            self.direction,
+            self.enabled,
+            buttons.button(QDialogButtonBox.StandardButton.Save),
+            buttons.button(QDialogButtonBox.StandardButton.Cancel),
+        )
+        for current, following in pairwise(tab_order):
+            QWidget.setTabOrder(current, following)
         if edit:
             self.mode.setCurrentIndex(self.mode.findData(edit.rule.relation.value))
             self._load_offset(edit.rule.offset_minutes or 0)
         self.mode.currentIndexChanged.connect(self._refresh)
         self.date_edit.dateChanged.connect(self._refresh)
         self.time_edit.timeChanged.connect(self._refresh)
+        self.time_edit.textEdited.connect(self._refresh)
         self.offset.valueChanged.connect(self._interval_changed)
         self.unit.currentIndexChanged.connect(self._interval_changed)
         self.direction.currentIndexChanged.connect(self._interval_changed)
@@ -397,6 +449,12 @@ class ReminderRuleDialog(QDialog):
         if watched in (self.date_edit, self.time_edit) and event.type() is QEvent.Type.KeyPress:
             key = cast(QKeyEvent, event).key()
             if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                if watched is self.time_edit and self.mode.currentData() == "absolute":
+                    try:
+                        self.time_edit.commit()
+                    except ValueError as error:
+                        self.error.setText(str(error))
+                        return True
                 return self.focusNextPrevChild(key == Qt.Key.Key_Tab)
         return super().eventFilter(watched, event)
 
@@ -426,7 +484,7 @@ class ReminderRuleDialog(QDialog):
         absolute = self.mode.currentData() == "absolute"
         for field, visible in (
             (self.date_row, absolute),
-            (self.time_edit, absolute),
+            (self.time_input, absolute),
             (self.quick, not absolute),
             (self.interval_row, not absolute),
         ):
@@ -438,6 +496,12 @@ class ReminderRuleDialog(QDialog):
 
     def _accept_rule(self) -> None:
         try:
+            if self.mode.currentData() == "absolute":
+                try:
+                    self.time_edit.commit()
+                except ValueError:
+                    self.time_edit.setFocus()
+                    raise
             edit = self._edit()
             unchanged = self._original is not None and self._original.rule == edit.rule
             if (

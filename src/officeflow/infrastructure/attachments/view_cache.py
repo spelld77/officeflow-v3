@@ -110,6 +110,13 @@ class AssetCacheStatus:
     state: str
 
 
+@dataclass(frozen=True, slots=True)
+class ViewCachePage:
+    items: tuple[ViewCopy, ...]
+    has_next: bool
+    unavailable_count: int = 0
+
+
 class AttachmentViewCache:
     def __init__(self, root: Path, coordinator: FileOperationCoordinator) -> None:
         self.root, self.coordinator = root, coordinator
@@ -280,20 +287,29 @@ class AttachmentViewCache:
     def page(
         self, offset: int = 0, limit: int = 100, *, asset_id: str | None = None
     ) -> tuple[ViewCopy, ...]:
+        return self.page_info(offset, limit, asset_id=asset_id).items
+
+    def page_info(
+        self, offset: int = 0, limit: int = 100, *, asset_id: str | None = None
+    ) -> ViewCachePage:
+        if offset < 0 or limit < 1:
+            raise ValueError("페이지 범위가 올바르지 않습니다.")
+        limit = min(limit, 100)
         with self._connection() as db:
             keys = db.execute(
                 "SELECT generation,id FROM copies "
                 + ("WHERE asset=? " if asset_id else "")
                 + "ORDER BY used DESC,id LIMIT ? OFFSET ?",
-                (*((asset_id,) if asset_id else ()), min(limit, 100), offset),
+                (*((asset_id,) if asset_id else ()), limit + 1, offset),
             ).fetchall()
         copies = []
-        for generation, cache_id in keys:
+        unavailable = 0
+        for generation, cache_id in keys[:limit]:
             try:
                 copies.append(self.get(generation, cache_id))
             except (OSError, ValueError, TypeError):
-                continue
-        return tuple(copies)
+                unavailable += 1
+        return ViewCachePage(tuple(copies), len(keys) > limit, unavailable)
 
     def observe(self, copy: ViewCopy, canceled: Callable[[], bool] = lambda: False) -> ViewCopy:
         with self.coordinator.job(canceled), self.coordinator.pin(copy.relative_path):

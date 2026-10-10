@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -63,7 +64,7 @@ def test_help_button_opens_packaged_user_guide(
     window._help_button.click()
 
     assert opened == [True]
-    assert window._version_label.text() == "OfficeFlow 3.0.9"
+    assert window._version_label.text() == "OfficeFlow 3.0.10"
 
 
 class FakeTrayIcon:
@@ -290,7 +291,7 @@ def test_task_can_move_to_trash_and_be_restored(
         action.text()
         for action in window._build_task_context_menu(deleted).actions()
         if not action.isSeparator()
-    ] == ["이력·보관…", "휴지통에서 복원", "영구 삭제…"]
+    ] == ["이력·시점 보관…", "휴지통에서 복원", "영구 삭제…"]
 
     window._task_list.setCurrentIndex(window._task_model.index_for_task(task.id))
     window._restore_selected_from_trash()
@@ -355,8 +356,8 @@ def test_trash_view_exposes_preserved_records_and_attachments(
 
     labels = [action.text() for action in window._build_task_context_menu(deleted).actions()]
 
-    assert "완료 요약 · 기록 보기" in labels
-    assert "첨부파일 보기…" in labels
+    assert labels.count("업무 보기") == 1
+    assert "첨부파일 보기…" not in labels
     assert "영구 삭제…" in labels
     assert window._detail_records_button.isEnabled()
     assert window._detail_attachment_button.isEnabled()
@@ -479,8 +480,18 @@ def test_attachment_context_action_opens_management_instead_of_file_picker(
 
     action_labels = [action.text() for action in window._build_task_context_menu(task).actions()]
 
-    assert "첨부파일 보기 · 관리…" in action_labels
+    assert action_labels.count("업무 보기") == 1
+    assert "첨부파일 보기 · 관리…" not in action_labels
     assert "첨부파일 추가…" not in action_labels
+    next(
+        action
+        for action in window._build_task_context_menu(task).actions()
+        if action.text() == "업무 보기"
+    ).trigger()
+    dialog = window._file_dialogs[-1]
+    dialog.select_tab("attachments")
+    assert dialog.current_tab_key == "attachments"
+    window.shutdown()
 
 
 def test_compact_window_uses_small_navigation_and_compact_filters(
@@ -561,13 +572,119 @@ def test_quick_add_creates_today_task(qtbot: QtBot, task_service: TaskService) -
 
     quick_add = window.findChild(QLineEdit, "quickAddEdit")
     assert quick_add is not None
+    window.activateWindow()
+    qtbot.waitActive(window)
+    quick_add.setFocus()
+    qtbot.waitUntil(lambda: quick_add.hasFocus())
     qtbot.keyClicks(quick_add, "Write phase two tests")
-    qtbot.keyPress(quick_add, Qt.Key.Key_Return)
+    QTest.keyClick(window.windowHandle(), Qt.Key.Key_Return)
 
     task_list = window.findChild(QListView, "taskList")
     assert task_list is not None
     assert window._task_model.total_task_count == 1
     assert window._task_model.index_for_group(TaskGroup.IN_PROGRESS).isValid()
+
+
+@pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Enter])
+@pytest.mark.parametrize("view", [TaskView.TODAY, TaskView.ALL])
+def test_focused_quick_add_enter_registers_without_opening_selected_task(
+    qtbot: QtBot, task_service: TaskService, monkeypatch, key: Qt.Key, view: TaskView
+) -> None:
+    existing = task_service.quick_add("Existing task", view=TaskView.TODAY)
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._set_view(view)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(existing.id))
+    opened: list[object] = []
+    monkeypatch.setattr(window, "_open_editor", lambda task, **_kwargs: opened.append(task))
+    window.show()
+    window.activateWindow()
+    qtbot.waitActive(window)
+    window._quick_add_edit.setFocus()
+    qtbot.waitUntil(lambda: window._quick_add_edit.hasFocus())
+
+    for count, title in enumerate(("First quick task", "Second quick task"), start=2):
+        qtbot.keyClicks(window._quick_add_edit, title)
+        QTest.keyClick(window.windowHandle(), key)
+
+        assert opened == []
+        assert window._quick_add_edit.text() == ""
+        assert window._task_model.total_task_count == count
+        assert window._quick_add_edit.hasFocus()
+        assert task_service.get(window._selected_task_id).title == title
+
+
+@pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Enter])
+def test_blank_quick_add_enter_keeps_input_without_editing_task(
+    qtbot: QtBot, task_service: TaskService, monkeypatch, key: Qt.Key
+) -> None:
+    existing = task_service.quick_add("Existing task", view=TaskView.TODAY)
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(existing.id))
+    opened: list[object] = []
+    monkeypatch.setattr(window, "_open_editor", lambda task, **_kwargs: opened.append(task))
+    window.show()
+    window.activateWindow()
+    qtbot.waitActive(window)
+    window._quick_add_edit.setFocus()
+    window._quick_add_edit.setText("   ")
+    qtbot.waitUntil(lambda: window._quick_add_edit.hasFocus())
+
+    QTest.keyClick(window.windowHandle(), key)
+
+    assert opened == []
+    assert window._task_model.total_task_count == 1
+    assert window._quick_add_edit.hasFocus()
+    assert window.statusBar().currentMessage()
+
+
+@pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Enter])
+def test_search_enter_does_not_open_selected_task(
+    qtbot: QtBot, task_service: TaskService, monkeypatch, key: Qt.Key
+) -> None:
+    existing = task_service.quick_add("Existing task", view=TaskView.TODAY)
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(existing.id))
+    opened: list[object] = []
+    monkeypatch.setattr(window, "_open_editor", lambda task, **_kwargs: opened.append(task))
+    window.show()
+    window.activateWindow()
+    qtbot.waitActive(window)
+    window._search.setFocus()
+    qtbot.waitUntil(lambda: window._search.hasFocus())
+    qtbot.keyClicks(window._search, "Existing")
+
+    QTest.keyClick(window.windowHandle(), key)
+
+    assert opened == []
+    assert window._search.text() == "Existing"
+    assert window._search.hasFocus()
+
+
+@pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Enter])
+def test_task_list_enter_still_opens_selected_task_once(
+    qtbot: QtBot, task_service: TaskService, monkeypatch, key: Qt.Key
+) -> None:
+    existing = task_service.quick_add("Existing task", view=TaskView.TODAY)
+    window = MainWindow(AppSettings(), task_service)
+    qtbot.addWidget(window)
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(existing.id))
+    opened: list[object] = []
+    monkeypatch.setattr(window, "_open_editor", lambda task, **_kwargs: opened.append(task))
+    window.show()
+    window.activateWindow()
+    qtbot.waitActive(window)
+    window._task_list.setFocus()
+    qtbot.waitUntil(lambda: window._task_list.hasFocus())
+    window._task_list.setCurrentIndex(window._task_model.index_for_task(existing.id))
+    assert window._selected_task_id == existing.id
+
+    QTest.keyClick(window.windowHandle(), key)
+
+    assert len(opened) == 1
+    assert opened[0].id == existing.id
 
 
 def test_tab_moves_from_quick_add_input_to_add_button(
@@ -1070,7 +1187,7 @@ def test_calendar_stays_usable_at_minimum_window_size(
     assert window._calendar_page.calendar.width() >= 460
     assert window._calendar_page.day_list.isVisible()
     assert window._calendar_page.day_list.minimumHeight() >= 104
-    assert window._calendar_page.records_button.text() == "기록"
+    assert window._calendar_page.records_button.text() == "업무 보기"
     assert window._calendar_page.attachments_button.text() == "첨부"
     assert window._calendar_page.more_button.text() == "⋯"
     assert window._calendar_page.calendar_splitter.count() == 2

@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +24,8 @@ from officeflow.application.attachment_export import ExportBatchResult, ExportSt
 from officeflow.infrastructure.backup import BackupCanceledError, BackupManager
 from officeflow.infrastructure.backup_files import BackupFileHit, BackupFilePage, BackupFileSession
 from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.compact_labels import CompactLabel, WrappingLabel
+from officeflow.presentation.detail_widgets import show_text_details
 from officeflow.presentation.lookup_style import SCROLLBAR_STYLE
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
@@ -53,6 +54,10 @@ class BackupFilesDialog(QDialog):
         self._next_after = 0
         self._page_cursors = [0]
         self._has_more = False
+        self._showing_results = False
+        self._page_ready = False
+        self._cancel_requested = False
+        self._status_details = ""
         self.setWindowTitle("백업에서 파일 꺼내기")
         self.setStyleSheet(LIGHT_STYLESHEET)
         self.setModal(False)
@@ -63,12 +68,11 @@ class BackupFilesDialog(QDialog):
         self.choose_button = QPushButton("백업 선택…")
         self.choose_button.clicked.connect(self.choose)
         controls.addWidget(self.choose_button)
-        self.filename = QLabel("백업 파일을 선택하세요.")
+        self.filename = CompactLabel("백업 파일을 선택하세요.")
         self.filename.setTextFormat(Qt.TextFormat.PlainText)
-        self.filename.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         controls.addWidget(self.filename, 1)
         root.addLayout(controls)
-        hint = QLabel("선택한 파일만 외부 폴더에 저장합니다. 현재 업무·DB는 바뀌지 않습니다.")
+        hint = QLabel("파일 사본만 저장하며 현재 업무·DB는 바뀌지 않습니다.")
         hint.setWordWrap(True)
         root.addWidget(hint)
         search_row = QHBoxLayout()
@@ -82,6 +86,7 @@ class BackupFilesDialog(QDialog):
         search_row.addWidget(self.search_button)
         root.addLayout(search_row)
         self.list = QListWidget()
+        self.list.setMinimumHeight(154)
         self.list.verticalScrollBar().setStyleSheet(SCROLLBAR_STYLE)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -94,7 +99,9 @@ class BackupFilesDialog(QDialog):
         self.selection_label = QLabel("Ctrl/Shift로 여러 파일 선택 · 페이지를 바꾸면 선택 해제")
         self.selection_label.setWordWrap(True)
         root.addWidget(self.selection_label)
-        paging = QHBoxLayout()
+        self.paging = QWidget()
+        paging = QHBoxLayout(self.paging)
+        paging.setContentsMargins(0, 0, 0, 0)
         self.previous_button = QPushButton("이전 페이지")
         self.next_button = QPushButton("다음 페이지")
         self.previous_button.clicked.connect(self.previous)
@@ -104,15 +111,19 @@ class BackupFilesDialog(QDialog):
         paging.addWidget(self.page_label)
         paging.addStretch()
         paging.addWidget(self.next_button)
+        root.addWidget(self.paging)
+        self.status = WrappingLabel()
+        root.addWidget(self.status)
+        result_actions = QHBoxLayout()
+        self.detail_button = QPushButton("상세…")
+        self.detail_button.clicked.connect(self._show_details)
+        result_actions.addWidget(self.detail_button)
         self.folder_button = QPushButton("저장 폴더 열기")
         self.folder_button.clicked.connect(self.open_folder)
         self.folder_button.hide()
-        paging.addWidget(self.folder_button)
-        root.addLayout(paging)
-        self.status = QLabel("전체 복원이 아닌 파일 사본 저장입니다.")
-        self.status.setTextFormat(Qt.TextFormat.PlainText)
-        self.status.setWordWrap(True)
-        root.addWidget(self.status)
+        result_actions.addWidget(self.folder_button)
+        result_actions.addStretch()
+        root.addLayout(result_actions)
         actions = QHBoxLayout()
         self.save_button = QPushButton("선택 파일 저장…")
         self.save_button.clicked.connect(self.save)
@@ -130,11 +141,27 @@ class BackupFilesDialog(QDialog):
     def _selection(self) -> None:
         selected = self.selected_ids()
         self.save_button.setEnabled(
-            bool(selected) and self._thread is None and self.session is not None
+            bool(selected)
+            and self._thread is None
+            and self.session is not None
+            and not self._showing_results
         )
-        self.selection_label.setText(
-            f"선택 {len(selected)}개 · Ctrl/Shift로 여러 파일 선택 · 페이지 이동 시 선택 해제"
-        )
+        if self._showing_results:
+            self.selection_label.setText("저장 결과 · 상세에서 위치와 사유 확인")
+        else:
+            hint = (
+                " · 페이지 이동 시 선택 해제"
+                if len(self._page_cursors) > 1 or self._has_more
+                else " · Ctrl/Shift로 여러 선택"
+            )
+            self.selection_label.setText(
+                f"파일 {self.list.count()}개 · 선택 {len(selected)}개{hint}"
+            )
+
+    def _show_details(self) -> None:
+        item = self.list.currentItem()
+        text = item.toolTip() if item else self._status_details or self.filename.full_text
+        self._detail_dialog = show_text_details(self, "백업 파일 상세", text)
 
     def selected_ids(self) -> tuple[int, ...]:
         return tuple(
@@ -148,9 +175,18 @@ class BackupFilesDialog(QDialog):
         available = self.session is not None and self.session.available
         self.search_button.setEnabled(not busy and available)
         self.search.setEnabled(not busy and available)
-        self.previous_button.setEnabled(not busy and len(self._page_cursors) > 1)
-        self.next_button.setEnabled(not busy and self._has_more)
-        self.cancel_button.setEnabled(busy)
+        navigation = (
+            self._page_ready
+            and not self._showing_results
+            and (len(self._page_cursors) > 1 or self._has_more)
+        )
+        self.paging.setVisible(navigation)
+        self.previous_button.setEnabled(not busy and navigation and len(self._page_cursors) > 1)
+        self.next_button.setEnabled(not busy and navigation and self._has_more)
+        self.cancel_button.setVisible(busy)
+        self.cancel_button.setEnabled(busy and not self._cancel_requested)
+        self.detail_button.setEnabled(not busy)
+        self.search_button.setText("목록 다시 보기" if self._showing_results else "검색")
         self.list.setEnabled(not busy)
         self._selection()
 
@@ -170,12 +206,14 @@ class BackupFilesDialog(QDialog):
         if self.session:
             self.session.close()
         self.session = BackupFileSession(self.manager, path)
-        self.filename.setText(path.name[:55])
+        self.filename.setText(path.name)
+        self._status_details = str(path)
         self.filename.setToolTip(str(path))
         self.search.clear()
         self.folder_button.hide()
         self._after, self._page_cursors = 0, [0]
         self._has_more = False
+        self._showing_results, self._page_ready = False, False
         self.list.clear()
         self.status.setText(
             "백업 전체를 검증하고 파일 목록을 준비합니다… 큰 백업은 시간이 걸립니다."
@@ -186,18 +224,23 @@ class BackupFilesDialog(QDialog):
         if self.session is None or self._thread is not None:
             return
         self._after, self._page_cursors = 0, [0]
+        self._showing_results = False
+        self.folder_button.hide()
         self._request()
 
     def _request(self) -> None:
         if self.session is None:
             return
         session, search, after = self.session, self.search.text(), self._after
+        self._page_ready = False
         self.status.setText("파일 목록 조회 중…")
         self._run(lambda cancel: session.page(search, after, canceled=cancel), self._received)
 
     def _received(self, value: object) -> None:
         if self._closing or not isinstance(value, BackupFilePage):
             return
+        self._page_ready = True
+        self._showing_results = False
         self.list.clear()
         for hit in value.items:
             item = QListWidgetItem(
@@ -221,20 +264,30 @@ class BackupFilesDialog(QDialog):
         )
 
     def previous(self) -> None:
-        if len(self._page_cursors) > 1 and self._thread is None:
+        if (
+            self._page_ready
+            and not self._showing_results
+            and len(self._page_cursors) > 1
+            and self._thread is None
+        ):
             self._page_cursors.pop()
             self._after = self._page_cursors[-1]
             self._request()
 
     def next(self) -> None:
-        if self._has_more and self._thread is None:
+        if (
+            self._page_ready
+            and not self._showing_results
+            and self._has_more
+            and self._thread is None
+        ):
             self._after = self._next_after
             self._page_cursors.append(self._after)
             self._request()
 
     def save(self) -> None:
         ids = self.selected_ids()
-        if self.session is None or not ids or self._thread is not None:
+        if self.session is None or not ids or self._thread is not None or self._showing_results:
             return
         folder = QFileDialog.getExistingDirectory(
             self, "선택 파일 저장 폴더", self.directory or str(Path.home())
@@ -260,6 +313,8 @@ class BackupFilesDialog(QDialog):
     def _saved(self, value: object) -> None:
         if self._closing or not isinstance(value, ExportBatchResult):
             return
+        self._showing_results = True
+        self._page_ready = False
         self.list.clear()
         self._has_more = False
         labels = {
@@ -280,8 +335,16 @@ class BackupFilesDialog(QDialog):
             )
             self.list.addItem(item)
         count = sum(item.status == ExportStatus.SAVED for item in value.items)
+        counts = " · ".join(
+            f"{label} {sum(item.status == status for item in value.items)}"
+            for status, label in labels.items()
+        )
+        self._status_details = f"{counts}\n저장 폴더: {value.folder}\n" + "\n\n".join(
+            f"{item.name}\n{item.output_path or ''}\n{item.message}\n{item.journal_path or ''}"
+            for item in value.items
+        )
         self.status.setText(
-            f"저장 {count} / 전체 {len(value.items)}개 · {str(value.folder)[-100:]}\n원본과 기존 파일은 유지했습니다. 목록은 검색 버튼으로 다시 조회합니다."
+            f"{counts}\n원본·기존 파일은 유지했습니다. 목록 다시 보기로 재조회합니다."
         )
         if count:
             self.directory = str(value.folder)
@@ -300,6 +363,7 @@ class BackupFilesDialog(QDialog):
         thread = QThread(self)
         worker = OperationWorker(operation)
         self._thread, self._worker = thread, worker
+        self._cancel_requested = False
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.succeeded.connect(receive, Qt.ConnectionType.QueuedConnection)
@@ -315,6 +379,7 @@ class BackupFilesDialog(QDialog):
         if self._closing:
             return
         self._has_more = False
+        self._page_ready = False
         message = (
             "작업 취소. 현재 자료는 유지했습니다."
             if isinstance(error, BackupCanceledError)
@@ -326,6 +391,7 @@ class BackupFilesDialog(QDialog):
             message[:200] + ("… (상세는 마우스를 올려 확인)" if len(message) > 200 else "")
         )
         self.status.setToolTip(message[:2000])
+        self._status_details = message
 
     def _finished(self) -> None:
         thread = self._thread
@@ -338,6 +404,8 @@ class BackupFilesDialog(QDialog):
 
     def cancel(self) -> None:
         if self._worker:
+            self._cancel_requested = True
+            self.cancel_button.setEnabled(False)
             self._worker.cancel()
             self.status.setText("취소 중… 이미 저장한 파일은 유지합니다.")
 

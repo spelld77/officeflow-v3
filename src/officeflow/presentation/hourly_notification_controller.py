@@ -192,6 +192,7 @@ class HourlyNotificationController(QObject):
         except (OSError, ValueError) as error:
             logger.exception("매시 알림 설정을 적용하지 못했습니다.")
             if self.settings_dialog:
+                self.settings_dialog.error_label.setStyleSheet("color:#C62828;")
                 self.settings_dialog.error_label.setText(f"적용하지 못했습니다: {error}")
             self.service.error = "설정을 저장하지 못해 변경을 적용하지 않았습니다."
         self._render()
@@ -246,7 +247,7 @@ class HourlyNotificationController(QObject):
         )
         self._act(lambda: self.service.update_settings(updated, self.clock.now()))
         if self.settings_dialog and self.service.settings == updated:
-            self.settings_dialog.error_label.setText("설정을 저장했습니다.")
+            self.settings_dialog.mark_saved(updated)
 
     def reposition(self) -> None:
         if self.dialog is not None and self.dialog.isVisible():

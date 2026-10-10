@@ -59,7 +59,8 @@ def test_backup_dialog_selection_save_and_close(qtbot, tmp_path):
         dialog.search_button,
         dialog.next_button,
     ):
-        assert dialog.rect().contains(widget.mapTo(dialog, widget.rect().bottomRight()))
+        if widget.isVisible():
+            assert dialog.rect().contains(widget.mapTo(dialog, widget.rect().bottomRight()))
     dialog.reject()
     assert not temporary.exists()
 

@@ -226,7 +226,7 @@ QListWidget#calendarDayList, QListWidget#reminderList {
 }
 QListWidget#checklistList, QListWidget#taskWorkLogList, QListWidget#workLogBrowserList,
 QListWidget#attachmentList, QListWidget#attachmentCleanupList, QListWidget#reminderPreviewList, QListWidget#reminderSettingsList,
-QListWidget#attachmentExportResults, QListWidget#attachmentRecoveryList {
+QListWidget#attachmentExportResults, QListWidget#attachmentRecoveryList, QListWidget#folderLinksList {
     color: #172033;
     background: #FFFFFF;
     selection-color: #172033;
@@ -250,14 +250,14 @@ QListWidget#attachmentList[dragActive="true"] {
 QListWidget#checklistList::item, QListWidget#taskWorkLogList::item,
 QListWidget#workLogBrowserList::item, QListWidget#attachmentList::item,
 QListWidget#attachmentCleanupList::item, QListWidget#reminderSettingsList::item,
-QListWidget#attachmentExportResults::item, QListWidget#attachmentRecoveryList::item {
+QListWidget#attachmentExportResults::item, QListWidget#attachmentRecoveryList::item, QListWidget#folderLinksList::item {
     border-radius: 5px;
     padding: 8px 10px;
 }
 QListWidget#checklistList::item:selected, QListWidget#taskWorkLogList::item:selected,
 QListWidget#workLogBrowserList::item:selected, QListWidget#attachmentList::item:selected,
 QListWidget#attachmentCleanupList::item:selected, QListWidget#reminderSettingsList::item:selected,
-QListWidget#attachmentExportResults::item:selected, QListWidget#attachmentRecoveryList::item:selected {
+QListWidget#attachmentExportResults::item:selected, QListWidget#attachmentRecoveryList::item:selected, QListWidget#folderLinksList::item:selected {
     color: #172033;
     background: #DFE9FF;
 }
@@ -307,7 +307,9 @@ QListWidget#calendarDayList QScrollBar:vertical, QScrollArea#taskEditorScroll QS
 }
 QListWidget#attachmentList QScrollBar:vertical,
 QListWidget#documentFileList QScrollBar:vertical,
-QListWidget#viewCopyList QScrollBar:vertical {
+QListWidget#viewCopyList QScrollBar:vertical,
+QListWidget#folderLinksList QScrollBar:vertical,
+QScrollArea#taskArchiveScroll QScrollBar:vertical {
     width: 13px;
     background: #EDF1F7;
     border: none;
@@ -316,14 +318,18 @@ QListWidget#viewCopyList QScrollBar:vertical {
 }
 QListWidget#attachmentList QScrollBar::handle:vertical,
 QListWidget#documentFileList QScrollBar::handle:vertical,
-QListWidget#viewCopyList QScrollBar::handle:vertical {
+QListWidget#viewCopyList QScrollBar::handle:vertical,
+QListWidget#folderLinksList QScrollBar::handle:vertical,
+QScrollArea#taskArchiveScroll QScrollBar::handle:vertical {
     min-height: 28px;
     background: #7FA3EF;
     border-radius: 5px;
 }
 QListWidget#attachmentList QScrollBar::handle:vertical:hover,
 QListWidget#documentFileList QScrollBar::handle:vertical:hover,
-QListWidget#viewCopyList QScrollBar::handle:vertical:hover {
+QListWidget#viewCopyList QScrollBar::handle:vertical:hover,
+QListWidget#folderLinksList QScrollBar::handle:vertical:hover,
+QScrollArea#taskArchiveScroll QScrollBar::handle:vertical:hover {
     background: #4F7FDF;
 }
 QListWidget#attachmentList QScrollBar::add-line:vertical,
@@ -337,7 +343,15 @@ QListWidget#documentFileList QScrollBar::sub-page:vertical,
 QListWidget#viewCopyList QScrollBar::add-line:vertical,
 QListWidget#viewCopyList QScrollBar::sub-line:vertical,
 QListWidget#viewCopyList QScrollBar::add-page:vertical,
-QListWidget#viewCopyList QScrollBar::sub-page:vertical {
+QListWidget#viewCopyList QScrollBar::sub-page:vertical,
+QListWidget#folderLinksList QScrollBar::add-line:vertical,
+QListWidget#folderLinksList QScrollBar::sub-line:vertical,
+QListWidget#folderLinksList QScrollBar::add-page:vertical,
+QListWidget#folderLinksList QScrollBar::sub-page:vertical,
+QScrollArea#taskArchiveScroll QScrollBar::add-line:vertical,
+QScrollArea#taskArchiveScroll QScrollBar::sub-line:vertical,
+QScrollArea#taskArchiveScroll QScrollBar::add-page:vertical,
+QScrollArea#taskArchiveScroll QScrollBar::sub-page:vertical {
     background: transparent;
     border: none;
     height: 0;
@@ -495,5 +509,11 @@ QListWidget#documentFileList::item:selected, QListWidget#viewCopyList::item:sele
 QPlainTextEdit QWidget#qt_scrollarea_viewport {
     color: #172033;
     background: #FFFFFF;
+}
+QLineEdit[inputError="true"], QDateEdit[inputError="true"],
+QComboBox[inputError="true"], QPushButton[inputError="true"] {
+    border: 2px solid #C62828;
+    background-color: #FFF4F4;
+    color: #10243A;
 }
 """

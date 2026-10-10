@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -19,6 +20,9 @@ from PySide6.QtWidgets import (
 
 from officeflow.infrastructure.settings.store import AppSettings
 from officeflow.infrastructure.windows.hotkey import parse_windows_hotkey
+from officeflow.presentation.detail_widgets import CollapsibleText
+from officeflow.presentation.lookup_style import SCROLLBAR_STYLE
+from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
 class SettingsDialog(QDialog):
@@ -31,14 +35,20 @@ class SettingsDialog(QDialog):
 
         self.setWindowTitle("OfficeFlow 설정")
         self.setModal(False)
+        self.setStyleSheet(LIGHT_STYLESHEET)
         self.resize(520, 500)
         self.setMinimumSize(460, 450)
 
         outer = QVBoxLayout(self)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.setStyleSheet(SCROLLBAR_STYLE)
+        scroll.viewport().setStyleSheet("background:#F4F6FA;color:#172033;")
         body = QWidget()
-        body.setStyleSheet("background: #F4F6FA;")
+        body.setStyleSheet("background: #F4F6FA;color:#172033;")
         root = QVBoxLayout(body)
         root.setContentsMargins(22, 20, 22, 18)
         root.setSpacing(14)
@@ -47,27 +57,26 @@ class SettingsDialog(QDialog):
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
-        caption = QLabel("창을 닫았을 때의 동작과 Windows 빠른 등록 단축키를 설정합니다.")
-        caption.setObjectName("mutedText")
-        caption.setWordWrap(True)
-        root.addWidget(caption)
-
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         form.setVerticalSpacing(12)
+        form.addRow(QLabel("실행"))
 
-        self.minimize_to_tray_check = QCheckBox("닫기 버튼을 누르면 트레이로 숨기기")
+        self.minimize_to_tray_check = QCheckBox("트레이로 숨기기")
         self.minimize_to_tray_check.setChecked(settings.minimize_to_tray)
         form.addRow("창 닫기", self.minimize_to_tray_check)
 
-        self.start_with_windows_check = QCheckBox("Windows 로그인 시 OfficeFlow 실행")
+        self.start_with_windows_check = QCheckBox("로그인할 때 실행")
         self.start_with_windows_check.setChecked(settings.start_with_windows)
         form.addRow("자동 실행", self.start_with_windows_check)
 
         self.shortcut_edit = QLineEdit(settings.global_quick_add_shortcut)
         self.shortcut_edit.setObjectName("globalShortcutEdit")
         self.shortcut_edit.setPlaceholderText("예: Ctrl+Alt+O")
-        form.addRow("빠른 등록", self.shortcut_edit)
+        form.addRow("빠른 등록 단축키", self.shortcut_edit)
+        form.addRow(QLabel("업무 알림"))
 
         self.grace_minutes_spin = QSpinBox()
         self.grace_minutes_spin.setObjectName("reminderGraceMinutes")
@@ -78,9 +87,14 @@ class SettingsDialog(QDialog):
             "프로그램 종료·절전 중 알림 시각이 지났을 때, 현재부터 얼마나 이전의 "
             "알림까지 다시 보여줄지 정합니다."
         )
-        form.addRow("놓친 알림 확인 범위", self.grace_minutes_spin)
+        form.addRow("놓친 알림 범위", self.grace_minutes_spin)
+        hint = QLabel("종료·절전 중 놓친 미처리 알림을 확인합니다.")
+        hint.setWordWrap(True)
+        hint.setObjectName("mutedText")
+        form.addRow(hint)
+        form.addRow(QLabel("자동 백업"))
 
-        self.automatic_backup_check = QCheckBox("정해진 주기마다 자동 백업")
+        self.automatic_backup_check = QCheckBox("자동 백업 사용")
         self.automatic_backup_check.setObjectName("automaticBackupEnabled")
         self.automatic_backup_check.setChecked(settings.automatic_backup_enabled)
         form.addRow("자동 백업", self.automatic_backup_check)
@@ -90,14 +104,14 @@ class SettingsDialog(QDialog):
         self.backup_interval_spin.setRange(1, 24 * 30)
         self.backup_interval_spin.setSuffix("시간")
         self.backup_interval_spin.setValue(settings.automatic_backup_interval_hours)
-        form.addRow("백업 주기", self.backup_interval_spin)
+        form.addRow("자동 백업 주기", self.backup_interval_spin)
 
         self.backup_keep_spin = QSpinBox()
         self.backup_keep_spin.setObjectName("automaticBackupKeep")
         self.backup_keep_spin.setRange(1, 100)
         self.backup_keep_spin.setSuffix("개")
         self.backup_keep_spin.setValue(settings.automatic_backup_keep)
-        form.addRow("자동 백업 보관", self.backup_keep_spin)
+        form.addRow("자동 백업 보관 개수", self.backup_keep_spin)
         self.automatic_backup_check.toggled.connect(self.backup_interval_spin.setEnabled)
         self.automatic_backup_check.toggled.connect(self.backup_keep_spin.setEnabled)
         self.backup_interval_spin.setEnabled(settings.automatic_backup_enabled)
@@ -107,15 +121,18 @@ class SettingsDialog(QDialog):
         self.hourly_button.clicked.connect(self.hourlySettingsRequested.emit)
         root.addWidget(self.hourly_button)
 
-        self.settings_hint = QLabel(
+        self.settings_help = CollapsibleText(
+            "설정 도움말",
             "놓친 알림은 프로그램 종료·절전 중 예정 시각을 지난 알림입니다. "
             "설정 범위 안의 미처리 알림만 한 번 다시 보여주며, 범위보다 오래된 "
             "알림은 자동으로 띄우지 않습니다.\n"
-            "전역 단축키는 Ctrl/Alt/Shift/Win과 영문·숫자·F1~F24 조합을 지원합니다."
+            "\n빠른 등록 단축키: Ctrl/Alt/Shift/Win과 영문·숫자·F1~F24 조합을 지원합니다.\n"
+            "자동 백업: 앱 실행 중 주기를 확인하며 PC가 꺼져 있으면 다음 실행 뒤 처리합니다.\n"
+            "보관 개수는 자동 백업에만 적용합니다. 수동 백업·복원 보호본은 자동 삭제하지 않습니다.\n"
+            "매시 알림 설정은 별도로 저장합니다. 일반 설정의 취소로 되돌리지 않습니다.",
         )
-        self.settings_hint.setObjectName("mutedText")
-        self.settings_hint.setWordWrap(True)
-        root.addWidget(self.settings_hint)
+        self.settings_hint = self.settings_help.label
+        root.addWidget(self.settings_help)
 
         self.error_label = QLabel()
         self.error_label.setObjectName("formError")

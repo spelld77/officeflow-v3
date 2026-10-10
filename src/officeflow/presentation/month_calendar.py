@@ -63,6 +63,16 @@ class CalendarSegment:
     continues_after: bool
 
 
+def calendar_segment_text(segment: CalendarSegment) -> str:
+    """Keep secondary attachment information behind the task title."""
+    prefix = "◀ " if segment.continues_before else ""
+    if segment.task.occurrence_start is not None:
+        prefix = f"반복 · {prefix}"
+    attachment = " · 첨부" if segment.task.has_attachments else ""
+    suffix = " ▶" if segment.continues_after else ""
+    return prefix + segment.task.title + attachment + suffix
+
+
 def month_grid_start(year: int, month: int) -> date:
     first = date(year, month, 1)
     return first - timedelta(days=(first.weekday() + 1) % 7)
@@ -385,13 +395,7 @@ class MonthCalendarWidget(QWidget):
             painter.setBrush(task_color)
             painter.drawRoundedRect(rect, 4, 4)
             painter.setPen(QColor("#FFFFFF"))
-            prefix = "◀ " if segment.continues_before else ""
-            if segment.task.has_attachments:
-                prefix = f"첨부 · {prefix}"
-            if segment.task.occurrence_start is not None:
-                prefix = f"반복 · {prefix}"
-            suffix = " ▶" if segment.continues_after else ""
-            title = prefix + segment.task.title + suffix
+            title = calendar_segment_text(segment)
             text_rect = rect.adjusted(5, 0, -5, 0)
             elided = painter.fontMetrics().elidedText(
                 title, Qt.TextElideMode.ElideRight, int(text_rect.width())
@@ -708,7 +712,7 @@ class CalendarPage(QFrame):
         self.expand_list_button.setToolTip("달력을 줄이고 선택 날짜의 일정 목록을 크게 봅니다.")
         self.expand_list_button.setProperty("calendarAction", True)
         day_header.addWidget(self.expand_list_button)
-        self.records_button = QPushButton("기록")
+        self.records_button = QPushButton("업무 보기")
         self.records_button.setObjectName("calendarRecords")
         self.records_button.setToolTip(
             "선택한 업무의 체크리스트 · 완료 요약 · 업무일지 확인 (더블클릭)"

@@ -15,11 +15,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDialog,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -35,10 +35,13 @@ from officeflow.domain.task_history import (
     FIELDS,
     HistoryEntry,
     HistoryPage,
+    HistorySummary,
     scope_key,
 )
 from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.dates import date_with_weekday, format_datetime
+from officeflow.presentation.file_list import checkable_file_list
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
@@ -366,27 +369,35 @@ class TaskHistoryDialog(_ReadDialog):
         self._cursors: list[tuple[datetime, int, int] | None] = [None]
         self._page = HistoryPage((), False)
         self._compared: list[tuple[str, int]] = []
+        self._compare_rows: dict[tuple[str, int], HistorySummary] = {}
+        self._visible_rows: dict[tuple[str, int], HistorySummary] = {}
+        self._compare_mode = False
+        self._rendering_compare = False
         self._children: list[Any] = []
-        self.setWindowTitle("이력·보관 · " + title)
+        self.setWindowTitle("업무 이력 · " + title)
         self.resize(720, 520)
         self.setMinimumSize(420, 350)
         root = QVBoxLayout(self)
-        self.heading = QLabel(title)
+        header = QHBoxLayout()
+        self.heading = CompactLabel(title)
         self.heading.setObjectName("pageTitle")
-        self.heading.setWordWrap(True)
         self.heading.setMaximumHeight(60)
         self.heading.setToolTip(title)
-        root.addWidget(self.heading)
+        header.addWidget(self.heading, 1)
         if lifecycle is not None:
-            capture_actions = QHBoxLayout()
-            capture = QPushButton("현재 상태 보관…")
+            capture = QPushButton("시점 보관…")
             capture.setEnabled(not read_only)
             capture.clicked.connect(self.open_capture)
-            capture_actions.addWidget(capture)
-            pending = QPushButton("중단된 보관 확인…")
-            pending.clicked.connect(self.open_pending)
-            capture_actions.addWidget(pending)
-            root.addLayout(capture_actions)
+            header.addWidget(capture)
+            more = QPushButton("⋯")
+            more.setAccessibleName("이력 추가 행동")
+            menu = QMenu(more)
+            menu.setStyleSheet(LIGHT_STYLESHEET)
+            pending = menu.addAction("중단된 보관 확인…")
+            pending.triggered.connect(self.open_pending)
+            more.setMenu(menu)
+            header.addWidget(more)
+        root.addLayout(header)
         filters = QHBoxLayout()
         self.scope = QComboBox()
         self.scope.addItem("업무 공통", ("task",))
@@ -401,7 +412,7 @@ class TaskHistoryDialog(_ReadDialog):
             ("변경", "change"),
             ("생성", "created"),
             ("시작 기준", "baseline"),
-            ("중요 보관", "snapshot"),
+            ("시점 보관", "snapshot"),
         ):
             self.kind.addItem(label, kind)
         self.field = QComboBox()
@@ -433,16 +444,46 @@ class TaskHistoryDialog(_ReadDialog):
         self.date_filter.toggled.connect(self.start_date.setVisible)
         self.date_filter.toggled.connect(self.end_date.setVisible)
         self.list = QListWidget()
+        checkable_file_list(self.list)
         self.list.setObjectName("taskHistoryList")
+        # Comparison/date controls must never squeeze the actual choices out of view.
+        self.list.setMinimumHeight(100)
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list.setStyleSheet(
-            "QListWidget, QListWidget QWidget {color:#172033; background:#FFFFFF;}"
-        )
         self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list.itemActivated.connect(lambda _item: self.open_detail())
+        self.list.itemChanged.connect(self._compare_checked)
+        self.list.itemSelectionChanged.connect(self._update_normal_actions)
         root.addWidget(self.list, 1)
+        self.compare_panel = QWidget(self)
+        comparing = QVBoxLayout(self.compare_panel)
+        comparing.setContentsMargins(0, 0, 0, 0)
+        self.compare_hint = CompactLabel()
+        comparing.addWidget(self.compare_hint)
+        self.compare_labels: list[CompactLabel] = []
+        self.compare_remove: list[QPushButton] = []
+        for index in range(2):
+            row = QHBoxLayout()
+            choice_label = CompactLabel()
+            button = QPushButton("해제")
+            button.clicked.connect(lambda _checked=False, number=index: self.remove_compare(number))
+            row.addWidget(choice_label, 1)
+            row.addWidget(button)
+            comparing.addLayout(row)
+            self.compare_labels.append(choice_label)
+            self.compare_remove.append(button)
+        self.compare = QPushButton("비교하기")
+        self.compare.clicked.connect(self.open_compare)
+        cancel = QPushButton("취소")
+        cancel.clicked.connect(self.reset_compare)
+        compare_actions = QHBoxLayout()
+        compare_actions.addStretch()
+        compare_actions.addWidget(self.compare)
+        compare_actions.addWidget(cancel)
+        comparing.addLayout(compare_actions)
+        self.compare_panel.hide()
+        root.addWidget(self.compare_panel)
         root.addWidget(self.feedback)
         self.navigation = QWidget()
         navigation = QHBoxLayout(self.navigation)
@@ -455,37 +496,41 @@ class TaskHistoryDialog(_ReadDialog):
         self.previous.clicked.connect(self.previous_page)
         self.next.clicked.connect(self.next_page)
         root.addWidget(self.navigation)
-        buttons = QGridLayout()
+        self.normal_actions = QWidget(self)
+        buttons = QHBoxLayout(self.normal_actions)
+        buttons.setContentsMargins(0, 0, 0, 0)
         self.detail = QPushButton("상세")
         self.detail.clicked.connect(self.open_detail)
-        self.add_compare = QPushButton("비교에 추가")
-        self.add_compare.clicked.connect(self.choose_compare)
-        self.compare = QPushButton("선택 0시점 비교")
-        self.compare.clicked.connect(self.open_compare)
-        self.clear_compare = QPushButton("선택 해제")
-        self.clear_compare.clicked.connect(self.reset_compare)
-        current = QPushButton("현재와 비교")
+        self.compare_menu_button = QPushButton("비교 ▾")
+        comparison_menu = QMenu(self.compare_menu_button)
+        comparison_menu.setStyleSheet(LIGHT_STYLESHEET)
+        current = comparison_menu.addAction("선택 이력을 현재와 비교")
         current.setToolTip("선택한 과거 시점의 업무 정보 6항목을 지금 저장된 상태와 비교")
-        current.clicked.connect(self.compare_current)
-        self.refresh_button = QPushButton("최신 조회")
+        current.triggered.connect(self.compare_current)
+        self.current_compare_action = current
+        choose = comparison_menu.addAction("두 시점 선택해서 비교…")
+        choose.triggered.connect(self.begin_compare)
+        self.compare_menu_button.setMenu(comparison_menu)
+        self.refresh_button = QPushButton("새로고침")
         self.refresh_button.clicked.connect(self.reset_page)
-        for index, button in enumerate(
-            (
-                self.detail,
-                self.add_compare,
-                self.compare,
-                self.clear_compare,
-                current,
-                self.refresh_button,
-            )
-        ):
-            buttons.addWidget(button, index // 3, index % 3)
-        root.addLayout(buttons)
+        buttons.addStretch()
+        for button in (self.detail, self.compare_menu_button, self.refresh_button):
+            buttons.addWidget(button)
+        root.addWidget(self.normal_actions)
+        self.date_filter.toggled.connect(self._ensure_layout_room)
         self.taskChanged.connect(self._changed, Qt.ConnectionType.QueuedConnection)
         self._unsubscribe = service.subscribe(self.taskChanged.emit)
         self.finished.connect(lambda _code: self._unsubscribe())
         self.destroyed.connect(self._unsubscribe)
         self.load_page()
+
+    def _ensure_layout_room(self) -> None:
+        layout = self.layout()
+        if layout is None:
+            return
+        layout.invalidate()
+        layout.activate()
+        self.setMinimumHeight(max(350, layout.minimumSize().height()))
 
     def query(self) -> HistoryQuery:
         zone = ZoneInfo(self.timezone)
@@ -524,7 +569,8 @@ class TaskHistoryDialog(_ReadDialog):
             return
         self._page = page
         self.list.clear()
-        labels = {"created": "생성", "baseline": "기준", "change": "변경", "snapshot": "중요 보관"}
+        self._visible_rows = {(row.kind, row.id): row for row in page.items}
+        labels = {"created": "생성", "baseline": "기준", "change": "변경", "snapshot": "시점 보관"}
         for row in page.items:
             scope = (
                 "업무 공통"
@@ -548,6 +594,8 @@ class TaskHistoryDialog(_ReadDialog):
         self.previous.setEnabled(len(self._cursors) > 1)
         self.next.setEnabled(page.has_next)
         self.page_label.setText(f"{len(self._cursors)} 페이지")
+        self._render_compare()
+        self._update_normal_actions()
 
     def next_page(self) -> None:
         if self._page.has_next and self._page.items:
@@ -639,25 +687,108 @@ class TaskHistoryDialog(_ReadDialog):
         identity = self.selected_id()
         if identity is None or identity in self._compared:
             return
+        self._compare_mode = True
+        self._select_compare(identity)
+
+    def begin_compare(self) -> None:
+        self._compare_mode = True
+        self.choose_compare()
+        self._render_compare()
+
+    def _select_compare(self, identity: tuple[str, int]) -> None:
+        row = self._visible_rows.get(identity)
+        if row is None or identity in self._compared:
+            return
         if len(self._compared) == 2:
-            self.feedback.setText("최대 두 시점을 선택합니다. 선택 해제 후 다시 고르세요.")
+            self.feedback.setText(
+                "최대 두 시점을 고를 수 있습니다. 기존 시점을 해제한 뒤 고르세요."
+            )
+            self._render_compare()
+            return
+        if self._compared and self._compare_rows[self._compared[0]].scope_key != row.scope_key:
+            self.feedback.setText("업무 공통끼리 또는 같은 회차끼리 선택하세요.")
+            self._render_compare()
             return
         self._compared.append(identity)
-        self.compare.setText(f"선택 {len(self._compared)}시점 비교")
+        self._compare_rows[identity] = row
+        self._render_compare()
+
+    def _compare_checked(self, item: QListWidgetItem) -> None:
+        if self._rendering_compare or not self._compare_mode:
+            return
+        identity = tuple(item.data(Qt.ItemDataRole.UserRole))
+        if item.checkState() == Qt.CheckState.Checked:
+            self._select_compare(identity)
+        elif identity in self._compared:
+            self.remove_compare(self._compared.index(identity))
+
+    def remove_compare(self, index: int) -> None:
+        if 0 <= index < len(self._compared):
+            self._compare_rows.pop(self._compared.pop(index), None)
+        self._render_compare()
+
+    def _render_compare(self) -> None:
+        self._rendering_compare = True
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            key = tuple(item.data(Qt.ItemDataRole.UserRole))
+            if self._compare_mode:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if key in self._compared else Qt.CheckState.Unchecked
+                )
+            else:
+                item.setData(Qt.ItemDataRole.CheckStateRole, None)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+        self._rendering_compare = False
+        self.compare_panel.setVisible(self._compare_mode)
+        self.normal_actions.setVisible(not self._compare_mode)
+        self.compare_hint.setText(f"비교할 두 시점을 체크하세요. {len(self._compared)}/2")
+        for index, label in enumerate(self.compare_labels):
+            selected = index < len(self._compared)
+            self.compare_remove[index].setVisible(selected)
+            if selected:
+                key = self._compared[index]
+                row = self._compare_rows[key]
+                scope = (
+                    "업무 공통"
+                    if row.scope_key == "task"
+                    else "회차 "
+                    + format_datetime(
+                        cast(datetime, row.occurrence_start), self.timezone, short=True
+                    )
+                )
+                label.setText(
+                    f"{index + 1}. {format_datetime(row.recorded_at, self.timezone, short=True)} · {row.summary} · {scope}"
+                    + (" (현재 화면 밖)" if key not in self._visible_rows else "")
+                )
+            else:
+                label.setText(f"{index + 1}. 아직 선택하지 않음")
+        self.compare.setEnabled(len(self._compared) == 2)
+        self._ensure_layout_room()
+
+    def _update_normal_actions(self) -> None:
+        if hasattr(self, "detail"):
+            self.detail.setEnabled(self.selected_id() is not None)
+            self.current_compare_action.setEnabled(self.selected_id() is not None)
 
     def reset_compare(self) -> None:
         self._compared.clear()
-        self.compare.setText("선택 0시점 비교")
+        self._compare_rows.clear()
+        self._compare_mode = False
+        self._render_compare()
 
     def open_compare(self) -> None:
         if len(self._compared) != 2:
             self.feedback.setText("비교할 두 시점을 선택하세요.")
             return
-        left, right = self._compared
+        left, right = sorted(
+            self._compared, key=lambda key: (self._compare_rows[key].recorded_at, key)
+        )
         self.run(
             lambda: self.service.compare(self.task_id, left, right),
             lambda entries: self._show_compare(
-                "두 시점 비교",
+                "두 시점 비교 · 과거 → 최근",
                 entries[0].after,
                 entries[1].after,
                 entries[0].saved_info,
@@ -687,7 +818,7 @@ class TaskHistoryDialog(_ReadDialog):
             if len(self._cursors) == 1:
                 self.load_page()
             else:
-                self.feedback.setText("새 기록 있음 · 최신 조회로 확인하세요.")
+                self.feedback.setText("새 이력 있음 · 새로고침으로 확인하세요.")
 
     def shutdown(self) -> None:
         self._unsubscribe()

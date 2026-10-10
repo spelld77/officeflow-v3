@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, replace
@@ -18,6 +20,7 @@ from officeflow.application.file_operations import (
     FileJobCanceledError,
     FileOperationCoordinator,
 )
+from officeflow.application.image_attachments import MAX_IMAGE_BYTES
 from officeflow.application.tasks import TaskService
 from officeflow.domain.attachment import (
     Attachment,
@@ -460,6 +463,63 @@ class AttachmentService:
         if not candidates_observed:
             self._notify_changed(task_id)
         return replace(saved, operation_warning=warning)
+
+    @contextmanager
+    def image_preview_stream(
+        self,
+        attachment_id: int,
+        *,
+        cancel_requested: Callable[[], bool],
+        expected_asset_id: str | None = None,
+        expected_relative_path: str | None = None,
+        expected_frozen: bool | None = None,
+        expected_fixed_size_bytes: int | None = None,
+        expected_fixed_checksum: str | None = None,
+        background: bool = False,
+    ) -> Iterator[BinaryIO]:
+        """Read without exporting, making view copies, or changing metadata."""
+        with self.coordinator.job(cancel_requested, background=background):
+            attachment = self._get_required(attachment_id)
+            if (
+                (expected_asset_id is not None and attachment.asset_id != expected_asset_id)
+                or (
+                    expected_relative_path is not None
+                    and attachment.relative_path != expected_relative_path
+                )
+                or (
+                    expected_frozen is not None
+                    and (
+                        attachment.is_frozen != expected_frozen
+                        or attachment.fixed_size_bytes != expected_fixed_size_bytes
+                        or attachment.fixed_checksum != expected_fixed_checksum
+                    )
+                )
+            ):
+                raise AttachmentCanceledError("첨부가 변경되어 이미지를 다시 확인합니다.")
+            with (
+                self.coordinator.pin(attachment.relative_path),
+                self._storage.protected_read(attachment.relative_path) as stream,
+            ):
+                size = os.fstat(stream.fileno()).st_size
+                if size > MAX_IMAGE_BYTES:
+                    raise AttachmentOperationError("64 MB를 넘는 이미지는 미리보기할 수 없습니다.")
+                if attachment.is_frozen:
+                    digest = hashlib.sha256()
+                    while chunk := stream.read(1024 * 1024):
+                        if cancel_requested():
+                            raise AttachmentCanceledError("미리보기를 취소했습니다.")
+                        digest.update(chunk)
+                    if (
+                        size != attachment.fixed_size_bytes
+                        or digest.hexdigest() != attachment.fixed_checksum
+                    ):
+                        raise AttachmentOperationError(
+                            "보관 후 변경된 원본은 미리보기할 수 없습니다."
+                        )
+                    stream.seek(0)
+                if cancel_requested():
+                    raise AttachmentCanceledError("미리보기를 취소했습니다.")
+                yield stream
 
     def path_for_open(self, attachment_id: int, *, now: datetime | None = None) -> Path:
         attachment = self._get_required(attachment_id)

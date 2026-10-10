@@ -42,6 +42,7 @@ def upgrade() -> None:
         "task_mutation_receipts",
         "task_snapshots",
         "snapshot_files",
+        "task_folder_links",
     }
     Base.metadata.create_all(
         bind=bind,

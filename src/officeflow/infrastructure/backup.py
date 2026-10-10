@@ -1412,6 +1412,13 @@ def _check_restore_schema(path: Path, cancel_requested: Callable[[], bool] | Non
             raise BackupError(
                 "이 프로그램이 지원하지 않는 DB 버전입니다. 더 새로운 OfficeFlow에서 복원하세요."
             )
+        if revisions == {"0016_task_folder_links"}:
+            required_links = {"id", "task_id", "name", "path", "position", "created_at"}
+            columns = {
+                row[1] for row in connection.execute('PRAGMA table_info("task_folder_links")')
+            }
+            if "task_folder_links" not in tables or not required_links <= columns:
+                raise BackupError("백업 DB의 외부 폴더 연결 정보가 누락되었습니다.")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise BackupError("백업 데이터베이스의 업무 연결 정보가 손상되었습니다.")
         if "file_assets" in tables:

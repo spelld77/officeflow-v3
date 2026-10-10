@@ -40,8 +40,11 @@ class AppSettings:
     hourly_notification_holiday_date: str | None = None
     hourly_notification_morning_continuation_date: str | None = None
     attachment_export_directory: str | None = None
+    attachment_view_mode: str = "list"
 
     def __post_init__(self) -> None:
+        if self.attachment_view_mode not in ("list", "thumbnails"):
+            raise ValueError("첨부 보기 방식이 올바르지 않습니다.")
         if not 1 <= self.missed_reminder_grace_minutes <= 43_200:
             raise ValueError("놓친 알림 복구 범위는 1분에서 30일 사이여야 합니다.")
         if not self.global_quick_add_shortcut.strip():
@@ -98,6 +101,8 @@ class JsonSettingsStore:
                 return AppSettings()
             allowed = AppSettings.__dataclass_fields__.keys()
             values = {key: value for key, value in raw.items() if key in allowed}
+            if values.get("attachment_view_mode", "list") not in ("list", "thumbnails"):
+                values.pop("attachment_view_mode", None)
             export_directory = values.get("attachment_export_directory")
             if export_directory is not None and (
                 not isinstance(export_directory, str)

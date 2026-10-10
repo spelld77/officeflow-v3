@@ -31,25 +31,39 @@ class FileCheckDelegate(QStyledItemDelegate):
     ) -> None:
         styled = QStyleOptionViewItem(option)
         self.initStyleOption(styled, index)
-        super().paint(painter, styled, index)
         widget = styled.widget
-        if (
-            widget is None
-            or not styled.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
-        ):
+        if widget is None:
+            super().paint(painter, styled, index)
             return
-        rect = widget.style().subElementRect(
-            QStyle.SubElement.SE_ItemViewItemCheckIndicator, styled, widget
+        style = widget.style()
+        text = styled.text
+        styled.text = ""
+        painter.save()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, styled, painter, widget)
+        # Qt's stylesheet can reset the clip during redirected QWidget.grab painting.
+        # Draw both text and checks only after restoring the viewport/row clip.
+        bounds = (
+            option.rect.intersected(widget.viewport().rect())
+            if isinstance(widget, QListWidget)
+            else option.rect
         )
-        checked = styled.checkState == Qt.CheckState.Checked
+        painter.setClipRect(bounds, Qt.ClipOperation.IntersectClip)
         enabled = bool(styled.state & QStyle.StateFlag.State_Enabled)
+        area = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, styled, widget)
+        painter.setFont(styled.font)
+        painter.setPen(QColor("#172033" if enabled else "#96A6BB"))
+        painter.drawText(
+            area,
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            styled.fontMetrics.elidedText(text, Qt.TextElideMode.ElideMiddle, max(1, area.width())),
+        )
+        if not styled.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator:
+            painter.restore()
+            return
+        rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemCheckIndicator, styled, widget)
+        checked = styled.checkState == Qt.CheckState.Checked
         border = QColor("#2F6FED" if checked else "#5273A1") if enabled else QColor("#96A6BB")
         fill = QColor("#2F6FED" if enabled else "#63748B") if checked else QColor("#FFFFFF")
-        painter.save()
-        bounds = option.rect
-        if isinstance(widget, QListWidget):
-            bounds = bounds.intersected(widget.viewport().rect())
-        painter.setClipRect(bounds, Qt.ClipOperation.IntersectClip)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(QPen(border, 2))
         painter.setBrush(fill)

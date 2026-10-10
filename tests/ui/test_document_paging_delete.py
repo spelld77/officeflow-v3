@@ -206,8 +206,11 @@ def test_read_only_browser_blocks_multiple_delete(qtbot, tmp_path):
         box.show()
         box.list.setCurrentRow(0)
         box.list.item(1).setSelected(True)
-        assert not box.findChild(QPushButton, "documentDeleteSelectionButton").isEnabled()
+        assert not next(
+            action for action in box._build_menu().actions() if "삭제" in action.text()
+        ).isEnabled()
         box.delete()
-        assert box.property("documentActionsController") is None
+        controller = file_actions(box, facade)
+        assert controller._job_thread is None and not controller.dialogs
         assert len(env.attachments.attachment_metadata_for_task(first.task_id)) == 2
         box.shutdown()

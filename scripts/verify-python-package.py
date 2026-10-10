@@ -60,6 +60,7 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "src/officeflow/infrastructure/database/migrations/versions/0013_attachment_assets.py",
             "src/officeflow/infrastructure/database/migrations/versions/0014_task_history.py",
             "src/officeflow/infrastructure/database/migrations/versions/0015_task_snapshots.py",
+            "src/officeflow/infrastructure/database/migrations/versions/0016_task_folder_links.py",
             "src/officeflow/application/task_snapshots.py",
             "src/officeflow/presentation/task_history_dialog.py",
             "src/officeflow/presentation/task_snapshot_dialog.py",
@@ -88,6 +89,17 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "src/officeflow/presentation/data_inspection.py",
             "src/officeflow/presentation/lookup_style.py",
             "src/officeflow/presentation/reminder_groups.py",
+            "src/officeflow/application/folder_links.py",
+            "src/officeflow/application/task_archive.py",
+            "src/officeflow/application/image_attachments.py",
+            "src/officeflow/infrastructure/exports/task_archive.py",
+            "src/officeflow/presentation/folder_links.py",
+            "src/officeflow/presentation/task_archive_dialog.py",
+            "src/officeflow/presentation/image_attachments.py",
+            "src/officeflow/presentation/attachment_thumbnails.py",
+            "src/officeflow/presentation/input_controls.py",
+            "src/officeflow/presentation/compact_labels.py",
+            "src/officeflow/presentation/detail_widgets.py",
         )
         if any(f"{root_name}/{name}" not in names for name in required):
             raise ValueError("Required runtime file missing")
@@ -143,7 +155,7 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
     with closing(sqlite3.connect(database)) as connection:
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0015_task_snapshots"
+            == "0016_task_folder_links"
         )
         assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM attachment_search").fetchone()[0] == 0

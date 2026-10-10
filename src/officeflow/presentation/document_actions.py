@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from PySide6.QtCore import QObject, Qt, QThread, QUrl, Slot
+from PySide6.QtCore import QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,12 +15,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
@@ -31,13 +31,17 @@ from shiboken6 import isValid
 from officeflow.application.attachment_deletion import DeletePlan, DeleteTarget
 from officeflow.application.attachment_documents import DocumentOperation
 from officeflow.application.attachment_export import AttachmentExportService, FileReference
+from officeflow.application.attachments import AttachmentOperationError
 from officeflow.application.document_lifecycle import DocumentLifecycle
+from officeflow.application.file_operations import FileInUseError
 from officeflow.infrastructure.attachments.view_cache import ViewCopy
 from officeflow.infrastructure.database.document_catalog import DocumentEntry
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.dates import format_datetime
 from officeflow.presentation.file_list import compact_file_list, set_file_row
+from officeflow.presentation.task_history_dialog import _ReadDialog
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
@@ -50,6 +54,8 @@ def after_change(changed: Callable[[], None], dialog: QDialog) -> Callable[[Any]
 
 
 class FileActionController(QObject):
+    busyChanged = Signal(bool)
+
     def __init__(self, parent: QWidget, lifecycle: DocumentLifecycle) -> None:
         super().__init__(parent)
         self.owner, self.lifecycle = parent, lifecycle
@@ -127,6 +133,7 @@ class FileActionController(QObject):
         thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
         thread.started.connect(worker.run)
         self._job_thread, self.worker = thread, worker
+        self.busyChanged.emit(True)
         thread.start()
 
     @Slot(object)
@@ -191,6 +198,7 @@ class FileActionController(QObject):
         self._succeeded_cleanly = False
         if thread is not None and isValid(thread):
             thread.deleteLater()
+        self.busyChanged.emit(False)
 
     def open(self, kind: str, identity: int, *, feedback: QLabel | None = None) -> None:
         def launch(path: Path) -> None:
@@ -436,7 +444,53 @@ def stop_file_actions(parent: QWidget) -> None:
         result.shutdown()
 
 
-class DocumentBrowser(QDialog):
+class DocumentInformationDialog(_ReadDialog):
+    def __init__(
+        self, lifecycle: DocumentLifecycle, kind: str, identity: int, timezone: str, parent: QWidget
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("파일 정보")
+        self.setObjectName("documentInformationDialog")
+        self.resize(520, 420)
+        root = QVBoxLayout(self)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        root.addWidget(self.text, 1)
+        root.addWidget(self.feedback)
+        close = QPushButton("닫기")
+        close.clicked.connect(self.reject)
+        root.addWidget(close)
+        self.run(
+            lambda: lifecycle.catalog.get(kind, identity),
+            lambda row: self._ready_entry(row, timezone),
+        )
+
+    def _ready_entry(self, row: DocumentEntry, timezone: str) -> None:
+        source = row.current_source_name or (
+            "출처 항목 삭제됨" if row.source_name_at_creation else "직접 첨부"
+        )
+        lines = [
+            f"파일 이름: {row.name}",
+            f"종류: {document_role(row)}",
+            f"최초 파일 이름: {row.file.original_name}",
+            f"생성/보관 시각: {format_datetime(row.file.created_at, timezone)}",
+            f"보관 이름: {row.label or '없음'}",
+            f"생성 당시 출처: {row.source_name_at_creation or '직접 첨부'}",
+            f"현재 출처: {source}",
+            f"메모:\n{row.memo or '없음'}",
+        ]
+        self.text.setPlainText("\n\n".join(lines))
+
+
+def document_role(row: DocumentEntry) -> str:
+    return (
+        "보관본"
+        if row.kind == "version"
+        else {"general": "일반 첨부", "original": "원본", "work": "작업본"}[row.file.role.value]
+    )
+
+
+class DocumentBrowser(_ReadDialog):
     """One task, bounded keyset pages and ID-based selections across pages."""
 
     def __init__(
@@ -455,14 +509,15 @@ class DocumentBrowser(QDialog):
         self.read_only = read_only
         self.timezone = timezone
         self.setStyleSheet(LIGHT_STYLESHEET)
-        self.setWindowTitle("보관함 · 첨부/보관본 선택 저장")
+        self.setWindowTitle("보관함")
         self.resize(640, 480)
         self.root = QVBoxLayout(self)
         controls = QHBoxLayout()
         self.kind = QComboBox()
         self.kind.addItems(["보관본", "현재 첨부"])
-        self.all_families = QCheckBox("업무의 모든 계열")
+        self.all_families = QCheckBox("이 업무 전체 보기")
         self.all_families.setChecked(family_id is None)
+        self.all_families.setVisible(family_id is not None)
         controls.addWidget(self.kind)
         controls.addWidget(self.all_families)
         self.root.addLayout(controls)
@@ -473,8 +528,15 @@ class DocumentBrowser(QDialog):
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.itemDoubleClicked.connect(lambda _item: self.open())
         self.list.currentItemChanged.connect(self._detail)
+        self.list.itemSelectionChanged.connect(self._update_selection)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._context_menu)
         self.root.addWidget(self.list, 1)
-        self.feedback = QLabel("선택을 유지한 채 첨부/보관본 화면과 페이지를 이동할 수 있습니다.")
+        self.selection_status = CompactLabel()
+        self.summary = CompactLabel()
+        self.root.addWidget(self.selection_status)
+        self.root.addWidget(self.summary)
+        self.feedback = QLabel("")
         self.feedback.setWordWrap(True)
         self.root.addWidget(self.feedback)
         self.navigation = QWidget(self)
@@ -492,34 +554,25 @@ class DocumentBrowser(QDialog):
         navigation.addStretch()
         navigation.addWidget(self.next_button)
         self.root.addWidget(self.navigation)
-        buttons = QGridLayout()
-        for index, (label, callback) in enumerate(
-            (
-                ("보기", self.open),
-                ("작업본", self.work),
-                ("메모", self.memo),
-                ("선택 항목 삭제…", self.delete),
-                ("선택 저장…", self.save),
-                ("이 페이지 모두 선택", lambda: self.check_page(True)),
-                ("이 페이지 선택 해제", lambda: self.check_page(False)),
-            )
-        ):
-            button = QPushButton(label)
-            button.clicked.connect(callback)
-            if label in {"작업본", "메모", "선택 항목 삭제…"}:
-                button.setEnabled(not read_only)
-            if label == "선택 항목 삭제…":
-                button.setObjectName("documentDeleteSelectionButton")
-                button.setToolTip(
-                    "Ctrl/Shift로 선택한 현재 페이지의 파일을 삭제합니다. 체크는 외부 저장용입니다."
-                )
-            buttons.addWidget(button, index // 4, index % 4)
+        buttons = QHBoxLayout()
+        self.open_button = QPushButton("열기")
+        self.open_button.clicked.connect(self.open)
+        self.save_button = QPushButton("체크한 파일 저장…")
+        self.save_button.clicked.connect(self.save)
+        self.more_button = QPushButton("더보기 ▾")
+        self.more_button.clicked.connect(self._more_menu)
+        for button in (self.open_button, self.save_button, self.more_button):
+            buttons.addWidget(button)
         self.root.addLayout(buttons)
         self.exporter = AttachmentExportController(exports, self)
+        self.exporter.busyChanged.connect(self._update_selection)
+        file_actions(self, self.lifecycle).busyChanged.connect(self._update_selection)
         self.selected: set[tuple[str, int]] = set()
         self.entries: dict[tuple[str, int], DocumentEntry] = {}
         self.cursors: list[int | None] = [None]
         self.has_next = False
+        self._summary_key: tuple[str, int] | None = None
+        self._resolved_summary_key: tuple[str, int] | None = None
         self.kind.currentIndexChanged.connect(self.reset)
         self.all_families.toggled.connect(self.reset)
         self.refresh()
@@ -529,6 +582,10 @@ class DocumentBrowser(QDialog):
         self.refresh()
 
     def refresh(self) -> None:
+        highlighted = {item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()}
+        current = self.list.currentItem()
+        current_key = current.data(Qt.ItemDataRole.UserRole) if current else None
+        scroll = self.list.verticalScrollBar().value()
         kind = "version" if self.kind.currentIndex() == 0 else "attachment"
         while True:
             page = self.lifecycle.catalog.page_with_more(
@@ -572,10 +629,15 @@ class DocumentBrowser(QDialog):
                 Qt.CheckState.Checked if key in self.selected else Qt.CheckState.Unchecked
             )
             self.list.addItem(item)
+            if key == current_key:
+                self.list.setCurrentItem(item)
+            if key in highlighted:
+                item.setSelected(True)
         self.list.blockSignals(False)
-        self.feedback.setText(
-            f"이 페이지 {len(rows)}개 · 체크 {len(self.selected)}개 (다른 페이지 포함)"
-        )
+        self.list.verticalScrollBar().setValue(scroll)
+        self._summary_key = None
+        self._resolved_summary_key = None
+        self._update_selection()
 
     def check_page(self, checked: bool) -> None:
         for index in range(self.list.count()):
@@ -589,29 +651,130 @@ class DocumentBrowser(QDialog):
             self.selected.add(key)
         else:
             self.selected.discard(key)
-        self.feedback.setText(
-            f"선택 {len(self.selected)}개 · 첨부와 보관본을 함께 저장할 수 있습니다."
-        )
+        self._update_selection()
 
     def current(self) -> DocumentEntry | None:
-        item = self.list.currentItem()
-        return self.entries.get(item.data(Qt.ItemDataRole.UserRole)) if item else None
+        items = self.list.selectedItems()
+        return (
+            self.entries.get(items[0].data(Qt.ItemDataRole.UserRole)) if len(items) == 1 else None
+        )
 
     def _detail(self, _current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        self._update_selection()
+
+    def _busy(self) -> bool:
+        return file_actions(self, self.lifecycle)._job_thread is not None or self.exporter.busy
+
+    def _update_selection(self) -> None:
+        if not hasattr(self, "entries"):
+            return
+        items = self.list.selectedItems()
+        outside = bool(self.selected.difference(self.entries))
+        self.selection_status.setText(
+            f"현재 페이지 선택 {len(items)}개 · 저장 체크 {len(self.selected)}개"
+            + (" (다른 페이지 포함)" if outside else "")
+        )
         row = self.current()
-        if row:
-            row = self.lifecycle.catalog.get(row.kind, row.id)
+        busy = self._busy()
+        self.open_button.setEnabled(row is not None and not busy)
+        self.save_button.setEnabled(bool(self.selected) and not busy)
+        self.summary.setVisible(bool(items))
+        if row is None:
+            self._summary_key = None
+            self._generation += 1
+            self._pending = None
+            self.summary.setText(f"선택 {len(items)}개" if items else "")
+            return
+        key = row.kind, row.id
+        self._show_summary(row, resolved=key == self._resolved_summary_key)
+        if key != self._summary_key:
+            self._summary_key = key
+            self.run(lambda: self.lifecycle.catalog.get(*key), self._summary_ready)
 
-            def preview(value: str, limit: int = 60) -> str:
-                text = " ".join(value.split())
-                return text[:limit] + ("…" if len(text) > limit else "")
+    def _show_summary(self, row: DocumentEntry, *, resolved: bool = False) -> None:
+        text = f"{document_role(row)} · {format_datetime(row.file.created_at, self.timezone, short=True)}"
+        if row.memo:
+            text += " · 메모 있음"
+        if row.source_name_at_creation:
+            if not resolved:
+                text += "\n출처 확인 중"
+            elif not row.current_source_name:
+                text += "\n출처 항목 삭제됨"
+            elif (
+                row.current_source_file_name
+                and row.current_source_file_name != row.source_name_at_creation
+            ):
+                text += "\n출처 이름 변경됨"
+        self.summary.setText(text)
 
-            self.feedback.setText(
-                f"당시 파일 이름: {preview(row.name)}\n당시 출처: {preview(row.source_name_at_creation or '직접 첨부')}\n현재 출처: {preview(row.current_source_name or ('출처 항목 삭제됨' if row.source_name_at_creation else '직접 첨부'))}\n{preview(row.memo, 80)}"
+    def _summary_ready(self, row: DocumentEntry) -> None:
+        current = self.current()
+        if current is not None and (current.kind, current.id) == (row.kind, row.id):
+            self.entries[row.kind, row.id] = row
+            self._resolved_summary_key = row.kind, row.id
+            self._show_summary(row, resolved=True)
+
+    def information(self) -> None:
+        row = self.current()
+        if row is not None and not self._busy():
+            file_actions(self, self.lifecycle).keep(
+                DocumentInformationDialog(self.lifecycle, row.kind, row.id, self.timezone, self)
             )
-            self.feedback.setToolTip(
-                f"당시 파일 이름: {row.name}\n당시 출처: {row.source_name_at_creation}\n현재 출처: {row.current_source_name}\n{row.memo}"
-            )
+
+    def clear_checks(self) -> None:
+        self.selected.clear()
+        self.check_page(False)
+        self._update_selection()
+
+    def _build_menu(self, *, row_actions: bool = True) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet(LIGHT_STYLESHEET)
+        row = self.current() if row_actions else None
+        busy = self._busy()
+        for label, callback, enabled in (
+            ("파일 정보…", self.information, row is not None),
+            ("작업본 만들기…", self.work, row is not None and not self.read_only),
+            (
+                "메모 수정…",
+                self.memo,
+                row is not None and row.kind == "version" and not self.read_only,
+            ),
+        ):
+            action = menu.addAction(label)
+            action.setEnabled(enabled and not busy)
+            action.triggered.connect(callback)
+        menu.addSeparator()
+        for label, callback in (
+            ("이 페이지 저장 체크", lambda: self.check_page(True)),
+            ("이 페이지 저장 체크 해제", lambda: self.check_page(False)),
+            ("저장 체크 모두 해제", self.clear_checks),
+        ):
+            action = menu.addAction(label)
+            action.setEnabled(not busy)
+            action.triggered.connect(callback)
+        menu.addSeparator()
+        count = len(self.list.selectedItems()) if row_actions else 0
+        delete = menu.addAction(f"선택 파일 {count}개 삭제…")
+        delete.setObjectName("documentDeleteSelectionAction")
+        delete.setToolTip(
+            "강조 선택한 현재 페이지 파일만 삭제합니다. 저장 체크는 삭제 대상이 아닙니다."
+        )
+        delete.setEnabled(not busy and not self.read_only and 1 <= count <= 100)
+        delete.triggered.connect(self.delete)
+        return menu
+
+    def _more_menu(self) -> None:
+        menu = self._build_menu()
+        menu.exec(self.more_button.mapToGlobal(QPoint(0, self.more_button.height())))
+        menu.deleteLater()
+
+    def _context_menu(self, position: QPoint) -> None:
+        item = self.list.itemAt(position)
+        if item is not None and not item.isSelected():
+            self.list.setCurrentItem(item)
+        menu = self._build_menu(row_actions=item is not None)
+        menu.exec(self.list.viewport().mapToGlobal(position))
+        menu.deleteLater()
 
     def select_attachment(self, identity: int) -> None:
         self.kind.setCurrentIndex(1)
@@ -647,17 +810,17 @@ class DocumentBrowser(QDialog):
 
     def open(self) -> None:
         row = self.current()
-        if row:
+        if row and not self._busy():
             file_actions(self, self.lifecycle).open(row.kind, row.id, feedback=self.feedback)
 
     def work(self) -> None:
         row = self.current()
-        if row and not self.read_only:
+        if row and not self.read_only and not self._busy():
             file_actions(self, self.lifecycle).create(row, DocumentOperation.WORK, self.refresh)
 
     def memo(self) -> None:
         row = self.current()
-        if row is None or row.kind != "version" or self.read_only:
+        if row is None or row.kind != "version" or self.read_only or self._busy():
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("보관 메모")
@@ -683,7 +846,7 @@ class DocumentBrowser(QDialog):
         file_actions(self, self.lifecycle).keep(dialog)
 
     def delete(self) -> None:
-        if self.read_only:
+        if self.read_only or self._busy():
             return
         keys = tuple(item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems())
         if not keys:
@@ -697,6 +860,8 @@ class DocumentBrowser(QDialog):
         file_actions(self, self.lifecycle).delete_many(self.task_id, targets, changed)
 
     def save(self) -> None:
+        if not self.selected or self._busy():
+            return
         references = tuple(
             FileReference.version(identity)
             if kind == "version"
@@ -706,6 +871,7 @@ class DocumentBrowser(QDialog):
         self.exporter.choose(references)
 
     def shutdown(self) -> None:
+        super().shutdown()
         stop_file_actions(self)
         self.exporter.shutdown()
 
@@ -727,12 +893,10 @@ class ViewCacheDialog(QDialog):
         self.lifecycle = lifecycle
         self.asset_id = asset_id
         self.setStyleSheet(LIGHT_STYLESHEET)
-        self.setWindowTitle("보기 사본 · 저장된 변경 내용")
+        self.setWindowTitle("임시 사본")
         self.resize(600, 450)
         root = QVBoxLayout(self)
-        hint = QLabel(
-            "수정한 내용은 '수정본 저장…'으로 따로 남깁니다. 원본/보관본은 바뀌지 않습니다."
-        )
+        hint = QLabel("저장된 변경은 작업본으로 남길 수 있습니다.")
         hint.setToolTip(
             "문서의 저장된 내용만 검사합니다. 편집기를 저장하고 닫은 뒤 저장해주세요. 수정본·종료 미확인·이전 복원 사본은 자동 삭제하지 않습니다."
         )
@@ -742,82 +906,194 @@ class ViewCacheDialog(QDialog):
         self.list.setObjectName("viewCopyList")
         compact_file_list(self.list)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.itemSelectionChanged.connect(self._update_actions)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._context_menu)
         root.addWidget(self.list, 1)
+        self.selection_status = CompactLabel()
+        root.addWidget(self.selection_status)
+        self.usage_label = CompactLabel()
+        root.addWidget(self.usage_label)
         self.feedback = QLabel("")
         self.feedback.setWordWrap(True)
         root.addWidget(self.feedback)
-        controls = QGridLayout()
-        for index, (label, callback) in enumerate(
-            (
-                ("이전", self.previous),
-                ("다음", self.next),
-                ("내용 확인", self.check),
-                ("닫음 확인", self.confirm),
-                ("수정본 저장…", self.preserve),
-                ("변경 버리기/정리", self.discard),
-            )
-        ):
-            button = QPushButton(label)
-            button.clicked.connect(callback)
-            controls.addWidget(button, index // 3, index % 3)
-        root.addLayout(controls)
+        self.navigation = QWidget(self)
+        navigation = QHBoxLayout(self.navigation)
+        navigation.setContentsMargins(0, 0, 0, 0)
+        self.previous_button = QPushButton("이전 페이지")
+        self.previous_button.clicked.connect(self.previous)
+        self.page_label = QLabel()
+        self.next_button = QPushButton("다음 페이지")
+        self.next_button.clicked.connect(self.next)
+        for widget in (self.previous_button, self.page_label, self.next_button):
+            navigation.addWidget(widget)
+        root.addWidget(self.navigation)
         self.offset = 0
+        self.has_next = False
         self.exporter = AttachmentExportController(exports, self) if exports else None
-        extra = QHBoxLayout()
-        for label, callback in (
-            ("선택 사본 외부 저장…", self.save),
-            ("선택 문서 닫음 확인", self.confirm_selected),
-            ("선택 미수정 사본 정리", self.cleanup_selected),
-        ):
-            button = QPushButton(label)
-            button.clicked.connect(callback)
-            extra.addWidget(button)
-        root.addLayout(extra)
+        if self.exporter:
+            self.exporter.busyChanged.connect(self._update_actions)
+        file_actions(self, lifecycle).busyChanged.connect(self._update_actions)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        self.preserve_button = QPushButton("작업본으로 저장…")
+        self.preserve_button.clicked.connect(self.preserve)
+        self.more_button = QPushButton("더보기 ▾")
+        self.more_button.clicked.connect(self._more_menu)
+        actions.addWidget(self.preserve_button)
+        actions.addWidget(self.more_button)
+        root.addLayout(actions)
         self.refresh()
+
+    def _busy(self) -> bool:
+        return file_actions(self, self.lifecycle)._job_thread is not None or bool(
+            self.exporter and self.exporter.busy
+        )
+
+    def _update_actions(self) -> None:
+        if not hasattr(self, "preserve_button"):
+            return
+        copies = self._selected()
+        copy = self.current()
+        self.selection_status.setText(
+            f"선택 {len(copies)}개" + (" · 변경 있음" if copy and copy.state == "modified" else "")
+        )
+        self.preserve_button.setEnabled(
+            bool(
+                copy
+                and copy.state == "modified"
+                and copy.generation == self.lifecycle.cache.generation
+                and not self._busy()
+            )
+        )
+
+    def _build_menu(self, *, row_actions: bool = True) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet(LIGHT_STYLESHEET)
+        copies = self._selected() if row_actions else ()
+        single = len(copies) == 1
+        available = not self._busy()
+        for label, callback, enabled in (
+            ("내용 다시 확인", self.check, single),
+            ("문서 닫음 확인…", self.confirm_selected, 1 <= len(copies) <= 100),
+            ("사본 외부 저장…", self.save, single and self.exporter is not None),
+        ):
+            action = menu.addAction(label)
+            action.setEnabled(enabled and available)
+            action.triggered.connect(callback)
+        menu.addSeparator()
+        for label, callback, enabled in (
+            ("선택 사본 버리기…", self.discard, single),
+            ("선택 미수정 사본 정리…", self.cleanup_selected, 1 <= len(copies) <= 100),
+        ):
+            action = menu.addAction(label)
+            action.setEnabled(enabled and available)
+            action.triggered.connect(callback)
+        return menu
+
+    def _more_menu(self) -> None:
+        menu = self._build_menu()
+        menu.exec(self.more_button.mapToGlobal(QPoint(0, self.more_button.height())))
+        menu.deleteLater()
+
+    def _context_menu(self, position: QPoint) -> None:
+        item = self.list.itemAt(position)
+        if item is not None and not item.isSelected():
+            self.list.setCurrentItem(item)
+        menu = self._build_menu(row_actions=item is not None)
+        menu.exec(self.list.viewport().mapToGlobal(position))
+        menu.deleteLater()
 
     def save(self) -> None:
         copy = self.current()
-        if copy and self.exporter:
+        if copy and self.exporter and not self._busy():
             self.exporter.choose((FileReference.cache(copy.relative_path),))
 
     def _selected(self) -> tuple[ViewCopy, ...]:
-        return tuple(
-            item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()[:100]
-        )
+        return tuple(item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems())
 
     def confirm_selected(self) -> None:
         copies = self._selected()
+        if self._busy() or not 1 <= len(copies) <= 100:
+            return
+        dialog = QDialog(self)
+        dialog.setObjectName("viewClosedConfirmation")
+        dialog.setWindowTitle("문서 닫음 확인")
+        dialog.resize(440, 300)
+        root = QVBoxLayout(dialog)
+        label = QLabel(f"선택 {len(copies)}개 문서를 편집기에서 저장하고 닫았는지 확인하세요.")
+        label.setWordWrap(True)
+        root.addWidget(label)
+        names = QPlainTextEdit("\n".join(copy.name for copy in copies))
+        names.setReadOnly(True)
+        root.addWidget(names, 1)
+        consent = QCheckBox("선택 문서를 저장하고 닫았습니다.")
+        root.addWidget(consent)
+        button = QPushButton("확인")
+        button.setEnabled(False)
+        consent.toggled.connect(button.setEnabled)
+        root.addWidget(button)
 
         def confirm(canceled: Callable[[], bool]) -> str:
-            done = 0
+            done, failed = 0, []
             for copy in copies:
                 if canceled():
                     break
-                self.lifecycle.cache.confirm_closed(copy, copy.use_token)
-                done += 1
-            return f"닫음 확인 {done}개"
+                try:
+                    self.lifecycle.cache.confirm_closed(copy, copy.use_token)
+                    done += 1
+                except (OSError, ValueError, AttachmentOperationError, FileInUseError) as error:
+                    failed.append(f"{copy.name}: {error}")
+            return (
+                f"닫음 확인 {done}개 · 실패 {len(failed)}개 · 미처리 {len(copies) - done - len(failed)}개"
+                + ("\n" + "\n".join(failed) if failed else "")
+            )
 
-        file_actions(self, self.lifecycle).run(
-            "선택 문서를 저장하고 닫았음 확인",
-            confirm,
-            lambda _value: self.refresh(),
-            feedback=self.feedback,
-        )
+        def submit() -> None:
+            if consent.isChecked() and not self._busy():
+                file_actions(self, self.lifecycle).run(
+                    "문서 닫음 확인",
+                    confirm,
+                    after_change(self.refresh, dialog),
+                    feedback=self.feedback,
+                )
+
+        button.clicked.connect(submit)
+        file_actions(self, self.lifecycle).keep(dialog)
 
     def cleanup_selected(self) -> None:
         copies = self._selected()
+        if self._busy() or not 1 <= len(copies) <= 100:
+            return
 
         def cleanup(canceled: Callable[[], bool]) -> str:
-            done = 0
+            done, skipped, failed = 0, 0, []
             for copy in copies:
                 if canceled():
                     break
-                if copy.closed and copy.state == "normal":
+                try:
+                    current = self.lifecycle.cache.get(copy.generation, copy.cache_id)
+                    if (
+                        not current.closed
+                        or current.state != "normal"
+                        or current.generation != self.lifecycle.cache.generation
+                        or current.use_token != copy.use_token
+                    ):
+                        skipped += 1
+                        continue
                     with self.lifecycle.documents.coordinator.job(canceled):
-                        observed = self.lifecycle.cache.observe(copy, canceled)
+                        observed = self.lifecycle.cache.observe(current, canceled)
+                        if observed.state != "normal":
+                            skipped += 1
+                            continue
                         self.lifecycle.cache.discard(observed)
                         done += 1
-            return f"미수정 닫음 확인 사본 {done}개 정리 (그 외 유지)"
+                except (OSError, ValueError, AttachmentOperationError, FileInUseError) as error:
+                    failed.append(f"{copy.name}: {error}")
+            return (
+                f"정리 {done}개 · 보호/보류 {skipped}개 · 실패 {len(failed)}개 · 미처리 {len(copies) - done - skipped - len(failed)}개"
+                + ("\n" + "\n".join(failed) if failed else "")
+            )
 
         file_actions(self, self.lifecycle).run(
             "선택 미수정 사본 정리", cleanup, lambda _value: self.refresh(), feedback=self.feedback
@@ -825,12 +1101,22 @@ class ViewCacheDialog(QDialog):
 
     def refresh(self) -> None:
         selected = {(copy.generation, copy.cache_id) for copy in self._selected()}
-        current = self.current()
+        current_item = self.list.currentItem()
+        current = current_item.data(Qt.ItemDataRole.UserRole) if current_item else None
         current_key = (current.generation, current.cache_id) if current else None
         scroll = self.list.verticalScrollBar().value()
         self.list.blockSignals(True)
         self.list.clear()
-        for copy in self.lifecycle.cache.page(self.offset, asset_id=self.asset_id):
+        page = self.lifecycle.cache.page_info(self.offset, asset_id=self.asset_id)
+        while not page.items and not page.unavailable_count and self.offset > 0:
+            self.offset = max(0, self.offset - 100)
+            page = self.lifecycle.cache.page_info(self.offset, asset_id=self.asset_id)
+        self.has_next = page.has_next
+        self.navigation.setVisible(self.offset > 0 or page.has_next)
+        self.previous_button.setEnabled(self.offset > 0)
+        self.next_button.setEnabled(page.has_next)
+        self.page_label.setText(f"{self.offset // 100 + 1}페이지")
+        for copy in page.items:
             state = {
                 "normal": "수정 없음",
                 "modified": "저장된 변경 있음",
@@ -866,27 +1152,31 @@ class ViewCacheDialog(QDialog):
         self.list.blockSignals(False)
         self.list.verticalScrollBar().setValue(scroll)
         count, size, protected = self.lifecycle.cache.usage()
-        self.feedback.setText(f"사본 {count}개 · 변경/준비 중 {protected}개")
-        self.feedback.setToolTip(
+        self.usage_label.setText(
+            f"사본 {count}개 · 변경/준비 중 {protected}개"
+            + (f" · 상태 확인 필요 {page.unavailable_count}개" if page.unavailable_count else "")
+        )
+        self.usage_label.setToolTip(
             f"확인된 용량 {size / 1024**2:.1f}MiB · 미수정 생성 상한 100개/512MiB. 단일 큰 파일은 사본이 없을 때만 허용합니다."
         )
+        self._update_actions()
 
     def current(self) -> ViewCopy | None:
-        item = self.list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else None
+        copies = self._selected()
+        return copies[0] if len(copies) == 1 else None
 
     def previous(self) -> None:
         self.offset = max(0, self.offset - 100)
         self.refresh()
 
     def next(self) -> None:
-        if self.list.count() == 100:
+        if self.has_next:
             self.offset += 100
             self.refresh()
 
     def check(self) -> None:
         copy = self.current()
-        if copy:
+        if copy and not self._busy():
             file_actions(self, self.lifecycle).run(
                 "사본 확인",
                 lambda canceled: self.lifecycle.cache.observe(copy, canceled),
@@ -895,18 +1185,11 @@ class ViewCacheDialog(QDialog):
             )
 
     def confirm(self) -> None:
-        copy = self.current()
-        if copy:
-            file_actions(self, self.lifecycle).run(
-                "문서 닫음 확인",
-                lambda _canceled: self.lifecycle.cache.confirm_closed(copy, copy.use_token),
-                lambda _value: self.refresh(),
-                feedback=self.feedback,
-            )
+        self.confirm_selected()
 
     def preserve(self) -> None:
         copy = self.current()
-        if not copy:
+        if not copy or self._busy():
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("수정한 내용을 따로 저장")
@@ -947,7 +1230,7 @@ class ViewCacheDialog(QDialog):
 
     def discard(self) -> None:
         copy = self.current()
-        if not copy:
+        if not copy or self._busy():
             return
 
         def observe(canceled: Callable[[], bool]) -> ViewCopy:

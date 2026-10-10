@@ -52,6 +52,7 @@ def test_data_dialog_exposes_usage_and_all_data_actions_at_minimum_size(
     )
 
     labels = {button.text() for button in dialog.findChildren(QPushButton)}
+    labels |= {action.text().removesuffix("…") for action in dialog.backup_more_menu.actions()}
     assert {
         "현재 목록 Excel",
         "일정 선택 ICS",
@@ -205,7 +206,7 @@ def test_data_dialog_restores_detached_attachment(qtbot: QtBot, tmp_path: Path) 
     assert "원래 업무로 복원" in dialog.cleanup_detail_label.text()
     dialog.cleanup_list.clearSelection()
     dialog.cleanup_list.setCurrentItem(None)
-    assert "사용자가 직접 확인" in dialog.cleanup_detail_label.text()
+    assert "파일을 선택하면" in dialog.cleanup_detail_label.text()
     dialog.cleanup_list.setCurrentRow(0)
     dialog._restore_cleanup_item()
 

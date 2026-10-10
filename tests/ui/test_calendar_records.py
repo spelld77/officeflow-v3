@@ -107,7 +107,10 @@ def test_attachment_button_shows_registered_files_or_empty_state(calendar_window
         window._refresh_calendar()
     page = window._calendar_page
     page.day_list.setCurrentRow(0)
-    assert ("첨부" in page.day_list.item(0).text()) is with_file
+    label = page.day_list.item(0).text()
+    assert ("첨부" in label) is with_file
+    if with_file:
+        assert label.index(task.title) < label.index("첨부")
     page.attachments_button.click()
     dialog = _records(window)[0]
     assert dialog.current_tab_key == "attachments"
@@ -166,7 +169,7 @@ def test_recent_tab_is_remembered_for_new_window_but_not_new_application(calenda
 
 
 @pytest.mark.parametrize("source", ["more-button", "right-bar", "right-list"])
-def test_calendar_menu_prioritizes_records_and_routes_directly_to_work_log(
+def test_calendar_menu_has_one_task_view_with_all_record_tabs(
     calendar_window, qtbot, monkeypatch, source
 ):
     window, _env, task, _start = calendar_window
@@ -176,17 +179,11 @@ def test_calendar_menu_prioritizes_records_and_routes_directly_to_work_log(
     def popup(menu, _position):
         labels = [action.text() for action in menu.actions() if not action.isSeparator()]
         observed.append(labels)
-        assert labels[:4] == [
-            "업무 기록 열기",
-            "체크리스트 보기",
-            "업무일지 보기 · 작성",
-            "첨부파일 보기 · 관리…",
-        ]
-        assert labels.count("첨부파일 보기 · 관리…") == 1
+        assert labels[0] == "업무 보기"
+        assert labels.count("업무 보기") == 1
+        assert not any("보기" in label for label in labels[1:])
         assert "업무 수정" in labels and "바로 완료" in labels
-        next(
-            action for action in menu.actions() if action.text() == "업무일지 보기 · 작성"
-        ).trigger()
+        next(action for action in menu.actions() if action.text() == "업무 보기").trigger()
         return None
 
     _patch_popup(window, monkeypatch, popup)
@@ -203,7 +200,12 @@ def test_calendar_menu_prioritizes_records_and_routes_directly_to_work_log(
             pytest.skip("낮은 모니터·높은 배율의 개수 요약 모드에서는 일정 막대를 그리지 않습니다.")
         rect = next(rect for rect, scheduled in page.calendar._task_hits if scheduled.id == task.id)
         qtbot.mouseClick(page.calendar, Qt.MouseButton.RightButton, pos=rect.center().toPoint())
-    assert observed and _records(window)[0].current_tab_key == "work_log"
+    assert observed and _records(window)[0].current_tab_key == "checklist"
+    record = _records(window)[0]
+    record.select_tab("work_log")
+    assert record.current_tab_key == "work_log"
+    record.select_tab("attachments")
+    assert record.current_tab_key == "attachments"
 
 
 def test_calendar_menu_can_still_edit_template(calendar_window, monkeypatch):
@@ -256,11 +258,12 @@ def test_enter_shortcut_opens_calendar_records_not_editor(calendar_window, monke
         window, "_open_editor", lambda *_args, **_kwargs: pytest.fail("must not edit")
     )
     window._calendar_page.day_list.setCurrentRow(0)
-    window._open_task_shortcut.activated.emit()
+    window._calendar_open_task_shortcut.activated.emit()
     assert len(_records(window)) == 1
 
 
-def test_window_keyboard_enter_opens_calendar_records(calendar_window, qtbot, monkeypatch):
+@pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Enter])
+def test_window_keyboard_enter_opens_calendar_records(calendar_window, qtbot, monkeypatch, key):
     window, _env, _task, _start = calendar_window
     monkeypatch.setattr(
         window, "_open_editor", lambda *_args, **_kwargs: pytest.fail("must not edit")
@@ -270,7 +273,7 @@ def test_window_keyboard_enter_opens_calendar_records(calendar_window, qtbot, mo
     window.activateWindow()
     qtbot.waitActive(window)
     window._calendar_page.day_list.setFocus()
-    QTest.keyClick(window.windowHandle(), Qt.Key.Key_Return)
+    QTest.keyClick(window.windowHandle(), key)
     qtbot.waitUntil(lambda: len(_records(window)) == 1)
 
 

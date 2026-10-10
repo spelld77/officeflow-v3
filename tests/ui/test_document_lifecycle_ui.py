@@ -237,12 +237,22 @@ def test_page_checks_and_source_preview_stay_bounded_with_long_memo(qtbot, tmp_p
         dialog.resize(600, 450)
         dialog.show()
         dialog.list.setCurrentRow(0)
-        assert "검토 작업본.txt" in dialog.feedback.text()
-        assert len(dialog.feedback.text()) < 400
+        qtbot.waitUntil(lambda: dialog._thread is None)
+        assert "메모 있음" in dialog.summary.full_text
+        assert len(dialog.summary.full_text) < 150
+        dialog.information()
+        info = next(
+            box
+            for box in file_actions(dialog, service).dialogs
+            if box.objectName() == "documentInformationDialog"
+        )
+        qtbot.waitUntil(lambda: info._thread is None)
+        assert "검토 작업본.txt" in info.text.toPlainText()
         dialog.check_page(True)
         assert len(dialog.selected) == 1
         for button in dialog.findChildren(QPushButton):
-            assert dialog.rect().contains(button.mapTo(dialog, button.rect().center()))
+            if button.window() is dialog and button.isVisible():
+                assert dialog.rect().contains(button.mapTo(dialog, button.rect().center()))
         dialog.check_page(False)
         assert not dialog.selected
         dialog.shutdown()

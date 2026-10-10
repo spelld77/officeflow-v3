@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (
     QModelIndex,
@@ -38,6 +39,7 @@ from officeflow.application.reminder_preview import (
     ReminderPreviewService,
 )
 from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.compact_labels import WrappingLabel
 from officeflow.presentation.dates import format_datetime
 from officeflow.presentation.lookup_style import SCROLLBAR_STYLE
 from officeflow.presentation.reminder_groups import (
@@ -254,6 +256,11 @@ class ReminderPreviewWidget(QWidget):
 
     def __init__(self, timezone: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("reminderPreviewPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            LIGHT_STYLESHEET + "\nQWidget#reminderPreviewPanel {background:#FFFFFF;color:#172033;}"
+        )
         self._timezone = timezone
         self.list: QListWidget
         self._result = ReminderPreviewResult((), True)
@@ -264,13 +271,16 @@ class ReminderPreviewWidget(QWidget):
         self._all_previous: QPushButton | None = None
         self._all_next: QPushButton | None = None
         self._max_rows = 3
+        self._now = datetime.now(UTC)
+        self._error: object | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
         heading = QHBoxLayout()
-        self.label = QLabel("오늘 알림 확인 중…")
+        self.label = WrappingLabel()
+        self.label.setText("오늘 알림 확인 중…")
         heading.addWidget(self.label, 1)
-        self.details_button = QPushButton("알림 시각 보기")
+        self.details_button = QPushButton("알림 시각…")
         self.details_button.setEnabled(False)
         self.details_button.clicked.connect(lambda: self._show_details(self.list))
         heading.addWidget(self.details_button)
@@ -286,9 +296,17 @@ class ReminderPreviewWidget(QWidget):
         self.list.setMinimumHeight(32)
         self._connect_list(self.list)
         layout.addWidget(self.list)
-        self.hint = QLabel("알림은 업무 검색·필터와 무관하게 표시됩니다.")
+        self.attention = WrappingLabel()
+        layout.addWidget(self.attention)
+        self.attention.hide()
+        self.hint = WrappingLabel()
+        self.hint.setText("업무 검색·필터와 관계없이 오늘 알림을 표시합니다.")
         self.hint.setObjectName("mutedText")
         layout.addWidget(self.hint)
+        self.hint.hide()
+
+    def set_filter_active(self, active: bool) -> None:
+        self.hint.setVisible(active)
 
     def _connect_list(self, widget: QListWidget) -> None:
         widget.setItemDelegate(ReminderPreviewDelegate(self._timezone, widget))
@@ -315,16 +333,16 @@ class ReminderPreviewWidget(QWidget):
         data = item.data(Qt.ItemDataRole.UserRole)
         menu = QMenu(widget)
         menu.setStyleSheet(LIGHT_STYLESHEET)
-        menu.addAction("알림 시각·상태 보기").triggered.connect(lambda: self._show_details(widget))
-        menu.addAction("업무 기록·첨부파일 보기").triggered.connect(
-            lambda: self.recordRequested.emit(data)
-        )
+        menu.addAction("알림 시각…").triggered.connect(lambda: self._show_details(widget))
+        menu.addAction("업무 보기").triggered.connect(lambda: self.recordRequested.emit(data))
         menu.addAction("알림 설정…").triggered.connect(
             lambda: self.settingsRequested.emit(data.task)
         )
         menu.exec(widget.viewport().mapToGlobal(point))
 
-    def set_result(self, result: ReminderPreviewResult) -> None:
+    def set_result(self, result: ReminderPreviewResult, *, now: datetime | None = None) -> None:
+        self._error = None
+        self._now = now or datetime.now(UTC)
         self._result = result
         self._groups = group_reminders(result.items)
         pending = tuple(i for i in result.items if i.is_pending)
@@ -337,18 +355,28 @@ class ReminderPreviewWidget(QWidget):
         self.list.setFixedHeight(len(visible) * row_height + 10 if visible else 32)
         self.list.setVisible(bool(visible))
         self.more.setVisible(bool(result.items) or not result.complete)
-        count = (
-            f"총 {len(result.items)}건"
+        upcoming = tuple(i for i in pending if i.status != "미확인" and i.effective_at >= self._now)
+        next_at = min((i.effective_at for i in upcoming), default=None)
+        summary = (
+            f"오늘 알림 총 {len(result.items)}건"
             if result.complete
-            else f"{len(result.items)}건 이상 · 일부 조회"
+            else f"조회된 알림 {len(result.items)}건 · 일부 조회"
         )
-        self.label.setText(
-            f"오늘 알림 · 업무 {len(self._groups)}개 · {count} · {len(visible)}개 표시"
-            if result.items
-            else "오늘 예약된 알림이 없습니다"
-            if result.complete
-            else "알림 조회가 끝나지 않았습니다 · 다시 확인 필요"
-        )
+        if next_at:
+            time = next_at.astimezone(ZoneInfo(self._timezone)).strftime("%H:%M")
+            summary += f" · 다음 {time}" if result.complete else f" · 조회분 중 예정 {time}"
+        elif result.complete and not pending and not attention:
+            summary += " · 남은 알림 없음"
+        self.label.setText("오늘 알림 없음" if not result.items and result.complete else summary)
+        notices = []
+        unconfirmed = sum(i.status == "미확인" for i in pending)
+        if unconfirmed:
+            notices.append(f"미확인 {unconfirmed}건")
+        if attention:
+            notices.append(f"발생 기록 확인 필요 {len(attention)}건")
+        self.attention.setText(" · ".join(notices))
+        self.attention.setVisible(bool(notices))
+        self.attention.setStyleSheet("color:#B45309;font-weight:600;")
         self.label.setToolTip(
             f"확인할/예정 {len(pending)}건 · 처리 이력 {history}건 · 발생 기록 확인 필요 {len(attention)}건"
         )
@@ -368,7 +396,18 @@ class ReminderPreviewWidget(QWidget):
         rows = 2 if compact else 3
         if rows != self._max_rows:
             self._max_rows = rows
-            self.set_result(self._result)
+            error = self._error
+            self.set_result(self._result, now=self._now)
+            if error is not None:
+                self.set_error(error)
+
+    def set_error(self, error: object) -> None:
+        self._error = error
+        self.label.setText("알림 조회 실패 · 표시된 알림은 이전 조회 결과입니다")
+        self.label.setToolTip(str(error))
+        self.more.setText("다시 조회…")
+        self.more.show()
+        self._refresh_all()
 
     def shutdown(self) -> None:
         if self._dialog:
@@ -440,15 +479,17 @@ class ReminderPreviewWidget(QWidget):
             label = self._dialog.findChild(QLabel, "reminderGroupPage")
             if label:
                 label.setText(
-                    f"업무 {len(self._groups)}개{' 이상 · 일부 조회' if not self._result.complete else ''} · {self._all_page + 1}페이지"
+                    f"업무·회차 {len(self._groups)}개 · 알림 {len(self._result.items)}건{' 이상 · 일부 조회' if not self._result.complete else ''} · {self._all_page + 1}페이지"
                 )
+                if self._error is not None:
+                    label.setText(label.text() + " · 조회 실패/이전 결과")
 
     def _move_all(self, delta: int) -> None:
         self._all_page += delta
         self._refresh_all()
 
     def _open_all(self) -> None:
-        if not self._result.complete:
+        if not self._result.complete or self._error is not None:
             self.reloadRequested.emit()
         if self._dialog:
             self._dialog.raise_()
@@ -459,7 +500,7 @@ class ReminderPreviewWidget(QWidget):
         dialog.setMinimumSize(460, 340)
         dialog.resize(650, 430)
         layout = QVBoxLayout(dialog)
-        description = QLabel("더블클릭: 업무 기록 · 오른쪽 클릭: 알림 시각·상태")
+        description = QLabel("더블클릭: 업무 보기 · 오른쪽 클릭: 알림 시각·상태")
         description.setWordWrap(True)
         layout.addWidget(description)
         full = QListWidget()
@@ -479,7 +520,7 @@ class ReminderPreviewWidget(QWidget):
         paging.addWidget(self._all_next)
         layout.addLayout(paging)
         actions = QHBoxLayout()
-        details = QPushButton("알림 시각 보기")
+        details = QPushButton("알림 시각…")
         details.clicked.connect(lambda: self._show_details(full))
         close = QPushButton("닫기")
         close.clicked.connect(dialog.reject)

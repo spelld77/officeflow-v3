@@ -58,6 +58,7 @@ from officeflow.application.attachment_search import AttachmentSearchHit, Attach
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.file_operations import FileInUseError
+from officeflow.application.folder_links import FolderLinkService
 from officeflow.application.hourly_notifications import HourlyState
 from officeflow.application.records import RecordService
 from officeflow.application.reminder_groups import ReminderGroup
@@ -67,6 +68,7 @@ from officeflow.application.reminder_preview import (
     ReminderPreviewService,
 )
 from officeflow.application.reminders import ReminderAlert, ReminderService
+from officeflow.application.task_archive import TaskArchiveService
 from officeflow.application.task_mutations import MutationAttempt
 from officeflow.application.task_saving import ReminderEdit, TaskSaveService
 from officeflow.application.tasks import (
@@ -94,6 +96,7 @@ from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_search_page import AttachmentSearchPageWidget
+from officeflow.presentation.attachment_thumbnails import AttachmentImageCoordinator
 from officeflow.presentation.background import OperationWorker, finish_thread
 from officeflow.presentation.data_dialog import DataManagementDialog
 from officeflow.presentation.dates import WEEKDAYS, format_datetime
@@ -104,6 +107,7 @@ from officeflow.presentation.hourly_notification_controller import (
 )
 from officeflow.presentation.hourly_notification_dialog import format_next
 from officeflow.presentation.month_calendar import CalendarPage
+from officeflow.presentation.notification_coordinator import NotificationCoordinator
 from officeflow.presentation.record_dialog import (
     CompleteTaskDialog,
     TaskRecordsDialog,
@@ -184,9 +188,15 @@ class MainWindow(QMainWindow):
         reminder_preview_service: ReminderPreviewService | None = None,
         attachment_export_service: AttachmentExportService | None = None,
         internal_recovery: Callable[[Callable[[], bool]], InternalRecoveryReport] | None = None,
+        folder_link_service: FolderLinkService | None = None,
+        task_archive_service: TaskArchiveService | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
+        self._image_coordinator = AttachmentImageCoordinator(
+            self, default_view=settings.attachment_view_mode
+        )
+        self._image_coordinator.viewModeChanged.connect(self._remember_attachment_view_mode)
         self._task_service = task_service
         self._transition_attempt = MutationAttempt()
         self._quick_add_attempt = MutationAttempt()
@@ -210,12 +220,10 @@ class MainWindow(QMainWindow):
             self._day_preview_controller.rangeReady.connect(self._apply_day_reminder_preview)
         if self._preview_controller:
             self._preview_controller.ready.connect(self._apply_reminder_preview)
-            self._preview_controller.failed.connect(
-                lambda error: self.statusBar().showMessage(
-                    f"알림 미리보기 조회 실패: {error}", 8000
-                )
-            )
+            self._preview_controller.failed.connect(self._reminder_preview_failed)
         self._record_service = record_service
+        self._folder_link_service = folder_link_service
+        self._task_archive_service = task_archive_service
         self._attachment_service = attachment_service
         self._attachment_export_service = attachment_export_service
         self._attachment_export_controller = (
@@ -357,8 +365,15 @@ class MainWindow(QMainWindow):
         self._new_task_shortcut.activated.connect(self._open_new_task)
         self._search_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         self._search_shortcut.activated.connect(self._search.setFocus)
-        self._open_task_shortcut = QShortcut(QKeySequence("Return"), self)
+        # Opening the selected task must not consume Enter in quick-add/search inputs.
+        self._open_task_shortcut = QShortcut(self._task_list)
+        self._open_task_shortcut.setKeys([QKeySequence("Return"), QKeySequence("Enter")])
+        self._open_task_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
         self._open_task_shortcut.activated.connect(self._activate_selected_task)
+        self._calendar_open_task_shortcut = QShortcut(self._calendar_page.day_list)
+        self._calendar_open_task_shortcut.setKeys([QKeySequence("Return"), QKeySequence("Enter")])
+        self._calendar_open_task_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._calendar_open_task_shortcut.activated.connect(self._activate_selected_task)
 
         self._restore_window_position(settings)
         self._apply_responsive_layout()
@@ -538,12 +553,12 @@ class MainWindow(QMainWindow):
         titles.addWidget(self._page_caption)
         heading.addLayout(titles)
         heading.addStretch()
-        self._open_selected_button = QPushButton("열기")
+        self._open_selected_button = QPushButton("수정")
         self._open_selected_button.setToolTip("선택한 업무 수정")
         self._open_selected_button.clicked.connect(self._open_or_restore_selected)
         self._open_selected_button.hide()
         heading.addWidget(self._open_selected_button)
-        self._open_selected_records_button = QPushButton("기록")
+        self._open_selected_records_button = QPushButton("업무 보기")
         self._open_selected_records_button.setObjectName("openSelectedRecordsButton")
         self._open_selected_records_button.clicked.connect(self._open_selected_records)
         self._open_selected_records_button.hide()
@@ -781,12 +796,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._detail_description)
         layout.addStretch()
 
-        self._detail_records_button = QPushButton("체크리스트 · 완료 요약 · 업무일지")
+        self._detail_records_button = QPushButton("업무 보기")
         self._detail_records_button.setObjectName("detailRecordsButton")
         self._detail_records_button.clicked.connect(self._open_selected_records)
         self._detail_records_button.setEnabled(False)
         layout.addWidget(self._detail_records_button)
-        self._detail_attachment_button = QPushButton("첨부파일 보기 · 관리")
+        self._detail_attachment_button = QPushButton("첨부")
         self._detail_attachment_button.setObjectName("detailAttachmentButton")
         self._detail_attachment_button.clicked.connect(self._open_selected_attachments)
         self._detail_attachment_button.setEnabled(False)
@@ -1294,13 +1309,17 @@ class MainWindow(QMainWindow):
         occurrence_start: datetime | None = None,
         initial_tab: str | None = None,
         attachment_id: int | None = None,
-    ) -> None:
+    ) -> TaskRecordsDialog | None:
         if self._record_service is None:
-            return
+            return None
+        candidates = list(self._file_dialogs)
+        for owner in self._file_dialogs:
+            if isinstance(owner, WorkLogBrowserDialog):
+                candidates.extend(owner._record_dialogs)
         dialog = next(
             (
                 existing
-                for existing in self._file_dialogs
+                for existing in candidates
                 if isinstance(existing, TaskRecordsDialog)
                 and existing._task_id == task.id
                 and existing._occurrence_start == occurrence_start
@@ -1317,7 +1336,9 @@ class MainWindow(QMainWindow):
                 occurrence_start=occurrence_start,
                 attachment_export_service=self._attachment_export_service,
                 attachment_export_directory=self._settings.attachment_export_directory,
+                image_coordinator=self._image_coordinator,
                 initial_tab=initial_tab or self._last_record_tab,
+                folder_link_service=self._folder_link_service,
                 parent=self,
             )
             dialog.changed.connect(self._refresh_tasks)
@@ -1331,6 +1352,7 @@ class MainWindow(QMainWindow):
             dialog.activateWindow()
         if attachment_id is not None:
             dialog.select_attachment(attachment_id)
+        return dialog
 
     def _open_file_records(self, hit: AttachmentSearchHit, attachments: bool) -> None:
         if (
@@ -1403,6 +1425,7 @@ class MainWindow(QMainWindow):
     def _update_search_feedback(self, total: int | None = None) -> None:
         search = self._search.text().strip()
         active = bool(search)
+        self._today_reminders.set_filter_active(active or self._active_filter_count() > 0)
         self._search.setProperty("searchActive", active)
         self._search.style().unpolish(self._search)
         self._search.style().polish(self._search)
@@ -1480,6 +1503,9 @@ class MainWindow(QMainWindow):
         )
 
     def _update_filter_feedback(self) -> None:
+        self._today_reminders.set_filter_active(
+            bool(self._search.text().strip()) or self._active_filter_count() > 0
+        )
         pinned = self._pinned_filter.isChecked()
         attached = self._attachment_filter.isChecked()
         self._pinned_filter.setText("✓고정" if pinned else "고정")
@@ -1541,21 +1567,17 @@ class MainWindow(QMainWindow):
 
     def _build_task_context_menu(self, task: Task, *, calendar_actions: bool = False) -> QMenu:
         menu = QMenu(self)
-        if calendar_actions and self._record_service is not None and task.deleted_at is None:
-            records = menu.addAction("업무 기록 열기")
+        if self._record_service is not None:
+            records = menu.addAction("업무 보기")
+            records.setToolTip("업무일지 · 체크리스트 · 완료 요약 · 첨부파일을 한 창에서 확인")
             records.triggered.connect(self._open_selected_records)
-            checklist = menu.addAction("체크리스트 보기")
-            checklist.triggered.connect(
-                lambda: self._open_selected_records(initial_tab="checklist")
-            )
-            work_log = menu.addAction("업무일지 보기 · 작성")
-            work_log.triggered.connect(lambda: self._open_selected_records(initial_tab="work_log"))
-            if self._attachment_service is not None:
-                attachments = menu.addAction("첨부파일 보기 · 관리…")
-                attachments.triggered.connect(self._open_selected_attachments)
+        if self._folder_link_service is not None and self._record_service is not None:
+            folders = menu.addAction("폴더 바로가기…")
+            folders.triggered.connect(lambda: self._open_selected_records(initial_tab="folders"))
+        if calendar_actions and self._record_service is not None and task.deleted_at is None:
             menu.addSeparator()
         if task.deleted_at is None:
-            history = menu.addAction("이력·보관…")
+            history = menu.addAction("이력·시점 보관…")
             history.triggered.connect(self._open_selected_history)
         if task.matched_attachment_id is not None:
             matching_file = menu.addAction("일치한 첨부파일 열기")
@@ -1563,14 +1585,8 @@ class MainWindow(QMainWindow):
             matching_file.triggered.connect(lambda: self._open_attachment_id(attachment_id))
             menu.addSeparator()
         if task.deleted_at is not None:
-            history = menu.addAction("이력·보관…")
+            history = menu.addAction("이력·시점 보관…")
             history.triggered.connect(self._open_selected_history)
-            if self._attachment_service is not None and self._record_service is not None:
-                attachments = menu.addAction("첨부파일 보기…")
-                attachments.triggered.connect(self._open_selected_attachments)
-            if self._record_service is not None:
-                records = menu.addAction("완료 요약 · 기록 보기")
-                records.triggered.connect(self._open_selected_records)
             if menu.actions():
                 menu.addSeparator()
             restore = menu.addAction("휴지통에서 복원")
@@ -1593,16 +1609,6 @@ class MainWindow(QMainWindow):
 
         if menu.actions():
             menu.addSeparator()
-        if (
-            not calendar_actions
-            and self._attachment_service is not None
-            and self._record_service is not None
-        ):
-            attachments = menu.addAction("첨부파일 보기 · 관리…")
-            attachments.triggered.connect(self._open_selected_attachments)
-        if not calendar_actions and self._record_service is not None:
-            records = menu.addAction("완료 요약 · 기록 열기")
-            records.triggered.connect(self._open_selected_records)
         edit = menu.addAction("업무 수정")
         edit.triggered.connect(self._open_selected_task)
         if self._reminder_service:
@@ -1848,6 +1854,7 @@ class MainWindow(QMainWindow):
         if self._export_service is None or self._backup_manager is None:
             return
         dialog = DataManagementDialog(
+            task_archive_service=self._task_archive_service,
             export_service=self._export_service,
             backup_manager=self._backup_manager,
             query=self._build_query(offset=0, limit=None),
@@ -2272,11 +2279,13 @@ class MainWindow(QMainWindow):
         if self._record_service is None:
             return
         dialog = WorkLogBrowserDialog(
+            folder_link_service=self._folder_link_service,
             task_service=self._task_service,
             record_service=self._record_service,
             attachment_service=self._attachment_service,
             attachment_export_service=self._attachment_export_service,
             attachment_export_directory=self._settings.attachment_export_directory,
+            image_coordinator=self._image_coordinator,
             parent=self,
         )
         dialog.changed.connect(self._refresh_tasks)
@@ -2325,15 +2334,20 @@ class MainWindow(QMainWindow):
             if self._reminder_service and task and task.id
             else (),
             on_save=lambda editor: self._save_editor(editor, task, reminders),
+            attachment_service=self._attachment_service,
             initial_date=initial_date,
+            now=self._view_clock(),
             parent=self,
         )
         editor.setStyleSheet(LIGHT_STYLESHEET)
+        editor.imageImportNotice.connect(lambda notice: self.statusBar().showMessage(notice, 4000))
         self._keep_file_dialog(editor)
 
     def _save_editor(
         self, editor: TaskEditorDialog, task: Task | None, reminders: tuple[Reminder, ...]
-    ) -> None:
+    ) -> bool:
+        if editor._saved_image_task is not None:
+            return editor.start_image_import(editor._saved_image_task)
         draft, edits = editor.draft(), editor.reminder_edits()
         identity = editor.mutation_attempt.identify((draft, edits, task, reminders))
         if self._task_save_service:
@@ -2366,6 +2380,7 @@ class MainWindow(QMainWindow):
             else "업무를 저장했습니다.",
             2500,
         )
+        return editor.start_image_import(saved)
 
     def _open_reminder_settings(self, task: Task) -> None:
         if not self._reminder_service or not task.id:
@@ -2455,8 +2470,16 @@ class MainWindow(QMainWindow):
             self._today_reminders.set_result(
                 ReminderPreviewResult(
                     result.for_date(today, self._settings.timezone), result.complete
-                )
+                ),
+                now=self._view_clock(),
             )
+
+    def _reminder_preview_failed(self, error: object) -> None:
+        if self._shutdown_done:
+            return
+        self.statusBar().showMessage(f"알림 미리보기 조회 실패: {error}", 8000)
+        if not self._calendar_active:
+            self._today_reminders.set_error(error)
 
     def _open_preview_record(self, item: ReminderPreviewItem | ReminderGroup) -> None:
         if isinstance(item, ReminderGroup):
@@ -2685,7 +2708,7 @@ class MainWindow(QMainWindow):
             self._archive_button.setEnabled(False)
         else:
             self._pending_button.setText("대기")
-        self._open_selected_button.setText("복원" if deleted else "열기")
+        self._open_selected_button.setText("복원" if deleted else "수정")
         self._open_selected_button.setToolTip("선택한 업무 복원" if deleted else "선택한 업무 수정")
         self._open_selected_button.setVisible(not self._detail_panel.isVisible())
         self._open_selected_records_button.setVisible(
@@ -2815,6 +2838,7 @@ class MainWindow(QMainWindow):
         self._reminder_dialog.setWindowIcon(self.windowIcon())
         self._reminder_dialog.setStyleSheet(LIGHT_STYLESHEET)
         self._reminder_dialog.actionRequested.connect(self._handle_reminder_action)
+        self._reminder_dialog.taskViewRequested.connect(self._open_reminder_task)
         self._reminder_dialog.snoozeRequested.connect(
             lambda delivery_id, minutes: self._handle_reminder_action(
                 delivery_id,
@@ -2824,6 +2848,30 @@ class MainWindow(QMainWindow):
         self._reminder_dialog.finished.connect(lambda _result: self._clear_reminder_dialog())
         self._reminder_dialog.present()
         self._hourly_controller.reposition()
+
+    def _open_reminder_task(self, delivery_id: int) -> None:
+        popup = self._reminder_dialog
+        if popup is None or self._reminder_service is None:
+            return
+        alert = popup._alerts.get(delivery_id)
+        if alert is None:
+            return
+        try:
+            if not self._reminder_service.alert_is_active(delivery_id):
+                self._synchronize_reminder_dialog()
+                self.statusBar().showMessage("이미 처리된 알림입니다.", 5000)
+                return
+            task = self._task_service.get(alert.delivery.task_id)
+            record = self._show_task_records(
+                task,
+                occurrence_start=alert.occurrence_start if task.recurrence_rule else None,
+            )
+            if record is not None:
+                NotificationCoordinator.place(record, popup)
+                record.raise_()
+                record.activateWindow()
+        except (LookupError, ValueError, RuntimeError) as error:
+            self.statusBar().showMessage(f"업무 기록을 열지 못했습니다: {error}", 8000)
 
     def _refresh_snoozed_indicators(self) -> None:
         reminders: dict[tuple[int, datetime | None], datetime] = {}
@@ -3163,6 +3211,7 @@ class MainWindow(QMainWindow):
                 dialog.shutdown()
             else:
                 dialog.reject()
+        self._image_coordinator.shutdown()
         try:
             self._persist_settings()
         except OSError:
@@ -3389,6 +3438,17 @@ class MainWindow(QMainWindow):
             },
         )
         self._save_settings(self._settings)
+
+    def _remember_attachment_view_mode(self, mode: str) -> None:
+        self._settings = replace(self._settings, attachment_view_mode=mode)
+        if self._save_settings:
+            try:
+                self._save_settings(self._settings)
+            except OSError:
+                self.statusBar().showMessage(
+                    "첨부 보기 선택은 이번 실행에 적용했지만 다음 시작을 위한 설정은 저장하지 못했습니다.",
+                    8000,
+                )
 
     def _remember_attachment_export_directory(self, directory: str) -> None:
         self._settings = replace(self._settings, attachment_export_directory=directory)

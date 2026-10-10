@@ -70,6 +70,20 @@ class TaskRecord(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
+class TaskFolderLinkRecord(Base):
+    __tablename__ = "task_folder_links"
+    __table_args__ = (
+        CheckConstraint("length(trim(name)) BETWEEN 1 AND 200", name="folder_link_name"),
+        Index("ix_task_folder_links_order", "task_id", "position", "id"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(200))
+    path: Mapped[str] = mapped_column(Text)
+    position: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 class TaskHistoryRecord(Base):
     __tablename__ = "task_history"
     __table_args__ = (

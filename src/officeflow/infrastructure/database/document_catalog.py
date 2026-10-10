@@ -34,6 +34,7 @@ class DocumentEntry:
     file: Attachment
     current_source_name: str = ""
     source_name_at_creation: str = ""
+    current_source_file_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +117,11 @@ class DocumentCatalog:
                 if source is not None:
                     from dataclasses import replace
 
-                    entry = replace(entry, current_source_name=source.display_name)
+                    entry = replace(
+                        entry,
+                        current_source_name=source.display_name,
+                        current_source_file_name=source.display_name,
+                    )
             elif row.source_version_id is not None:
                 source_version = session.get(AttachmentVersionRecord, row.source_version_id)
                 if source_version is not None:
@@ -125,6 +130,7 @@ class DocumentCatalog:
                     entry = replace(
                         entry,
                         current_source_name=f"{source_version.label} · {source_version.original_name} (보관본)",
+                        current_source_file_name=source_version.original_name,
                     )
             return entry
 

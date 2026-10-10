@@ -49,6 +49,13 @@ def test_cache_check_and_closed_confirmation_keep_selected_copy(qtbot, tmp_path)
         qtbot.waitUntil(lambda: controller._job_thread is None)
         assert dialog.current() is not None and dialog.current().cache_id == key
         dialog.confirm()
+        confirmation = next(
+            box for box in controller.dialogs if box.objectName() == "viewClosedConfirmation"
+        )
+        confirmation.findChild(QCheckBox).setChecked(True)
+        next(
+            button for button in confirmation.findChildren(QPushButton) if button.text() == "확인"
+        ).click()
         qtbot.waitUntil(lambda: controller._job_thread is None)
         assert dialog.current() is not None and dialog.current().closed
         dialog.shutdown()

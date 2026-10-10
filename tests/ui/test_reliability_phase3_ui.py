@@ -99,7 +99,8 @@ def test_today_all_groups_page_and_partial_lookup_do_not_create_unbounded_qt_row
     widget.setStyleSheet(LIGHT_STYLESHEET)
     widget.set_result(ReminderPreviewResult(items, False))
     assert widget.list.count() == 3
-    assert "이상" in widget.label.text() and widget.more.text() == "더 조회…"
+    assert "조회된 알림" in widget.label.text() and "일부 조회" in widget.label.text()
+    assert widget.more.text() == "더 조회…"
     with qtbot.waitSignal(widget.reloadRequested):
         widget._open_all()
     from PySide6.QtWidgets import QListWidget

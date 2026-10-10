@@ -58,7 +58,9 @@ def record_window(
     monkeypatch.setattr(QMessageBox, "warning", unexpected_warning)
     with search_environment(tmp_path) as env:
         now = datetime.now(UTC)
-        task = env.tasks.create(TaskDraft(title="알림과 기록", starts_at=now - timedelta(minutes=1)))
+        task = env.tasks.create(
+            TaskDraft(title="알림과 기록", starts_at=now - timedelta(minutes=1))
+        )
         assert task.id is not None
         env.add(task.id, "기록보고서.txt")
         env.records.add_work_log(
@@ -111,9 +113,11 @@ def open_record_window(window: MainWindow, task_id: int, path: str, qtbot: QtBot
     assert window._selected_task_id == task_id
     task = window._task_service.get(task_id)
     menu = window._build_task_context_menu(task)
-    label = "첨부파일 보기 · 관리…" if path.endswith("attachments") else "완료 요약 · 기록 열기"
+    label = "업무 보기"
     next(action for action in menu.actions() if action.text() == label).trigger()
     menu.deleteLater()
+    if path.endswith("attachments"):
+        window._file_dialogs[-1].select_tab("attachments")
     return window._file_dialogs[-1]
 
 
@@ -191,7 +195,9 @@ def test_task_reminder_actions_update_data_without_closing_record(
     else:
         expected = TaskStatus.COMPLETED if action == "complete" else TaskStatus.PENDING
         assert env.tasks.get(task_id).status is expected
-    assert window._task_model.task_at(window._task_model.index_for_task(task_id)) == env.tasks.get(task_id)
+    assert window._task_model.task_at(window._task_model.index_for_task(task_id)) == env.tasks.get(
+        task_id
+    )
 
 
 @pytest.mark.parametrize("notification", ["task", "hourly"])
@@ -255,7 +261,9 @@ def test_nested_record_reuses_window_propagates_changes_and_refreshes_main(
     assert env.tasks.result_note(task_id) == "저장한 완료 요약"
     assert "저장한 완료 요약" in browser.detail.toPlainText()
     assert changed == [True]
-    assert window._task_model.task_at(window._task_model.index_for_task(task_id)) == env.tasks.get(task_id)
+    assert window._task_model.task_at(window._task_model.index_for_task(task_id)) == env.tasks.get(
+        task_id
+    )
     record.reject()
     assert not browser._record_dialogs
     qtbot.waitUntil(lambda: not isValid(record))
@@ -281,7 +289,7 @@ def test_nested_record_import_is_canceled_before_owner_closes(
             if cancel_requested():
                 finished.set()
                 raise AttachmentCanceledError("취소")
-            Event().wait(.01)
+            Event().wait(0.01)
         raise AssertionError("Owner shutdown did not cancel file import")
 
     monkeypatch.setattr(env.attachments, "attach", import_file)
@@ -314,7 +322,7 @@ def test_task_reminder_is_clickable_while_record_copies_attachment(
             if cancel_requested():
                 finished.set()
                 raise AttachmentCanceledError("취소")
-            Event().wait(.01)
+            Event().wait(0.01)
         raise AssertionError("File import was not canceled")
 
     monkeypatch.setattr(env.attachments, "attach", import_file)

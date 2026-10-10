@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
 from PySide6.QtCore import Qt
 from pytestqt.qtbot import QtBot
 
@@ -11,8 +12,10 @@ from officeflow.domain.enums import TaskPriority
 from officeflow.domain.task import Task
 from officeflow.presentation.month_calendar import (
     CalendarPage,
+    CalendarSegment,
     MonthCalendarWidget,
     build_calendar_segments,
+    calendar_segment_text,
     month_grid_start,
     task_date_span,
     tasks_for_date,
@@ -25,6 +28,27 @@ def _task(title: str, start: datetime, end: datetime | None, task_id: int = 1) -
         id=task_id,
     )
     return ScheduledTask(task, start, end)
+
+
+@pytest.mark.parametrize("attached", [False, True])
+@pytest.mark.parametrize("repeated", [False, True])
+@pytest.mark.parametrize("continued", [False, True])
+def test_calendar_bar_keeps_attachment_after_task_title(attached, repeated, continued):
+    scheduled = _task("계약 검토", datetime(2026, 10, 10, tzinfo=UTC), None)
+    scheduled = replace(
+        scheduled,
+        task=replace(scheduled.task, has_attachments=attached),
+        occurrence_start=scheduled.starts_at if repeated else None,
+    )
+    segment = CalendarSegment(scheduled, 0, 0, 0, 0, continued, continued)
+    expected = (
+        ("반복 · " if repeated else "")
+        + ("◀ " if continued else "")
+        + "계약 검토"
+        + (" · 첨부" if attached else "")
+        + (" ▶" if continued else "")
+    )
+    assert calendar_segment_text(segment) == expected
 
 
 def test_month_grid_is_sunday_first_and_always_covers_six_weeks() -> None:
@@ -160,7 +184,8 @@ def test_calendar_day_list_marks_attachment_and_supports_context_menu(qtbot: QtB
     page.set_tasks((scheduled,))
     page.show()
 
-    assert "첨부" in page.day_list.item(0).text()
+    label = page.day_list.item(0).text()
+    assert label.index("계약 검토") < label.index("첨부")
     item_rect = page.day_list.visualItemRect(page.day_list.item(0))
     with qtbot.waitSignal(page.taskContextRequested) as blocker:
         page._show_day_item_context_menu(item_rect.center())
@@ -192,7 +217,8 @@ def test_dense_calendar_uses_exact_count_summary(qtbot: QtBot) -> None:
 
 def test_short_calendar_uses_counts_without_bars_spilling_into_next_row(qtbot: QtBot) -> None:
     scheduled = _task(
-        "작은 달력의 일정", datetime(2026, 9, 16, 15, tzinfo=UTC),
+        "작은 달력의 일정",
+        datetime(2026, 9, 16, 15, tzinfo=UTC),
         datetime(2026, 9, 17, 15, tzinfo=UTC),
     )
     calendar = MonthCalendarWidget(timezone="Asia/Seoul")

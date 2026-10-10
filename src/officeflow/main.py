@@ -20,9 +20,11 @@ from officeflow.application.attachments import AttachmentService
 from officeflow.application.document_lifecycle import DocumentLifecycle
 from officeflow.application.exporting import ExportService
 from officeflow.application.file_operations import FileOperationCoordinator
+from officeflow.application.folder_links import FolderLinkService
 from officeflow.application.records import RecordService
 from officeflow.application.reminder_preview import ReminderPreviewService
 from officeflow.application.reminders import ReminderService
+from officeflow.application.task_archive import TaskArchiveService
 from officeflow.application.tasks import TaskService
 from officeflow.bootstrap.diagnostics import RuntimeDiagnostics
 from officeflow.bootstrap.logging import configure_logging
@@ -49,6 +51,7 @@ from officeflow.infrastructure.database.attachment_search_repository import (
     SqlAlchemyAttachmentSearchRepository,
 )
 from officeflow.infrastructure.database.document_catalog import DocumentCatalog
+from officeflow.infrastructure.database.folder_link_repository import SqlAlchemyFolderLinkRepository
 from officeflow.infrastructure.database.migrate import (
     needs_database_upgrade,
     upgrade_database,
@@ -56,10 +59,12 @@ from officeflow.infrastructure.database.migrate import (
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
+from officeflow.infrastructure.database.task_archive_repository import SqlAlchemyArchiveRepository
 from officeflow.infrastructure.database.task_repository import SqlAlchemyTaskRepository
 from officeflow.infrastructure.database.task_saving import task_save_service
 from officeflow.infrastructure.exports.calendar import ICalendarTaskExporter
 from officeflow.infrastructure.exports.excel import ExcelTaskExporter
+from officeflow.infrastructure.exports.task_archive import HtmlExcelArchiveWriter
 from officeflow.infrastructure.settings.store import JsonSettingsStore
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.database_upgrade import DatabaseUpgradeDialog
@@ -176,6 +181,13 @@ def build_application(
                 on_clean_shutdown()
 
     external_storage = ExternalExportStorage(paths.root)
+    attachment_exports = AttachmentExportService(attachment_service, external_storage)
+    folder_links = FolderLinkService(
+        SqlAlchemyFolderLinkRepository(sessions), (paths.root, paths.attachment_dir)
+    )
+    task_archives = TaskArchiveService(
+        SqlAlchemyArchiveRepository(sessions), attachment_exports, HtmlExcelArchiveWriter
+    )
 
     def recover_internal(canceled: Callable[[], bool]) -> InternalRecoveryReport:
         nonlocal legacy_pending
@@ -199,7 +211,9 @@ def build_application(
         ),
         record_service=record_service,
         attachment_service=attachment_service,
-        attachment_export_service=AttachmentExportService(attachment_service, external_storage),
+        attachment_export_service=attachment_exports,
+        folder_link_service=folder_links,
+        task_archive_service=task_archives,
         attachment_search_service=AttachmentSearchService(
             SqlAlchemyAttachmentSearchRepository(sessions)
         ),
