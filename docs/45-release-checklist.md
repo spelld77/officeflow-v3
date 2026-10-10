@@ -20,7 +20,7 @@
 - [x] EXE 새 프로필 실행 / 독립 설치 등록의 재설치·제거·자료 보존
 - [x] Python ZIP 새 추출·독립 runtime·진단·실행 / Windows ZIP 전체 구성·추출 실행
 - [x] 사용자 DB/첨부/백업/로그 제외·모든 산출물 크기·SHA-256 검증
-- [ ] 커밋·원격 main/태그·GitHub 새 릴리스와 서버 파일 검증
+- [x] 커밋·원격 main/태그·GitHub 새 릴리스와 서버 파일 검증
 
 ## 결과
 
@@ -80,7 +80,17 @@ Qt offscreen 자식 프로세스의 Windows 글꼴·밝은/어두운 palette·10
 
 ## 공개
 
-GitHub 공개는 위 로컬 검증 이후 진행한다. 실제 커밋·태그·6개 파일의 서버 검증 결과는 공개 후 기록한다.
+- 2026-10-10 12:45:53 KST에 [OfficeFlow 3.0.9](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.9)를 최신 정식 릴리스로 공개했다.
+  release ID `408611492`, draft/prerelease=false, 자산 6개다. 기존 3.0.8 릴리스는 변경하지 않았다.
+- 검증된 소스 커밋 `4dd5abb39e92fe9d8ab163e9b9a75f5dab7c5a8d`와 태그 `v3.0.9`를
+  원격 main/태그에 atomic push했다. annotated tag의 peeled commit이 위 소스 커밋과 일치함을 확인했다.
+- 초안 상태에서 서버 자산 6개의 이름·uploaded 상태·크기·digest SHA-256을 로컬 검증 결과와
+  자동 대조한 뒤 공개했다. 초안은 tag 조회 API에서 404여서 목록/릴리스 ID로 확인했다.
+- 공개된 Python ZIP/자체 체크섬을 `artifacts/release-3.0.9-download`로 내려받아
+  검증한 원본 ZIP과 일치함을 재확인했다. GitHub latest API에서도 v3.0.9와 공개 상태를 확인했다.
+- 원격 CI 실행 결과로 보고하지 않는다. 이번 품질 근거는 위 로컬 전체 검사와 배포 검증이다.
+- 공개 결과는 문서 전용 후속 커밋으로 main에 반영하며 태그/배포물은 검증된 소스 커밋에 유지한다.
+  실사용 설치나 Python 실행 폴더의 교체는 하지 않았다. 다운로드 후 사용자가 업데이트한다.
 
 ## 안전과 미검증 환경
 
