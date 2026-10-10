@@ -352,7 +352,9 @@ def test_rename_memo_search_export_and_cas_keep_initial_name_path_and_bytes(tmp_
         assert saved.metadata_revision == 2
         search = AttachmentSearchService(SqlAlchemyAttachmentSearchRepository(env.sessions))
         assert len(search.search_page(AttachmentSearchQuery(search="현재보고서")).items) == 1
-        assert not search.search_page(AttachmentSearchQuery(search="옛이름")).items
+        # Phase 2 deliberately retains initial-name and attachment-memo discovery.
+        assert len(search.search_page(AttachmentSearchQuery(search="옛이름")).items) == 1
+        assert len(search.search_page(AttachmentSearchQuery(search="업무일지 아님")).items) == 1
         folder = tmp_path / "exported"
         folder.mkdir()
         export = AttachmentExportService(

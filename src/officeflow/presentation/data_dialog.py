@@ -55,8 +55,11 @@ from officeflow.infrastructure.backup import (
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_recovery import AttachmentRecoveryDialog
 from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.backup_files_dialog import BackupFilesDialog
 from officeflow.presentation.calendar_export_dialog import CalendarExportDialog
+from officeflow.presentation.data_inspection import DataInspectionPanel
 from officeflow.presentation.dates import format_date
+from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +71,7 @@ class AttachmentCleanupInventory:
 class DataManagementDialog(QDialog):
     quitRequested = Signal()
     exportDirectoryChanged = Signal(str)
+    backupHealthChanged = Signal()
 
     def __init__(
         self,
@@ -83,9 +87,11 @@ class DataManagementDialog(QDialog):
         automatic_backup_enabled: bool = True,
         automatic_backup_interval_hours: int = 24,
         automatic_backup_keep: int = 10,
+        timezone: str = "Asia/Seoul",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setStyleSheet(LIGHT_STYLESHEET)
         self._export_service = export_service
         self._backup_manager = backup_manager
         self._query = query
@@ -108,6 +114,7 @@ class DataManagementDialog(QDialog):
         self._automatic_backup_enabled = automatic_backup_enabled
         self._automatic_backup_interval_hours = automatic_backup_interval_hours
         self._automatic_backup_keep = automatic_backup_keep
+        self._timezone = timezone
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
         self._owner_shutting_down = False
@@ -116,6 +123,7 @@ class DataManagementDialog(QDialog):
         self._cleanup_loaded = False
         self._refresh_usage_after_finish = False
         self._tool_action_buttons: list[QPushButton] = []
+        self._backup_file_dialogs: list[BackupFilesDialog] = []
 
         self.setWindowTitle("데이터 관리")
         self.setModal(True)
@@ -139,6 +147,22 @@ class DataManagementDialog(QDialog):
         if self._attachment_service is not None:
             self._cleanup_tab_index = self.tabs.addTab(self._build_cleanup_tab(), "첨부 정리")
         self._tools_tab_index = self.tabs.addTab(self._build_tools_tab(), "내보내기 · 백업")
+        inspection_tab = QWidget()
+        inspection_layout = QVBoxLayout(inspection_tab)
+        self.inspection_panel = DataInspectionPanel(
+            backup_manager.inspection_service, self, timezone=timezone
+        )
+        inspection_scroll = QScrollArea()
+        inspection_scroll.setObjectName("dataInspectionScroll")
+        inspection_scroll.setWidgetResizable(True)
+        inspection_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inspection_scroll.viewport().setStyleSheet("background:#F5F7FA;color:#172033;")
+        inspection_scroll.setWidget(self.inspection_panel)
+        inspection_layout.addWidget(inspection_scroll, 1)
+        diagnostic_button = QPushButton("진단 폴더 열기")
+        diagnostic_button.clicked.connect(self._open_diagnostic_folder)
+        inspection_layout.addWidget(diagnostic_button)
+        self._inspection_tab_index = self.tabs.addTab(inspection_tab, "자료 검사")
         self.tabs.currentChanged.connect(self._tab_changed)
         root.addWidget(self.tabs, 1)
 
@@ -150,6 +174,69 @@ class DataManagementDialog(QDialog):
         close_button.clicked.connect(self.accept)
         root.addWidget(close_button)
         QTimer.singleShot(0, self._refresh_usage)
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(2_000)
+        self._health_timer.timeout.connect(self._refresh_backup_health)
+        self._health_timer.start()
+        self._refresh_backup_health()
+
+    def _open_diagnostic_folder(self) -> None:
+        directory = self._backup_manager.diagnostic_directory
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.status_label.setText("진단 폴더에 접근하지 못했습니다. 파일 권한을 확인하세요.")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+            self.status_label.setText("진단 폴더를 열지 못했습니다.")
+
+    def _refresh_backup_health(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        health = self._backup_manager.health.snapshot()
+        labels = {
+            "running": "진행 중",
+            "success": "성공",
+            "failed": "실패",
+            "canceled": "취소",
+            "unconfirmed": "완료 미확인",
+        }
+
+        def local_time(value: str) -> str:
+            if not value:
+                return "기록 없음"
+            return (
+                datetime.fromisoformat(value)
+                .astimezone(ZoneInfo(self._timezone))
+                .strftime("%Y-%m-%d %H:%M")
+            )
+
+        lines = [health.recording_warning] if health.recording_warning else []
+        for row in health.attempts:
+            name = "자동" if row.reason == "automatic" else "수동"
+            lines.append(
+                f"{name} 최근 성공: {local_time(row.last_success_at)}\n최근 시도: {local_time(row.attempted_at)} · {labels[row.status]}"
+                + (f"\n{row.error}" if row.error else "")
+                + (
+                    " · 안내 확인함"
+                    if row.acknowledged and row.status in {"failed", "unconfirmed"}
+                    else ""
+                )
+            )
+            if row.last_failure_at:
+                lines.append(
+                    f"최근 실패: {local_time(row.last_failure_at)}\n{row.last_failure_error}"
+                )
+        self.backup_health_label.setText(
+            "\n\n".join(lines) or "백업 시도 기록이 없습니다. 아래 백업 파일 현황도 확인하세요."
+        )
+        self.backup_health_ack_button.setEnabled(health.attention)
+
+    def _acknowledge_backup_health(self) -> None:
+        self._backup_manager.health.acknowledge()
+        self._refresh_backup_health()
+        self.backupHealthChanged.emit()
 
     def _build_usage_tab(self) -> QWidget:
         tab = QWidget()
@@ -601,6 +688,7 @@ class DataManagementDialog(QDialog):
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(10, 14, 10, 10)
         layout.setSpacing(10)
+        layout.addWidget(self._build_backup_section())
         layout.addWidget(
             self._section(
                 "내보내기",
@@ -608,7 +696,6 @@ class DataManagementDialog(QDialog):
                 (("현재 목록 Excel", self._export_excel), ("일정 선택 ICS", self._export_ics)),
             )
         )
-        layout.addWidget(self._build_backup_section())
         layout.addStretch()
         scroll.setWidget(content)
         tab_layout.addWidget(scroll)
@@ -636,10 +723,19 @@ class DataManagementDialog(QDialog):
         self.backup_inventory_label.setObjectName("mutedText")
         self.backup_inventory_label.setWordWrap(True)
         layout.addWidget(self.backup_inventory_label)
+        self.backup_health_label = QLabel()
+        self.backup_health_label.setObjectName("backupHealthDetails")
+        self.backup_health_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.backup_health_label.setWordWrap(True)
+        layout.addWidget(self.backup_health_label)
+        self.backup_health_ack_button = QPushButton("백업 안내 확인")
+        self.backup_health_ack_button.clicked.connect(self._acknowledge_backup_health)
+        layout.addWidget(self.backup_health_ack_button, alignment=Qt.AlignmentFlag.AlignLeft)
 
         primary_actions = QHBoxLayout()
         primary_actions.addWidget(self._tool_button("지금 백업", self._create_backup))
         primary_actions.addWidget(self._tool_button("백업에서 복원", self._stage_restore))
+        layout.addWidget(self._tool_button("백업 파일 꺼내기…", self._open_backup_files))
         primary_actions.addStretch()
         layout.addLayout(primary_actions)
 
@@ -933,6 +1029,27 @@ class DataManagementDialog(QDialog):
         removed = result if isinstance(result, tuple) else ()
         return f"오래된 수동 백업 {len(removed):,}개를 삭제했습니다."
 
+    def _open_backup_files(self) -> None:
+        dialog = BackupFilesDialog(
+            self._backup_manager,
+            self,
+            directory=self._export_controller.directory if self._export_controller else None,
+        )
+        dialog.savedDirectory.connect(self.exportDirectoryChanged)
+        self._backup_file_dialogs.append(dialog)
+
+        def closed(_result: int) -> None:
+            if dialog in self._backup_file_dialogs:
+                self._backup_file_dialogs.remove(dialog)
+            dialog.deleteLater()
+
+        dialog.finished.connect(closed)
+        dialog.show()
+
+    def _close_backup_files(self) -> None:
+        for dialog in tuple(self._backup_file_dialogs):
+            dialog.reject()
+
     def _stage_restore(self) -> None:
         name, _ = QFileDialog.getOpenFileName(
             self, "OfficeFlow 백업 선택", "", "OfficeFlow 백업 (*.ofbackup)"
@@ -1025,6 +1142,8 @@ class DataManagementDialog(QDialog):
     def _operation_finished(self) -> None:
         if self._owner_shutting_down:
             return
+        self._refresh_backup_health()
+        self.backupHealthChanged.emit()
         if self._progress is not None:
             self._progress.close()
             self._progress.deleteLater()
@@ -1054,6 +1173,8 @@ class DataManagementDialog(QDialog):
         if not isinstance(result, BackupInfo):
             return "백업이 완료되었습니다."
         message = f"백업 완료: {result.path} (첨부파일 {result.attachment_count}개)"
+        if result.maintenance_warning:
+            message += f" · {result.maintenance_warning}"
         if result.missing_attachments:
             message += (
                 f" · 주의: 기존 누락 첨부 {len(result.missing_attachments)}개는 백업에 없습니다."
@@ -1073,12 +1194,15 @@ class DataManagementDialog(QDialog):
         return message
 
     def reject(self) -> None:
+        self._close_backup_files()
         from officeflow.presentation.document_actions import stop_file_actions
 
         stop_file_actions(self)
         if self._worker is not None:
             self._worker.cancel()
             return
+        self.inspection_panel.shutdown()
+        self._health_timer.stop()
         if self._export_controller:
             self._export_controller.shutdown()
         for dialog in self.findChildren(AttachmentRecoveryDialog):
@@ -1086,11 +1210,14 @@ class DataManagementDialog(QDialog):
         super().reject()
 
     def shutdown(self) -> None:
+        self._close_backup_files()
         from officeflow.presentation.document_actions import stop_file_actions
 
         stop_file_actions(self)
         """Wait for a modeless cleanup operation before its owner closes."""
         self._owner_shutting_down = True
+        self._health_timer.stop()
+        self.inspection_panel.shutdown()
         for dialog in self.findChildren(AttachmentRecoveryDialog):
             dialog.shutdown()
         if self._export_controller:
@@ -1109,12 +1236,15 @@ class DataManagementDialog(QDialog):
         super().reject()
 
     def accept(self) -> None:
+        self._close_backup_files()
         from officeflow.presentation.document_actions import stop_file_actions
 
         stop_file_actions(self)
         if self._worker is not None:
             self._worker.cancel()
             return
+        self.inspection_panel.shutdown()
+        self._health_timer.stop()
         if self._export_controller:
             self._export_controller.shutdown()
         super().accept()

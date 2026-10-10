@@ -24,6 +24,7 @@ from officeflow.application.records import RecordService
 from officeflow.application.reminder_preview import ReminderPreviewService
 from officeflow.application.reminders import ReminderService
 from officeflow.application.tasks import TaskService
+from officeflow.bootstrap.diagnostics import RuntimeDiagnostics
 from officeflow.bootstrap.logging import configure_logging
 from officeflow.bootstrap.paths import AppPaths
 from officeflow.bootstrap.run_state import RunStateTracker
@@ -307,6 +308,10 @@ def main() -> int:
     if not coordinator.acquire():
         return 0 if coordinator.send_message(command) else 1
 
+    configure_logging(paths.log_dir)
+    diagnostics = RuntimeDiagnostics(paths.log_dir)
+    diagnostics.install()
+
     run_state = RunStateTracker(paths.running_marker_file)
     previous_unclean_shutdown = run_state.begin()
 
@@ -327,17 +332,23 @@ def main() -> int:
         QMessageBox.critical(None, "OfficeFlow 시작 실패", message)
         run_state.mark_clean()
         coordinator.close()
+        diagnostics.close()
         return 1
+    diagnostics.notify = window.diagnosticError.emit
     coordinator.messageReceived.connect(window.handle_external_command)
     app.aboutToQuit.connect(window.shutdown)
     app.aboutToQuit.connect(coordinator.close)
+    app.aboutToQuit.connect(diagnostics.close)
 
     background = "--background" in arguments
     if not background or not window.tray_available:
         window.show()
     if command == "quick-add":
         QTimer.singleShot(0, lambda: window.handle_external_command("quick-add"))
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        diagnostics.close()
 
 
 def _run_smoke_test(arguments: list[str]) -> int:

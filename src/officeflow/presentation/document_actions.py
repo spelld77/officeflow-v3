@@ -622,6 +622,19 @@ class DocumentBrowser(QDialog):
                 self.list.setCurrentRow(index)
                 break
 
+    def focus_version(self, identity: int) -> None:
+        """Jump to a search hit without loading earlier pages into the UI."""
+        entry = self.lifecycle.catalog.get("version", identity)
+        if entry.task_id != self.task_id:
+            raise ValueError("다른 업무의 보관본입니다.")
+        self.kind.setCurrentIndex(0)
+        self.cursors = [None, identity + 1]
+        self.refresh()
+        for index in range(self.list.count()):
+            if self.list.item(index).data(Qt.ItemDataRole.UserRole) == ("version", identity):
+                self.list.setCurrentRow(index)
+                break
+
     def next(self) -> None:
         if self.has_next and self.entries:
             self.cursors.append(min(entry.id for entry in self.entries.values()))

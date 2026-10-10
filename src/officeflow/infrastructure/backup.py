@@ -19,6 +19,7 @@ from typing import Any
 from alembic.script import ScriptDirectory
 
 from officeflow.application.attachments import AttachmentOperationError
+from officeflow.application.data_inspection import DataInspectionService
 from officeflow.application.file_operations import (
     FileInUseError,
     FileJobCanceledError,
@@ -99,6 +100,7 @@ class BackupInfo:
     table_counts: dict[str, int]
     attachment_count: int
     missing_attachments: tuple[str, ...] = ()
+    maintenance_warning: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +172,24 @@ class BackupManager:
         self._paths = paths
         self._coordinator = coordinator or attachment_coordinator(paths.attachment_dir)
         self.restore_warnings: tuple[str, ...] = ()
+        from officeflow.infrastructure.backup_health import BackupHealthStore
+
+        self.health = BackupHealthStore(paths.root / "backup-health.json")
+
+    @property
+    def diagnostic_directory(self) -> Path:
+        return self._paths.log_dir
+
+    def inspection_service(self) -> DataInspectionService:
+        from officeflow.infrastructure.data_inspection import (
+            ManagedInspectionReader,
+            SqliteInspectionRepository,
+        )
+
+        return DataInspectionService(
+            SqliteInspectionRepository(self._paths.database_file),
+            ManagedInspectionReader(self._paths.attachment_dir, self._coordinator),
+        )
 
     def recover_attachment_deletions(self) -> tuple[str, ...]:
         try:
@@ -535,12 +555,29 @@ class BackupManager:
         keep: int | None = None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> BackupInfo:
+        from officeflow.infrastructure.backup_health import backup_error_summary
+
+        started = False
         try:
             with self._coordinator.job(cancel_requested):
-                return self._create_backup(
-                    reason=reason, keep=keep, cancel_requested=cancel_requested
-                )
+                self.health.begin(reason)
+                started = True
+                try:
+                    result = self._create_backup(
+                        reason=reason, keep=keep, cancel_requested=cancel_requested
+                    )
+                except (BackupCanceledError, FileJobCanceledError):
+                    self.health.finish(reason, "canceled")
+                    raise
+                except Exception as error:
+                    self.health.finish(reason, "failed", backup_error_summary(error))
+                    raise
+                else:
+                    self.health.finish(reason, "success", result.maintenance_warning)
+                    return result
         except FileJobCanceledError as error:
+            if not started:
+                self.health.waiting_canceled(reason)
             raise BackupCanceledError(str(error)) from error
 
     def _create_backup(
@@ -678,8 +715,14 @@ class BackupManager:
             raise BackupError(f"백업을 만들지 못했습니다: {error}") from error
         finally:
             temporary_archive.unlink(missing_ok=True)
+        maintenance_warning = ""
         if safe_reason == "automatic" and keep is not None:
-            self.prune_automatic_backups(keep)
+            try:
+                self.prune_automatic_backups(keep)
+            except OSError:
+                # Publication/verification succeeded; retention is a separate outcome.
+                maintenance_warning = "새 백업은 성공했지만 오래된 자동 백업을 정리하지 못했습니다. 백업 폴더 접근 상태를 확인하세요."
+                logger.warning("Automatic backup retention failed after successful publication")
         return BackupInfo(
             path=target,
             created_at=created_at,
@@ -687,6 +730,7 @@ class BackupManager:
             table_counts=table_counts,
             attachment_count=len(attachments),
             missing_attachments=missing,
+            maintenance_warning=maintenance_warning,
         )
 
     def _estimated_backup_source_bytes(

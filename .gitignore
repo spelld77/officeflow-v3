@@ -33,6 +33,7 @@ Thumbs.db
 backups/
 logs/
 settings.json
+backup-health.json
 migration-reports/
 
 # Local environment

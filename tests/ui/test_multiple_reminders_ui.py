@@ -4,7 +4,8 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QMessageBox
 
-from officeflow.application.reminder_preview import ReminderPreviewItem, ReminderPreviewService
+from officeflow.application.reminder_groups import ReminderGroup
+from officeflow.application.reminder_preview import ReminderPreviewService
 from officeflow.application.reminders import ReminderService
 from officeflow.application.task_saving import ReminderEdit
 from officeflow.application.tasks import TaskDraft
@@ -65,8 +66,8 @@ def test_today_reminders_independent_of_task_filters_and_overflow(live_window, q
     qtbot.wait(80)
     assert window._task_model.total_task_count == 0
     assert "총 5건" in window._today_reminders.label.text()
-    assert window._today_reminders.list.count() == 3
-    assert window._today_reminders.more.text() == "2건 더 보기"
+    assert window._today_reminders.list.count() == 1
+    assert window._today_reminders.more.text() == "전체 보기"
     window._search.setText("없는 검색어")
     window._refresh_tasks()
     qtbot.waitUntil(lambda: window._preview_controller._thread is None, timeout=5000)
@@ -85,9 +86,9 @@ def test_calendar_alarm_dates_and_underlying_records(live_window, qtbot):
     day = now.astimezone(ZoneInfo("Asia/Seoul")).date()
     page._set_month_and_date(day)
     qtbot.waitUntil(lambda: page.calendar._alarm_counts.get(day) == 5, timeout=5000)
-    assert page.day_list.count() == 5
+    assert page.day_list.count() == 1
     data = page.day_list.item(0).data(Qt.ItemDataRole.UserRole)
-    assert isinstance(data, ReminderPreviewItem)
+    assert isinstance(data, ReminderGroup) and len(data.items) == 5
     page.day_list.setCurrentRow(0)
     assert window._selected_task_id == task.id
     page._on_day_item_activated(page.day_list.item(0))
@@ -379,11 +380,11 @@ def test_calendar_alarm_count_selects_and_scrolls_to_pending_alarm(live_window, 
     page = window._calendar_page
     day = now.astimezone(ZoneInfo("Asia/Seoul")).date()
     page._set_month_and_date(day)
-    qtbot.waitUntil(lambda: page.day_list.count() == 13, timeout=5000)
+    qtbot.waitUntil(lambda: page.day_list.count() == 9, timeout=5000)
     page.calendar.alarmRequested.emit(day)
     qtbot.waitUntil(
         lambda: isinstance(
-            page.day_list.currentItem().data(Qt.ItemDataRole.UserRole), ReminderPreviewItem
+            page.day_list.currentItem().data(Qt.ItemDataRole.UserRole), ReminderGroup
         ),
         timeout=5000,
     )

@@ -63,7 +63,7 @@ def test_help_button_opens_packaged_user_guide(
     window._help_button.click()
 
     assert opened == [True]
-    assert window._version_label.text() == "OfficeFlow 3.0.8"
+    assert window._version_label.text() == "OfficeFlow 3.0.9"
 
 
 class FakeTrayIcon:

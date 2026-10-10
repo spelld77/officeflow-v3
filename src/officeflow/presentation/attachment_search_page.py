@@ -44,6 +44,7 @@ from officeflow.application.attachment_search import (
 from officeflow.domain.enums import TaskStatus
 from officeflow.presentation.background import finish_thread
 from officeflow.presentation.dates import date_with_weekday, format_date
+from officeflow.presentation.lookup_style import CHECKBOX_STYLE, SCROLLBAR_STYLE
 
 STATUS_LABELS = {
     TaskStatus.ACTIVE: "진행",
@@ -52,6 +53,8 @@ STATUS_LABELS = {
     TaskStatus.CANCELED: "취소",
     TaskStatus.ARCHIVED: "보관",
 }
+
+SOURCE_LABELS = {"attachment": "첨부", "version": "보관본", "snapshot_file": "중요 보관"}
 
 
 class SearchWorker(QThread):
@@ -104,7 +107,7 @@ class AttachmentSearchModel(QAbstractListModel):
         if role == Qt.ItemDataRole.UserRole:
             return hit
         if role == Qt.ItemDataRole.ToolTipRole:
-            return f"{hit.original_name}\n{hit.task_title}\n{STATUS_LABELS[hit.task_status]}"
+            return f"{SOURCE_LABELS[hit.source_kind]} · {hit.original_name}\n{hit.label}\n{hit.task_title}\n{hit.memo}\n{STATUS_LABELS[hit.task_status]}"
         return None
 
     def set_items(self, items: list[AttachmentSearchHit]) -> None:
@@ -144,7 +147,10 @@ class AttachmentSearchDelegate(QStyledItemDelegate):
             rect.adjusted(0, 0, 0, -rect.height() // 2),
             Qt.AlignmentFlag.AlignVCenter,
             option.fontMetrics.elidedText(
-                hit.original_name, Qt.TextElideMode.ElideRight, rect.width()
+                f"[{SOURCE_LABELS[hit.source_kind]}] {hit.original_name}"
+                + (f" · {hit.label}" if hit.label else ""),
+                Qt.TextElideMode.ElideRight,
+                rect.width(),
             ),
         )
         flags = [STATUS_LABELS[hit.task_status]]
@@ -159,7 +165,13 @@ class AttachmentSearchDelegate(QStyledItemDelegate):
             if hit.size_bytes < 1024**2
             else f"{hit.size_bytes / 1024**2:.1f} MB"
         )
-        meta = f"{hit.task_title} · {'/'.join(flags)} · {format_date(hit.created_at.astimezone(self._zone).date(), short=True)} 첨부 · {size} ({'최근 확인' if hit.size_observed else '첨부 당시'})"
+        moment = "등록" if hit.source_kind == "attachment" else "보관"
+        basis = (
+            ("최근 확인" if hit.size_observed else "첨부 당시")
+            if hit.source_kind == "attachment"
+            else "보관 기준"
+        )
+        meta = f"{hit.task_title} · {'/'.join(flags)} · {format_date(hit.created_at.astimezone(self._zone).date(), short=True)} {moment} · {size} ({basis})"
         painter.setPen(QColor("#58657D"))
         painter.drawText(
             rect.adjusted(0, rect.height() // 2, 0, 0),
@@ -194,7 +206,7 @@ class AttachmentSearchPageWidget(QFrame):
         self._has_more = False
         self._block_start = 0
         self._block_cursors: list[AttachmentCursor | None] = [None]
-        self._selected_id: int | None = None
+        self._selected_id: tuple[str, int] | None = None
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(250)
@@ -211,7 +223,7 @@ class AttachmentSearchPageWidget(QFrame):
         self.back_button.clicked.connect(self.backRequested)
         heading.addWidget(self.back_button)
         root.addLayout(heading)
-        self.scope_label = QLabel("전체 기간 · 완료/보관 포함 · 파일명만 검색")
+        self.scope_label = QLabel("전체 기간 · 첨부/보관 자료 · 이름·보관명·메모 검색")
         self.scope_label.setWordWrap(True)
         root.addWidget(self.scope_label)
         filters = QHBoxLayout()
@@ -239,7 +251,8 @@ class AttachmentSearchPageWidget(QFrame):
         conditions = QVBoxLayout(self.conditions)
         conditions.setContentsMargins(0, 0, 0, 0)
         dates = QHBoxLayout()
-        self.range_check = QCheckBox("첨부일")
+        self.range_check = QCheckBox("자료일")
+        self.range_check.setToolTip("첨부는 등록일, 보관 자료는 보관일 기준입니다.")
         dates.addWidget(self.range_check)
         self.date_from = QDateEdit(QDate.currentDate().addMonths(-1))
         self.date_to = QDateEdit(QDate.currentDate())
@@ -256,7 +269,18 @@ class AttachmentSearchPageWidget(QFrame):
         states.addWidget(self.detached_check)
         states.addStretch()
         conditions.addLayout(states)
+        self.source_combo = QComboBox()
+        for label, source_kind in (
+            ("자료: 전체", "all"),
+            ("현재 첨부", "attachment"),
+            ("보관본", "version"),
+            ("중요 보관 파일", "snapshot_file"),
+        ):
+            self.source_combo.addItem(label, source_kind)
+        self.source_combo.currentIndexChanged.connect(self._conditions_changed)
+        conditions.addWidget(self.source_combo)
         for check in (self.range_check, self.trash_check, self.detached_check):
+            check.setStyleSheet(CHECKBOX_STYLE)
             check.toggled.connect(self._conditions_changed)
         root.addWidget(self.conditions)
         self.conditions.hide()
@@ -267,6 +291,7 @@ class AttachmentSearchPageWidget(QFrame):
         root.addWidget(self.feedback)
         self.model = AttachmentSearchModel(self)
         self.list_view = QListView()
+        self.list_view.verticalScrollBar().setStyleSheet(SCROLLBAR_STYLE)
         self.list_view.setModel(self.model)
         self.list_view.setItemDelegate(AttachmentSearchDelegate(timezone, self.list_view))
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -319,13 +344,21 @@ class AttachmentSearchPageWidget(QFrame):
 
     def _selection_changed(self, _current: QModelIndex, _previous: QModelIndex) -> None:
         hit = self.selected_hit()
-        self._selected_id = hit.attachment_id if hit else None
+        self._selected_id = (hit.source_kind, hit.attachment_id) if hit else None
         self.selection_label.setText(
-            f"선택: {hit.original_name}" if hit else "파일을 선택해 주세요."
+            f"선택: {SOURCE_LABELS[hit.source_kind]} · {hit.original_name[:70]}"
+            if hit
+            else "파일을 선택해 주세요."
         )
         for button in (self.open_button, self.save_button, self.task_button, self.manage_button):
             button.setEnabled(hit is not None)
-        self.manage_button.setText("첨부 정리" if hit and hit.detached else "첨부 관리")
+        self.manage_button.setText(
+            "보관 자료"
+            if hit and hit.source_kind != "attachment"
+            else "첨부 정리"
+            if hit and hit.detached
+            else "첨부 관리"
+        )
 
     def activate(self, search: str, *, calendar: bool = False) -> None:
         self._active = False
@@ -344,6 +377,7 @@ class AttachmentSearchPageWidget(QFrame):
 
     def reset_conditions(self) -> None:
         self.kind_combo.setCurrentIndex(0)
+        self.source_combo.setCurrentIndex(0)
         for check in (self.range_check, self.trash_check, self.detached_check):
             check.setChecked(False)
         self.more_conditions.setChecked(False)
@@ -374,6 +408,7 @@ class AttachmentSearchPageWidget(QFrame):
                 self.trash_check.isChecked(),
                 self.detached_check.isChecked(),
                 self.kind_combo.currentIndex() != 0,
+                self.source_combo.currentIndex() != 0,
             )
         )
         self.more_conditions.setText(f"추가 조건 ({count})" if count else "추가 조건")
@@ -384,7 +419,8 @@ class AttachmentSearchPageWidget(QFrame):
         )
         self.scope_label.setText(
             scope
-            + " · 완료/보관 포함 · 파일명만 검색"
+            + " · 완료/보관 포함 · 이름·보관명·메모 검색"
+            + (" · " + self.source_combo.currentText() if self.source_combo.currentIndex() else "")
             + (" · 휴지통 포함" if self.trash_check.isChecked() else "")
             + (" · 정리 대기 포함" if self.detached_check.isChecked() else "")
         )
@@ -409,6 +445,7 @@ class AttachmentSearchPageWidget(QFrame):
             include_trash=self.trash_check.isChecked(),
             include_detached=self.detached_check.isChecked(),
             cursor=cursor,
+            source_kind=self.source_combo.currentData(),
         )
 
     def refresh(self) -> None:
@@ -479,7 +516,7 @@ class AttachmentSearchPageWidget(QFrame):
                 f"{label} · 결과가 없습니다. 검색어 또는 추가 조건을 확인해 주세요."
             )
         for row, hit in enumerate(items):
-            if hit.attachment_id == selected_id:
+            if (hit.source_kind, hit.attachment_id) == selected_id:
                 self.list_view.setCurrentIndex(self.model.index(row, 0))
                 break
 

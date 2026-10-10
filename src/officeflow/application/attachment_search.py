@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
+from officeflow.application.attachment_export import FileReference, FileReferenceKind
 from officeflow.domain.enums import TaskStatus
 
 
@@ -26,6 +27,7 @@ class AttachmentKind(StrEnum):
 class AttachmentCursor:
     created_at: datetime
     attachment_id: int
+    source_kind: str = "attachment"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +40,11 @@ class AttachmentSearchQuery:
     include_detached: bool = False
     cursor: AttachmentCursor | None = None
     limit: int = 50
+    source_kind: str = "all"
 
     def __post_init__(self) -> None:
+        if self.source_kind not in {"all", "attachment", "version", "snapshot_file"}:
+            raise ValueError("자료 범위를 확인하세요.")
         if not 1 <= self.limit <= 500:
             raise ValueError("한 번에 조회할 파일은 1~500개여야 합니다.")
         if self.search.strip() and len(self.search.strip()) < 2:
@@ -68,6 +73,13 @@ class AttachmentSearchHit:
     detached: bool
     missing: bool
     size_observed: bool = False
+    source_kind: str = "attachment"
+    label: str = ""
+    memo: str = ""
+
+    @property
+    def reference(self) -> FileReference:
+        return FileReference(FileReferenceKind(self.source_kind), attachment_id=self.attachment_id)
 
 
 @dataclass(frozen=True, slots=True)

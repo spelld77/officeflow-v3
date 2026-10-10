@@ -330,7 +330,8 @@ def test_old_database_backfill_backup_rename_and_delete_triggers(tmp_path: Path)
                 text("UPDATE attachments SET display_name='새보고서.pdf' WHERE id=:id"),
                 {"id": item.id},
             )
-        assert not env.search.search_page(AttachmentSearchQuery(search="견적")).items
+        # Phase 2 also searches the retained initial import name after display rename.
+        assert env.search.search_page(AttachmentSearchQuery(search="견적")).items
         assert env.search.search_page(AttachmentSearchQuery(search="보고서")).items
         env.tasks.move_to_trash(task.id)
         env.tasks.delete_permanently(task.id)

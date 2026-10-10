@@ -78,6 +78,16 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "src/officeflow/presentation/reminder_preview.py",
             "src/officeflow/presentation/dates.py",
             "src/officeflow/infrastructure/attachments/coordination.py",
+            "src/officeflow/application/data_inspection.py",
+            "src/officeflow/application/reminder_groups.py",
+            "src/officeflow/bootstrap/diagnostics.py",
+            "src/officeflow/infrastructure/backup_health.py",
+            "src/officeflow/infrastructure/backup_files.py",
+            "src/officeflow/infrastructure/data_inspection.py",
+            "src/officeflow/presentation/backup_files_dialog.py",
+            "src/officeflow/presentation/data_inspection.py",
+            "src/officeflow/presentation/lookup_style.py",
+            "src/officeflow/presentation/reminder_groups.py",
         )
         if any(f"{root_name}/{name}" not in names for name in required):
             raise ValueError("Required runtime file missing")

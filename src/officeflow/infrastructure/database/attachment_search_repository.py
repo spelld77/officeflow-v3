@@ -5,8 +5,9 @@ from collections.abc import Callable
 from time import monotonic
 from typing import cast
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal, or_, select, union_all
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.sql.selectable import Subquery
 
 from officeflow.application.attachment_search import (
     AttachmentCursor,
@@ -17,8 +18,24 @@ from officeflow.application.attachment_search import (
     AttachmentSearchQuery,
 )
 from officeflow.domain.enums import TaskStatus
-from officeflow.infrastructure.database.models import AttachmentRecord, TaskRecord
-from officeflow.infrastructure.database.search import attachment_name_predicate
+from officeflow.infrastructure.database.models import (
+    AttachmentRecord as A,
+)
+from officeflow.infrastructure.database.models import (
+    AttachmentVersionRecord as V,
+)
+from officeflow.infrastructure.database.models import (
+    FileAssetRecord as F,
+)
+from officeflow.infrastructure.database.models import (
+    SnapshotFileRecord as S,
+)
+from officeflow.infrastructure.database.models import (
+    TaskRecord as T,
+)
+from officeflow.infrastructure.database.models import (
+    TaskSnapshotRecord as P,
+)
 from officeflow.infrastructure.database.session import SessionFactory
 
 EXTENSIONS = {
@@ -27,6 +44,68 @@ EXTENSIONS = {
     AttachmentKind.WORD: (".doc", ".docx", ".docm", ".rtf"),
     AttachmentKind.IMAGE: (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"),
 }
+
+
+def document_search_rows() -> Subquery:
+    """Logical IDs stay separate even when they share a frozen asset."""
+    current = (
+        select(
+            A.id.label("id"),
+            A.task_id,
+            A.display_name.label("name"),
+            A.original_name,
+            func.coalesce(F.fixed_size_bytes, F.observed_size_bytes, A.size_bytes).label(
+                "size_bytes"
+            ),
+            F.observed_at,
+            A.created_at,
+            F.missing_at,
+            A.detached_at,
+            literal("attachment").label("source_kind"),
+            literal("").label("label"),
+            A.memo,
+        )
+        .join(F, A.asset_id == F.id)
+        .where(F.state == "active")
+    )
+    versions = (
+        select(
+            V.id,
+            V.task_id,
+            V.original_name,
+            V.original_name,
+            F.fixed_size_bytes,
+            F.observed_at,
+            V.created_at,
+            F.missing_at,
+            literal(None),
+            literal("version"),
+            V.label,
+            V.memo,
+        )
+        .join(F, V.asset_id == F.id)
+        .where(F.state == "active")
+    )
+    snapshots = (
+        select(
+            S.id,
+            P.task_id,
+            S.name,
+            S.original_name,
+            S.fixed_size_bytes,
+            F.observed_at,
+            P.captured_at,
+            F.missing_at,
+            literal(None),
+            literal("snapshot_file"),
+            P.label,
+            S.memo,
+        )
+        .join(P, S.snapshot_id == P.id)
+        .join(F, S.asset_id == F.id)
+        .where(F.state == "active")
+    )
+    return union_all(current, versions, snapshots).subquery()
 
 
 class SqlAlchemyAttachmentSearchRepository:
@@ -49,31 +128,40 @@ class SqlAlchemyAttachmentSearchRepository:
 
         if interrupted():
             raise AttachmentSearchInterrupted("검색이 취소되었거나 시간이 초과되었습니다.")
+        rows_source = document_search_rows()
+        c = rows_source.c
         statement = select(
-            AttachmentRecord.id,
-            AttachmentRecord.task_id,
-            AttachmentRecord.display_name.label("original_name"),
-            func.coalesce(AttachmentRecord.observed_size_bytes, AttachmentRecord.size_bytes).label(
-                "size_bytes"
-            ),
-            AttachmentRecord.observed_at,
-            AttachmentRecord.created_at,
-            AttachmentRecord.missing_at,
-            AttachmentRecord.detached_at,
-            TaskRecord.title,
-            TaskRecord.status,
-            TaskRecord.deleted_at,
-        ).join(TaskRecord, AttachmentRecord.task_id == TaskRecord.id)
+            *[column for column in c if column.key != "memo"],
+            func.substr(c.memo, 1, 200).label("memo"),
+            T.title,
+            T.status,
+            T.deleted_at,
+        ).join(T, c.task_id == T.id)
         if not query.include_trash:
-            statement = statement.where(TaskRecord.deleted_at.is_(None))
+            statement = statement.where(T.deleted_at.is_(None))
         if not query.include_detached:
-            statement = statement.where(AttachmentRecord.detached_at.is_(None))
+            statement = statement.where(c.detached_at.is_(None))
+        if query.source_kind != "all":
+            statement = statement.where(c.source_kind == query.source_kind)
         if query.search.strip():
-            statement = statement.where(attachment_name_predicate(query.search))
+            # autoescape keeps SQL wildcard characters literal; values are bound.
+            statement = statement.where(
+                and_(
+                    *(
+                        or_(
+                            *(
+                                column.contains(term, autoescape=True)
+                                for column in (c.name, c.original_name, c.label, c.memo)
+                            )
+                        )
+                        for term in query.search.strip().split()
+                    )
+                )
+            )
         if query.attached_after is not None:
-            statement = statement.where(AttachmentRecord.created_at >= query.attached_after)
+            statement = statement.where(c.created_at >= query.attached_after)
         if query.attached_before is not None:
-            statement = statement.where(AttachmentRecord.created_at < query.attached_before)
+            statement = statement.where(c.created_at < query.attached_before)
         if query.kind is not AttachmentKind.ALL:
             suffixes = (
                 tuple(suffix for group in EXTENSIONS.values() for suffix in group)
@@ -81,24 +169,24 @@ class SqlAlchemyAttachmentSearchRepository:
                 else EXTENSIONS[query.kind]
             )
             matches = or_(
-                *(
-                    func.substr(func.lower(AttachmentRecord.display_name), -len(suffix)) == suffix
-                    for suffix in suffixes
-                )
+                *(func.substr(func.lower(c.name), -len(suffix)) == suffix for suffix in suffixes)
             )
             statement = statement.where(~matches if query.kind is AttachmentKind.OTHER else matches)
         if query.cursor is not None:
+            cursor = query.cursor
             statement = statement.where(
                 or_(
-                    AttachmentRecord.created_at < query.cursor.created_at,
+                    c.created_at < cursor.created_at,
+                    and_(c.created_at == cursor.created_at, c.source_kind < cursor.source_kind),
                     and_(
-                        AttachmentRecord.created_at == query.cursor.created_at,
-                        AttachmentRecord.id < query.cursor.attachment_id,
+                        c.created_at == cursor.created_at,
+                        c.source_kind == cursor.source_kind,
+                        c.id < cursor.attachment_id,
                     ),
                 )
             )
         statement = statement.order_by(
-            AttachmentRecord.created_at.desc(), AttachmentRecord.id.desc()
+            c.created_at.desc(), c.source_kind.desc(), c.id.desc()
         ).limit(query.limit + 1)
         with self._sessions.transaction() as session:
             connection = cast(sqlite3.Connection, session.connection().connection.driver_connection)
@@ -106,13 +194,11 @@ class SqlAlchemyAttachmentSearchRepository:
             try:
                 rows = session.execute(statement).all()
                 if interrupted():
-                    raise AttachmentSearchInterrupted(
-                        "검색이 완료되지 않았습니다. 검색어를 더 구체적으로 입력해 주세요."
-                    )
+                    raise AttachmentSearchInterrupted("검색 조건을 더 구체적으로 입력해 주세요.")
             except OperationalError as error:
                 if interrupted():
                     raise AttachmentSearchInterrupted(
-                        "검색이 완료되지 않았습니다. 검색어를 더 구체적으로 입력해 주세요."
+                        "검색 조건을 더 구체적으로 입력해 주세요."
                     ) from error
                 raise
             finally:
@@ -121,8 +207,8 @@ class SqlAlchemyAttachmentSearchRepository:
             AttachmentSearchHit(
                 attachment_id=row.id,
                 task_id=row.task_id,
-                original_name=row.original_name,
-                size_bytes=row.size_bytes,
+                original_name=row.name,
+                size_bytes=row.size_bytes or 0,
                 created_at=row.created_at,
                 task_title=row.title,
                 task_status=TaskStatus(row.status),
@@ -130,9 +216,15 @@ class SqlAlchemyAttachmentSearchRepository:
                 detached=row.detached_at is not None,
                 missing=row.missing_at is not None,
                 size_observed=row.observed_at is not None,
+                source_kind=row.source_kind,
+                label=row.label,
+                memo=row.memo[:200],
             )
             for row in rows[: query.limit]
         )
-        more = len(rows) > query.limit
-        cursor = AttachmentCursor(items[-1].created_at, items[-1].attachment_id) if items else None
-        return AttachmentSearchPage(items, cursor, more)
+        next_cursor = (
+            AttachmentCursor(items[-1].created_at, items[-1].attachment_id, items[-1].source_kind)
+            if items
+            else None
+        )
+        return AttachmentSearchPage(items, next_cursor, len(rows) > query.limit)

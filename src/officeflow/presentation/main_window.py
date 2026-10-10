@@ -18,6 +18,7 @@ from PySide6.QtCore import (
     QThread,
     QTimer,
     QUrl,
+    Signal,
     Slot,
 )
 from PySide6.QtGui import (
@@ -52,13 +53,14 @@ from shiboken6 import isValid
 
 from officeflow import __version__
 from officeflow.application.attachment_documents import InternalRecoveryReport
-from officeflow.application.attachment_export import AttachmentExportService, FileReference
+from officeflow.application.attachment_export import AttachmentExportService
 from officeflow.application.attachment_search import AttachmentSearchHit, AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.exporting import ExportService
 from officeflow.application.file_operations import FileInUseError
 from officeflow.application.hourly_notifications import HourlyState
 from officeflow.application.records import RecordService
+from officeflow.application.reminder_groups import ReminderGroup
 from officeflow.application.reminder_preview import (
     ReminderPreviewItem,
     ReminderPreviewResult,
@@ -137,6 +139,7 @@ class _CompletionUndo:
 
 
 class MainWindow(QMainWindow):
+    diagnosticError = Signal(str)
     DETAIL_BREAKPOINT = 1100
     COMPACT_BREAKPOINT = 850
     MINIMUM_WIDTH = 760
@@ -308,6 +311,24 @@ class MainWindow(QMainWindow):
         self._undo_button.clicked.connect(self._undo_last_completion)
         self._undo_button.hide()
         self.statusBar().addPermanentWidget(self._undo_button)
+        self._backup_warning_button = QPushButton("백업 확인 필요")
+        self._backup_warning_button.setObjectName("backupHealthWarning")
+        self._backup_warning_button.clicked.connect(lambda: self._open_data_management(backup=True))
+        self.statusBar().addPermanentWidget(self._backup_warning_button)
+        self._diagnostic_warning_button = QPushButton("오류 기록 확인")
+        self._diagnostic_warning_button.setObjectName("diagnosticWarning")
+        self._diagnostic_warning_button.hide()
+        self._diagnostic_warning_button.clicked.connect(self._open_diagnostic_management)
+        self.statusBar().addPermanentWidget(self._diagnostic_warning_button)
+        self._backup_health_timer = QTimer(self)
+        self._backup_health_timer.setInterval(5_000)
+        self._backup_health_timer.timeout.connect(self._refresh_backup_health)
+        if self._backup_manager:
+            self._backup_health_timer.start()
+        self._refresh_backup_health()
+        self.diagnosticError.connect(
+            self._show_diagnostic_error, Qt.ConnectionType.QueuedConnection
+        )
         self._hourly_controller = HourlyNotificationController(
             hourly_settings(settings),
             parent=self,
@@ -443,6 +464,7 @@ class MainWindow(QMainWindow):
         self._calendar_page.monthChanged.connect(self._refresh_calendar)
         self._calendar_page.dateSelected.connect(self._refresh_calendar_day)
         self._calendar_page.alarmMoreRequested.connect(self._reload_day_reminder_preview)
+        self._calendar_page.reminderSettingsRequested.connect(self._open_reminder_settings)
         self._calendar_page.taskSelected.connect(self._on_calendar_task_selected)
         self._calendar_page.taskActivated.connect(self._open_calendar_task)
         self._calendar_page.attachmentsRequested.connect(self._open_calendar_attachments)
@@ -1207,7 +1229,14 @@ class MainWindow(QMainWindow):
             self._open_attachment_id(attachment_id)
 
     def _open_search_file(self, hit: AttachmentSearchHit) -> None:
-        self._open_attachment_id(hit.attachment_id)
+        if hit.source_kind == "attachment":
+            self._open_attachment_id(hit.attachment_id)
+        elif self._attachment_service and self._attachment_service.lifecycle:
+            from officeflow.presentation.document_actions import file_actions
+
+            file_actions(self, self._attachment_service.lifecycle).open(
+                hit.source_kind, hit.attachment_id
+            )
 
     def _open_attachment_id(self, attachment_id: int) -> None:
         if self._attachment_service is None:
@@ -1304,6 +1333,31 @@ class MainWindow(QMainWindow):
             dialog.select_attachment(attachment_id)
 
     def _open_file_records(self, hit: AttachmentSearchHit, attachments: bool) -> None:
+        if (
+            attachments
+            and hit.source_kind == "version"
+            and self._attachment_service
+            and self._attachment_service.lifecycle
+            and self._attachment_export_service
+        ):
+            from officeflow.presentation.document_actions import DocumentBrowser
+
+            dialog = DocumentBrowser(
+                self._attachment_service.lifecycle,
+                self._attachment_export_service,
+                hit.task_id,
+                read_only=hit.deleted,
+                timezone=self._settings.timezone,
+                parent=self,
+            )
+            try:
+                dialog.focus_version(hit.attachment_id)
+            except (LookupError, ValueError) as error:
+                dialog.deleteLater()
+                self.statusBar().showMessage(str(error), 8000)
+                return
+            self._keep_file_dialog(dialog)
+            return
         if attachments and hit.detached:
             self._open_data_management(cleanup=True)
             return
@@ -1313,9 +1367,18 @@ class MainWindow(QMainWindow):
             task = self._task_service.get_including_deleted(hit.task_id)
             self._show_task_records(
                 task,
-                initial_tab="attachments" if attachments else "result",
-                attachment_id=hit.attachment_id if attachments else None,
+                initial_tab="attachments"
+                if attachments and hit.source_kind != "snapshot_file"
+                else "result",
+                attachment_id=hit.attachment_id
+                if attachments and hit.source_kind == "attachment"
+                else None,
             )
+            if attachments and hit.source_kind == "snapshot_file":
+                for existing in self._file_dialogs:
+                    if isinstance(existing, TaskRecordsDialog) and existing._task_id == hit.task_id:
+                        existing._open_history()
+                        break
         except LookupError as error:
             self.statusBar().showMessage(str(error), 8000)
             self._refresh_tasks()
@@ -1775,7 +1838,13 @@ class MainWindow(QMainWindow):
                 f"OfficeFlow · {summary}" + (" · 설정/표시 오류" if state.error else "")
             )
 
-    def _open_data_management(self, *, cleanup: bool = False) -> None:
+    def _open_diagnostic_management(self) -> None:
+        self._open_data_management(inspection=True)
+        self._diagnostic_warning_button.hide()
+
+    def _open_data_management(
+        self, *, cleanup: bool = False, backup: bool = False, inspection: bool = False
+    ) -> None:
         if self._export_service is None or self._backup_manager is None:
             return
         dialog = DataManagementDialog(
@@ -1790,10 +1859,16 @@ class MainWindow(QMainWindow):
             automatic_backup_enabled=self._settings.automatic_backup_enabled,
             automatic_backup_interval_hours=(self._settings.automatic_backup_interval_hours),
             automatic_backup_keep=self._settings.automatic_backup_keep,
+            timezone=self._settings.timezone,
             parent=self,
         )
         dialog.quitRequested.connect(self._quit_application)
+        dialog.backupHealthChanged.connect(self._refresh_backup_health)
         dialog.setStyleSheet(LIGHT_STYLESHEET)
+        if backup:
+            dialog.tabs.setCurrentIndex(dialog._tools_tab_index)
+        if inspection:
+            dialog.tabs.setCurrentIndex(dialog._inspection_tab_index)
         if cleanup:
             if dialog._cleanup_tab_index is not None:
                 dialog.tabs.setCurrentIndex(dialog._cleanup_tab_index)
@@ -1832,7 +1907,13 @@ class MainWindow(QMainWindow):
                 self._settings.automatic_backup_interval_hours
             )
         except OSError:
-            logger.exception("자동 백업 시점을 확인하지 못했습니다.")
+            logger.error("자동 백업 시점을 확인하지 못했습니다.")
+            self._backup_manager.health.finish(
+                "automatic",
+                "failed",
+                "자동 백업 시점을 확인하지 못했습니다. 백업 폴더 접근 상태를 확인하세요.",
+            )
+            self._refresh_backup_health()
             return
         if not required:
             return
@@ -1846,19 +1927,25 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.succeeded.connect(self._automatic_backup_succeeded)
-        worker.failed.connect(self._automatic_backup_failed)
-        worker.finished.connect(thread.quit)
+        worker.succeeded.connect(
+            self._automatic_backup_succeeded, Qt.ConnectionType.QueuedConnection
+        )
+        worker.failed.connect(self._automatic_backup_failed, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._automatic_backup_finished)
+        thread.finished.connect(self._automatic_backup_finished, Qt.ConnectionType.QueuedConnection)
         self._automatic_backup_thread = thread
         self._automatic_backup_worker = worker
         thread.start()
 
+    @Slot(object)
     def _automatic_backup_succeeded(self, result: object) -> None:
+        if self._shutdown_done:
+            return
         if isinstance(result, BackupInfo):
             message = f"자동 백업을 완료했습니다: {result.path.name}"
+            if result.maintenance_warning:
+                message += f" · {result.maintenance_warning}"
             if result.missing_attachments:
                 message += (
                     f" · 기존 누락 첨부 {len(result.missing_attachments)}개는 포함되지 않았습니다."
@@ -1866,13 +1953,32 @@ class MainWindow(QMainWindow):
                 logger.warning(message)
             self.statusBar().showMessage(message, 8000 if result.missing_attachments else 4000)
 
-    @staticmethod
-    def _automatic_backup_failed(error: object) -> None:
-        logger.error("자동 백업에 실패했습니다: %s", error)
+    @Slot(object)
+    def _automatic_backup_failed(self, error: object) -> None:
+        logger.error("자동 백업에 실패했습니다 (%s)", type(error).__name__)
+        self._refresh_backup_health()
 
+    @Slot()
     def _automatic_backup_finished(self) -> None:
+        if self._automatic_backup_thread:
+            self._automatic_backup_thread.wait()
+            self._automatic_backup_thread.deleteLater()
         self._automatic_backup_worker = None
         self._automatic_backup_thread = None
+        self._refresh_backup_health()
+
+    def _refresh_backup_health(self) -> None:
+        health = self._backup_manager.health.snapshot() if self._backup_manager else None
+        self._backup_warning_button.setVisible(bool(health and health.attention))
+        self._backup_warning_button.setToolTip(
+            "백업 실패·완료 미확인 또는 상태 기록 문제를 데이터 화면에서 확인하세요."
+        )
+
+    @Slot(str)
+    def _show_diagnostic_error(self, message: str) -> None:
+        if not self._shutdown_done:
+            self.statusBar().showMessage(message)
+            self._diagnostic_warning_button.setVisible(True)
 
     @Slot()
     def _start_internal_recovery(self) -> None:
@@ -2352,12 +2458,18 @@ class MainWindow(QMainWindow):
                 )
             )
 
-    def _open_preview_record(self, item: ReminderPreviewItem) -> None:
+    def _open_preview_record(self, item: ReminderPreviewItem | ReminderGroup) -> None:
+        if isinstance(item, ReminderGroup):
+            item = item.representative
         self._show_task_records(
             item.task, occurrence_start=item.occurrence_start if item.task.recurrence_rule else None
         )
 
-    def _select_preview_detail(self, item: ReminderPreviewItem) -> None:
+    def _select_preview_detail(self, item: ReminderPreviewItem | ReminderGroup) -> None:
+        group = item if isinstance(item, ReminderGroup) else None
+        if group:
+            item = group.representative
+        assert isinstance(item, ReminderPreviewItem)
         self._selected_task_id = item.task.id
         self._selected_occurrence_start = (
             item.occurrence_start if item.task.recurrence_rule else None
@@ -2365,7 +2477,7 @@ class MainWindow(QMainWindow):
         self._update_detail(item.task)
         self._detail_schedule.setText(
             self._detail_schedule.text()
-            + "\n선택 알림: "
+            + (f"\n알림 {len(group.items)}건 · 대표 시각: " if group else "\n선택 알림: ")
             + format_datetime(item.effective_at, self._settings.timezone)
             + " · "
             + item.display_status
@@ -2428,7 +2540,7 @@ class MainWindow(QMainWindow):
     def _on_calendar_task_selected(self, scheduled: ScheduledTask) -> None:
         self._selected_task_id = scheduled.id
         self._selected_occurrence_start = scheduled.occurrence_start
-        self._update_detail(scheduled.display_task)
+        self._update_detail(scheduled.display_task if scheduled.task.starts_at else scheduled.task)
         self._apply_responsive_layout()
 
     def _show_calendar_task_context_menu(
@@ -2639,7 +2751,9 @@ class MainWindow(QMainWindow):
             "이전 실행 비정상 종료",
             "이전 OfficeFlow 실행이 정상적으로 종료되지 않았습니다.\n\n"
             "저장된 데이터는 그대로 유지됩니다. 놓친 알림은 설정된 복구 범위 안에서 "
-            "다시 확인하고 있으니 알림 창과 오늘 업무를 확인해 주세요.",
+            "다시 확인하고 있으니 알림 창과 오늘 업무를 확인해 주세요.\n\n"
+            "자료 점검과 종료 진단 기록은 데이터 → 자료 검사에서 확인할 수 있습니다. "
+            "강제 종료 원인이 기록되지 않을 수도 있습니다.",
         )
         self._start_reminder_monitoring()
         if self._hourly_notifications_enabled:
@@ -3018,6 +3132,7 @@ class MainWindow(QMainWindow):
             application.quit()
 
     def shutdown(self) -> None:
+        self._backup_health_timer.stop()
         if self._shutdown_done:
             return
         from officeflow.presentation.document_actions import stop_file_actions
@@ -3035,6 +3150,7 @@ class MainWindow(QMainWindow):
         if self._day_preview_controller:
             self._day_preview_controller.shutdown()
         self._today_reminders.shutdown()
+        self._calendar_page.shutdown()
         if self._attachment_export_controller:
             self._attachment_export_controller.shutdown()
         self._reminder_timer.stop()
@@ -3290,9 +3406,7 @@ class MainWindow(QMainWindow):
 
     def _save_search_file(self, value: object) -> None:
         if isinstance(value, AttachmentSearchHit) and self._attachment_export_controller:
-            self._attachment_export_controller.choose(
-                (FileReference.attachment(value.attachment_id),)
-            )
+            self._attachment_export_controller.choose((value.reference,))
 
     @staticmethod
     def _named_label(text: str, object_name: str) -> QLabel:
