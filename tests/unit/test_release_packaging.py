@@ -14,7 +14,7 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.10"
+    assert __version__ == "3.0.11"
     assert project["project"]["version"] == __version__
     assert f"FileVersion', '{__version__}'" in version_info
     assert f"ProductVersion', '{__version__}'" in version_info
@@ -71,7 +71,7 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert "목록 확대" in content
     assert "업무가 삭제된 것이 아니라는 안내" in content
     assert "이전 검색어가 자동으로 지워집니다" in content
-    assert "파일 선택 (여러 개)" in content
+    assert "파일 추가" in content
     assert "파일 여러 개를 첨부 목록으로 끌어놓어" in content
     assert "Python 실행 모드" in content
     assert "setup-officeflow-python.cmd" in content
@@ -83,3 +83,7 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert "개발 소스에 반영되어" not in content
     assert "첨부파일 찾기" in content
     assert "다음 배포 예정" not in content
+    assert "개발 소스에 반영된 첨부 화면" not in content
+    assert "배포물은 아직 변경하지 않았습니다" not in content
+    assert "전체 파일 / 원본 / 작업본 / 일반" in content
+    assert "넓게 보기 / 이전 크기" in content

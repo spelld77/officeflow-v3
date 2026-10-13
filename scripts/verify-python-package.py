@@ -100,6 +100,7 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "src/officeflow/presentation/input_controls.py",
             "src/officeflow/presentation/compact_labels.py",
             "src/officeflow/presentation/detail_widgets.py",
+            "src/officeflow/presentation/attachment_browser.py",
         )
         if any(f"{root_name}/{name}" not in names for name in required):
             raise ValueError("Required runtime file missing")

@@ -41,8 +41,13 @@ class AppSettings:
     hourly_notification_morning_continuation_date: str | None = None
     attachment_export_directory: str | None = None
     attachment_view_mode: str = "list"
+    record_window_width: int | None = None
+    record_window_height: int | None = None
 
     def __post_init__(self) -> None:
+        for value in (self.record_window_width, self.record_window_height):
+            if value is not None and (type(value) is not int or not 200 <= value <= 8192):
+                raise ValueError("업무 보기 창 크기가 올바르지 않습니다.")
         if self.attachment_view_mode not in ("list", "thumbnails"):
             raise ValueError("첨부 보기 방식이 올바르지 않습니다.")
         if not 1 <= self.missed_reminder_grace_minutes <= 43_200:
@@ -101,6 +106,12 @@ class JsonSettingsStore:
                 return AppSettings()
             allowed = AppSettings.__dataclass_fields__.keys()
             values = {key: value for key, value in raw.items() if key in allowed}
+            for key in ("record_window_width", "record_window_height"):
+                size_value = values.get(key)
+                if size_value is not None and (
+                    type(size_value) is not int or not 200 <= size_value <= 8192
+                ):
+                    values.pop(key)
             if values.get("attachment_view_mode", "list") not in ("list", "thumbnails"):
                 values.pop("attachment_view_mode", None)
             export_directory = values.get("attachment_export_directory")

@@ -1284,6 +1284,8 @@ class MainWindow(QMainWindow):
         if isinstance(dialog, TaskRecordsDialog):
             self._last_record_tab = dialog.current_tab_key
             dialog.tabChanged.connect(self._remember_record_tab)
+        if isinstance(dialog, (TaskRecordsDialog, WorkLogBrowserDialog)):
+            dialog.windowSizeChanged.connect(self._remember_record_window_size)
         if isinstance(dialog, (TaskRecordsDialog, WorkLogBrowserDialog, DataManagementDialog)):
             dialog.exportDirectoryChanged.connect(self._remember_attachment_export_directory)
 
@@ -1337,6 +1339,10 @@ class MainWindow(QMainWindow):
                 attachment_export_service=self._attachment_export_service,
                 attachment_export_directory=self._settings.attachment_export_directory,
                 image_coordinator=self._image_coordinator,
+                initial_window_size=(
+                    self._settings.record_window_width,
+                    self._settings.record_window_height,
+                ),
                 initial_tab=initial_tab or self._last_record_tab,
                 folder_link_service=self._folder_link_service,
                 parent=self,
@@ -2286,6 +2292,10 @@ class MainWindow(QMainWindow):
             attachment_export_service=self._attachment_export_service,
             attachment_export_directory=self._settings.attachment_export_directory,
             image_coordinator=self._image_coordinator,
+            record_window_size=lambda: (
+                self._settings.record_window_width,
+                self._settings.record_window_height,
+            ),
             parent=self,
         )
         dialog.changed.connect(self._refresh_tasks)
@@ -3447,6 +3457,19 @@ class MainWindow(QMainWindow):
             except OSError:
                 self.statusBar().showMessage(
                     "첨부 보기 선택은 이번 실행에 적용했지만 다음 시작을 위한 설정은 저장하지 못했습니다.",
+                    8000,
+                )
+
+    def _remember_record_window_size(self, width: int, height: int) -> None:
+        self._settings = replace(
+            self._settings, record_window_width=width, record_window_height=height
+        )
+        if self._save_settings:
+            try:
+                self._save_settings(self._settings)
+            except OSError:
+                self.statusBar().showMessage(
+                    "창 크기는 이번 실행에 적용했지만 다음 시작을 위한 설정은 저장하지 못했습니다.",
                     8000,
                 )
 

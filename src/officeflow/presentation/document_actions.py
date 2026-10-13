@@ -500,6 +500,7 @@ class DocumentBrowser(_ReadDialog):
         task_id: int,
         *,
         family_id: str | None = None,
+        initial_kind: str = "version",
         read_only: bool = False,
         timezone: str = "Asia/Seoul",
         parent: QWidget | None = None,
@@ -515,12 +516,18 @@ class DocumentBrowser(_ReadDialog):
         controls = QHBoxLayout()
         self.kind = QComboBox()
         self.kind.addItems(["보관본", "현재 첨부"])
+        if initial_kind not in {"version", "attachment"}:
+            raise ValueError("보관함 조회 종류가 올바르지 않습니다.")
+        self.kind.setCurrentIndex(1 if initial_kind == "attachment" else 0)
         self.all_families = QCheckBox("이 업무 전체 보기")
         self.all_families.setChecked(family_id is None)
         self.all_families.setVisible(family_id is not None)
         controls.addWidget(self.kind)
         controls.addWidget(self.all_families)
         self.root.addLayout(controls)
+        self.scope_label = CompactLabel()
+        self.scope_label.setObjectName("documentScope")
+        self.root.addWidget(self.scope_label)
         self.list = QListWidget()
         self.list.setObjectName("documentFileList")
         compact_file_list(self.list)
@@ -582,6 +589,9 @@ class DocumentBrowser(_ReadDialog):
         self.refresh()
 
     def refresh(self) -> None:
+        self.scope_label.setText(
+            "이 업무 전체 자료" if self.all_families.isChecked() else "선택 파일의 관련 자료"
+        )
         highlighted = {item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()}
         current = self.list.currentItem()
         current_key = current.data(Qt.ItemDataRole.UserRole) if current else None

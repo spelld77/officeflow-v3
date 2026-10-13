@@ -86,7 +86,13 @@ def test_record_menu_rename_memo_updates_list_and_export_name_without_touching_f
         qtbot.waitUntil(lambda: "현재이름.txt" in dialog.attachment_list.item(0).text())
         menu = dialog._build_attachment_context_menu()
         next(action for action in menu.actions() if action.text() == "메모…").trigger()
-        qtbot.waitUntil(lambda: "파일 설명" in dialog.attachment_detail.text())
+        qtbot.waitUntil(lambda: "파일 설명" in dialog.attachment_list.item(0).toolTip())
+        dialog._show_attachment_information()
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        assert any(
+            "파일 설명" in edit.toPlainText() for edit in dialog.findChildren(QPlainTextEdit)
+        )
         assert "처음 첨부한 이름: 기존.txt" in dialog.attachment_detail.toolTip()
         saved = env.repository.get_attachment(attached.id)
         assert saved.name == "현재이름.txt" and saved.original_name == "기존.txt"

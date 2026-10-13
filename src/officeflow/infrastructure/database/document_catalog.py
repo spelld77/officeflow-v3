@@ -43,9 +43,147 @@ class DocumentPage:
     has_next: bool
 
 
+@dataclass(frozen=True, slots=True)
+class AttachmentSourceSummary:
+    kind: str = ""
+    state: str = "direct"
+    current_name: str = ""
+    name_at_creation: str = ""
+    label: str = ""
+
+    @property
+    def text(self) -> str:
+        if self.state == "direct":
+            return "출처 정보 없음"
+        if self.state == "unavailable":
+            return "출처 확인 불가"
+        if self.state == "deleted":
+            return (
+                f"출처 삭제됨: {self.name_at_creation}" if self.name_at_creation else "출처 삭제됨"
+            )
+        if self.kind == "cache":
+            return f"출처: 수정 보기 사본 · {self.name_at_creation}"
+        name = self.current_name or self.name_at_creation
+        if self.kind in {"version", "snapshot_file"}:
+            category = "보관본" if self.kind == "version" else "시점 보관"
+            name = f"{self.label} · {name}" if self.label else name
+            name += f" ({category})"
+        return f"출처: {name}"
+
+    @property
+    def information(self) -> str:
+        return self.text + (
+            f"\n생성 당시 출처: {self.name_at_creation}" if self.name_at_creation else ""
+        )
+
+
 class DocumentCatalog:
     def __init__(self, sessions: SessionFactory) -> None:
         self.sessions = sessions
+
+    def source_summary(self, task_id: int, attachment_id: int) -> AttachmentSourceSummary:
+        """Only direct provenance metadata; no file reads, hash checks or writes."""
+        unavailable = AttachmentSourceSummary(state="unavailable")
+        with self.sessions.transaction() as session:
+            row = session.get(AttachmentRecord, attachment_id)
+            if row is None or row.task_id != task_id:
+                raise LookupError("선택 첨부를 찾을 수 없습니다.")
+            try:
+                if len(row.source_payload) > 16_384:
+                    return unavailable
+                payload = json.loads(row.source_payload)
+                if not isinstance(payload, dict):
+                    return unavailable
+                # Cache provenance deliberately has no common kind/version fields.
+                if "cache_id" in payload:
+                    from officeflow.infrastructure.attachments.view_cache import decode_cache_source
+
+                    info = decode_cache_source(row.source_payload)
+                    if (info["task_id"], info["family_id"]) != (row.task_id, row.family_id):
+                        return unavailable
+                    return AttachmentSourceSummary("cache", "live", name_at_creation=info["name"])
+                kind = payload.get("kind", "")
+                name = payload.get("name", "")
+                if not isinstance(name, str) or len(name) > 500:
+                    return unavailable
+                if kind == "snapshot_file":
+                    identity = payload.get("id")
+                    if (
+                        type(identity) is not int
+                        or identity <= 0
+                        or payload.get("task_id") != row.task_id
+                        or payload.get("family") != row.family_id
+                    ):
+                        return unavailable
+                    snapshot = session.get(SnapshotFileRecord, identity)
+                    if snapshot is None:
+                        return AttachmentSourceSummary(kind, "deleted", name_at_creation=name)
+                    if (
+                        snapshot.snapshot.task_id != row.task_id
+                        or snapshot.family_id != row.family_id
+                        or snapshot.snapshot_id != payload.get("snapshot")
+                        or snapshot.asset_id != payload.get("asset")
+                        or snapshot.asset.state != "active"
+                    ):
+                        return unavailable
+                    return AttachmentSourceSummary(
+                        kind, "live", snapshot.name, name, snapshot.snapshot.label
+                    )
+                if payload and (
+                    kind not in {"attachment", "version"}
+                    or type(payload.get("version")) is not int
+                    or payload.get("version") != 1
+                    or type(payload.get("id")) is not int
+                    or payload["id"] <= 0
+                ):
+                    return unavailable
+                if row.source_attachment_id is not None and row.source_version_id is not None:
+                    return unavailable
+                identity = (
+                    row.source_attachment_id
+                    if row.source_attachment_id is not None
+                    else row.source_version_id
+                )
+                if identity is None:
+                    return (
+                        AttachmentSourceSummary(kind, "deleted", name_at_creation=name)
+                        if payload
+                        else AttachmentSourceSummary()
+                    )
+                link_kind = "attachment" if row.source_attachment_id is not None else "version"
+                if payload and (kind != link_kind or payload.get("id") != identity):
+                    return unavailable
+                source = cast(
+                    AttachmentRecord | AttachmentVersionRecord | None,
+                    session.get(
+                        AttachmentRecord if link_kind == "attachment" else AttachmentVersionRecord,
+                        identity,
+                    ),
+                )
+                if source is None:
+                    return AttachmentSourceSummary(link_kind, "deleted", name_at_creation=name)
+                if (
+                    source.task_id != row.task_id
+                    or source.family_id != row.family_id
+                    or source.asset.state != "active"
+                ):
+                    return unavailable
+                current_name = (
+                    source.display_name
+                    if isinstance(source, AttachmentRecord)
+                    else source.original_name
+                )
+                if isinstance(source, AttachmentRecord) and source.detached_at is not None:
+                    current_name += " (연결 해제)"
+                return AttachmentSourceSummary(
+                    link_kind,
+                    "live",
+                    current_name,
+                    name,
+                    source.label if isinstance(source, AttachmentVersionRecord) else "",
+                )
+            except (ValueError, TypeError, KeyError, AttributeError):
+                return unavailable
 
     @staticmethod
     def _entry(row: AttachmentRecord | AttachmentVersionRecord) -> DocumentEntry:

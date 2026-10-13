@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 import officeflow.presentation.main_window as main_window_module
+from officeflow import __version__
 from officeflow.application.attachments import AttachmentService
 from officeflow.application.records import RecordService
 from officeflow.application.reminders import ReminderService
@@ -64,7 +65,7 @@ def test_help_button_opens_packaged_user_guide(
     window._help_button.click()
 
     assert opened == [True]
-    assert window._version_label.text() == "OfficeFlow 3.0.10"
+    assert window._version_label.text() == f"OfficeFlow {__version__}"
 
 
 class FakeTrayIcon:
