@@ -141,7 +141,7 @@ def test_buttons_reuse_window_without_overwriting_unsaved_input(calendar_window)
     assert window._selected_task_id == task.id
 
 
-def test_recent_tab_is_remembered_for_new_window_but_not_new_application(calendar_window, qtbot):
+def test_new_general_view_starts_with_checklist_not_last_attachment_or_log(calendar_window, qtbot):
     window, env, _task, _start = calendar_window
     page = window._calendar_page
     page.day_list.setCurrentRow(0)
@@ -151,7 +151,7 @@ def test_recent_tab_is_remembered_for_new_window_but_not_new_application(calenda
     dialog.reject()
     qtbot.waitUntil(lambda: not isValid(dialog))
     page.records_button.click()
-    assert _records(window)[0].current_tab_key == "work_log"
+    assert _records(window)[0].current_tab_key == "checklist"
     other = MainWindow(
         AppSettings(automatic_backup_enabled=False),
         env.tasks,

@@ -14,7 +14,7 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.11"
+    assert __version__ == "3.0.12"
     assert project["project"]["version"] == __version__
     assert f"FileVersion', '{__version__}'" in version_info
     assert f"ProductVersion', '{__version__}'" in version_info
@@ -72,7 +72,10 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert "업무가 삭제된 것이 아니라는 안내" in content
     assert "이전 검색어가 자동으로 지워집니다" in content
     assert "파일 추가" in content
-    assert "파일 여러 개를 첨부 목록으로 끌어놓어" in content
+    assert "탐색기의 파일 여러 개" in content
+    assert "목록·썸네일·빈 목록·흰 여백으로 끌어놓아" in content
+    assert "업무 목록·달력의 더블클릭과 Enter" in content
+    assert "완성 이름" in content and "WebP" in content
     assert "Python 실행 모드" in content
     assert "setup-officeflow-python.cmd" in content
     assert "%LOCALAPPDATA%\\OfficeFlow" in content

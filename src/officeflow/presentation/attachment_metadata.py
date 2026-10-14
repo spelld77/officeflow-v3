@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from officeflow.domain.attachment import Attachment, validate_display_name
+from officeflow.domain.attachment import Attachment, renamed_display_name
+from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
@@ -35,6 +36,10 @@ class AttachmentMetadataDialog(QDialog):
         self._edit_memo = edit_memo
         self._submit = submit
         self._extension = Path(attachment.name).suffix
+        self._original_name = attachment.name
+        self._initial_stem = (
+            attachment.name[: -len(self._extension)] if self._extension else attachment.name
+        )
         self.value = attachment.memo if edit_memo else attachment.name
         layout = QVBoxLayout(self)
         label = QLabel(attachment.name[:100] + ("…" if len(attachment.name) > 100 else ""))
@@ -51,12 +56,16 @@ class AttachmentMetadataDialog(QDialog):
             self.name_edit.hide()
         else:
             row = QHBoxLayout()
-            stem = attachment.name[: -len(self._extension)] if self._extension else attachment.name
-            self.name_edit.setText(stem)
-            self.name_edit.setMaxLength(500 - len(self._extension))
+            self.name_edit.setText(self._initial_stem)
+            self.name_edit.setMaxLength(500)
             row.addWidget(self.name_edit, 1)
             row.addWidget(QLabel(self._extension or "(확장자 없음)"))
             layout.addLayout(row)
+            self.final_name = CompactLabel()
+            self.final_name.setObjectName("attachmentFinalName")
+            layout.addWidget(self.final_name)
+            self.name_edit.textChanged.connect(self._preview_name)
+            self._preview_name()
             self.memo_edit.hide()
         hint = QLabel(
             "파일 내용·업무일지는 바뀌지 않습니다."
@@ -81,6 +90,23 @@ class AttachmentMetadataDialog(QDialog):
             self.name_edit.selectAll()
             self.name_edit.setFocus()
 
+    def _name_value(self) -> str:
+        text = self.name_edit.text()
+        return (
+            self._original_name
+            if text == self._initial_stem
+            else renamed_display_name(text, self._extension)
+        )
+
+    def _preview_name(self) -> None:
+        try:
+            name = self._name_value()
+        except ValueError as error:
+            self.final_name.setText(str(error))
+        else:
+            self.final_name.setText(f"완성 이름: {name}")
+            self.final_name.setToolTip(name)
+
     def _save(self) -> None:
         try:
             if self._edit_memo:
@@ -88,14 +114,9 @@ class AttachmentMetadataDialog(QDialog):
                 if len(value) > 2000:
                     raise ValueError("첨부 메모는 2,000자 이하여야 합니다.")
             else:
-                stem = self.name_edit.text()
-                if not stem.strip() or stem.endswith((" ", ".")):
-                    raise ValueError(
-                        "이름을 입력하세요. 끝의 공백이나 마침표는 사용할 수 없습니다."
-                    )
-                value = validate_display_name(stem + self._extension, extension=self._extension)
+                value = self._name_value()
             self.value = value
-            if self._submit is not None:
+            if self._submit is not None and (self._edit_memo or value != self._original_name):
                 self._submit(value)
         except Exception as error:
             # A failed DB submission is not success; keep the user's draft visible.

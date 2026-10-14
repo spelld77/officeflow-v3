@@ -368,12 +368,30 @@ def main() -> int:
 def _run_smoke_test(arguments: list[str]) -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication(arguments)
+    _verify_smoke_webp()
     app, window = build_application(arguments, application=app)
     app.processEvents()
     window.shutdown()
     window.close()
     app.quit()
     return 0
+
+
+def _verify_smoke_webp() -> None:
+    """Exercise the packaged Qt codec in memory; never read a user's attachment."""
+    from PySide6.QtCore import QBuffer, QIODevice
+    from PySide6.QtGui import QImage, QImageWriter
+
+    picture = QImage(3, 2, QImage.Format.Format_RGB32)
+    picture.fill(0xFF5685BC)
+    encoded = QBuffer()
+    if not encoded.open(QIODevice.OpenModeFlag.WriteOnly) or not QImageWriter(
+        encoded, b"webp"
+    ).write(picture):
+        raise RuntimeError("WebP codec is missing or cannot encode the smoke fixture.")
+    restored = QImage.fromData(encoded.data())
+    if restored.isNull() or restored.size() != picture.size():
+        raise RuntimeError("WebP codec cannot decode the smoke fixture.")
 
 
 if __name__ == "__main__":

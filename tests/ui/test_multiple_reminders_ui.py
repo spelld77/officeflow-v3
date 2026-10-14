@@ -274,6 +274,7 @@ def test_last_export_directory_updates_already_open_controllers(live_window, tmp
     from officeflow.application.attachment_export import AttachmentExportService
     from officeflow.infrastructure.attachments.export_storage import ExternalExportStorage
     from officeflow.presentation.attachment_export import AttachmentExportController
+
     window, env, _task, _now, _repo = live_window
     service = AttachmentExportService(env.attachments, ExternalExportStorage(tmp_path / "data"))
     first = AttachmentExportController(service, window, initial_directory=str(tmp_path / "old"))
@@ -375,7 +376,9 @@ def test_calendar_alarm_count_selects_and_scrolls_to_pending_alarm(live_window, 
 
     window, env, _task, now, _repo = live_window
     for number in range(8):
-        env.tasks.create(TaskDraft(f"오늘 업무 {number}", starts_at=now))
+        # The day list sorts tasks and reminder groups together by effective time.
+        # Earlier tasks keep the target alarm below the fold so scrolling is tested.
+        env.tasks.create(TaskDraft(f"오늘 업무 {number}", starts_at=now - timedelta(minutes=10)))
     window._show_calendar()
     page = window._calendar_page
     day = now.astimezone(ZoneInfo("Asia/Seoul")).date()
@@ -431,7 +434,9 @@ def test_acknowledging_one_reminder_preserves_future_reminders_after_restart(liv
     qtbot.mouseClick(window._reminder_dialog.acknowledge_button, Qt.MouseButton.LeftButton)
     assert window._reminder_dialog is None
     assert env.tasks.get(task.id).status is TaskStatus.ACTIVE
-    assert repo.get_reminder_delivery(alert.delivery.id).status is ReminderDeliveryStatus.ACKNOWLEDGED
+    assert (
+        repo.get_reminder_delivery(alert.delivery.id).status is ReminderDeliveryStatus.ACKNOWLEDGED
+    )
     assert repo.list_reminders(task.id) == original_rules
     restarted = ReminderService(repo, env.tasks)
     assert restarted.poll_due(now=now, recover_unhandled=True) == ()
@@ -472,8 +477,9 @@ def test_nonrecurring_completion_cancels_only_after_confirmation(live_window, qt
     button = box.button(QMessageBox.StandardButton.Yes)
     position = button.mapTo(box, button.rect().center())
     qtbot.wait(80)
-    QTest.mouseClick(box.windowHandle(), Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, position)
+    QTest.mouseClick(
+        box.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, position
+    )
     assert env.tasks.get(task.id).status is TaskStatus.COMPLETED
     assert window._reminder_dialog is None
     assert repo.get_reminder_delivery(snoozed.id).status is ReminderDeliveryStatus.COMPLETED
@@ -484,8 +490,10 @@ def test_occurrence_completion_preserves_next_occurrence_alerts(live_window, qtb
     window, env, _task, now, _repo = live_window
     task = window._task_save_service.save(
         TaskDraft("회차만 완료", starts_at=now, recurrence_rule="FREQ=DAILY;COUNT=3"),
-        edits=(ReminderEdit(Rule(ReminderRelation.START, offset_minutes=0)),
-               ReminderEdit(Rule(ReminderRelation.START, offset_minutes=1))),
+        edits=(
+            ReminderEdit(Rule(ReminderRelation.START, offset_minutes=0)),
+            ReminderEdit(Rule(ReminderRelation.START, offset_minutes=1)),
+        ),
         now=now,
     )
     alert = next(a for a in window._reminder_service.poll_due(now=now) if a.task.id == task.id)
@@ -496,9 +504,14 @@ def test_occurrence_completion_preserves_next_occurrence_alerts(live_window, qtb
     assert "다음 반복 회차의 알림은 유지" in box.text()
     qtbot.mouseClick(box.button(QMessageBox.StandardButton.Yes), Qt.MouseButton.LeftButton)
     assert env.tasks.get(task.id).status is TaskStatus.ACTIVE
-    assert not any(a.task.id == task.id for a in window._reminder_service.poll_due(now=now + timedelta(minutes=1)))
+    assert not any(
+        a.task.id == task.id
+        for a in window._reminder_service.poll_due(now=now + timedelta(minutes=1))
+    )
     next_alerts = window._reminder_service.poll_due(now=now + timedelta(days=1))
-    assert any(a.task.id == task.id and a.occurrence_start == now + timedelta(days=1) for a in next_alerts)
+    assert any(
+        a.task.id == task.id and a.occurrence_start == now + timedelta(days=1) for a in next_alerts
+    )
 
 
 def test_defer_is_not_a_future_reminder_mute(live_window, qtbot):
@@ -517,8 +530,11 @@ def test_confirmation_cannot_silently_change_completion_scope(live_window, qtbot
     window._present_reminder_alerts((alert,))
     qtbot.mouseClick(window._reminder_dialog.complete_button, Qt.MouseButton.LeftButton)
     box = next(d for d in window._file_dialogs if isinstance(d, QMessageBox))
-    env.tasks.update(task.id, TaskDraft(task.title, starts_at=task.starts_at,
-                                      recurrence_rule="FREQ=DAILY;COUNT=3"), now=now)
+    env.tasks.update(
+        task.id,
+        TaskDraft(task.title, starts_at=task.starts_at, recurrence_rule="FREQ=DAILY;COUNT=3"),
+        now=now,
+    )
     qtbot.mouseClick(box.button(QMessageBox.StandardButton.Yes), Qt.MouseButton.LeftButton)
     assert env.tasks.get(task.id).status is TaskStatus.ACTIVE
     assert repo.get_reminder_delivery(alert.delivery.id).status is ReminderDeliveryStatus.FIRED
@@ -535,7 +551,9 @@ def test_confirmation_is_canceled_if_alert_is_acknowledged_elsewhere(live_window
     assert window._reminder_dialog is None
     assert not box.isVisible()
     assert env.tasks.get(task.id).status is TaskStatus.ACTIVE
-    assert repo.get_reminder_delivery(alert.delivery.id).status is ReminderDeliveryStatus.ACKNOWLEDGED
+    assert (
+        repo.get_reminder_delivery(alert.delivery.id).status is ReminderDeliveryStatus.ACKNOWLEDGED
+    )
     qtbot.wait(30)
     next_alerts = window._reminder_service.poll_due(now=now + timedelta(minutes=1))
     assert len(next_alerts) == 1
@@ -544,8 +562,11 @@ def test_confirmation_is_canceled_if_alert_is_acknowledged_elsewhere(live_window
 def test_acknowledging_another_reminder_keeps_pending_snooze(live_window, qtbot, monkeypatch):
     window, env, task, now, repo = live_window
     snooze = window._reminder_service.snooze
-    monkeypatch.setattr(window._reminder_service, "snooze",
-                        lambda delivery_id, minutes: snooze(delivery_id, minutes, now=now))
+    monkeypatch.setattr(
+        window._reminder_service,
+        "snooze",
+        lambda delivery_id, minutes: snooze(delivery_id, minutes, now=now),
+    )
     first = window._reminder_service.poll_due(now=now)[0]
     window._present_reminder_alerts((first,))
     qtbot.mouseClick(window._reminder_dialog.snooze_button, Qt.MouseButton.LeftButton)
@@ -555,24 +576,35 @@ def test_acknowledging_another_reminder_keeps_pending_snooze(live_window, qtbot,
     qtbot.mouseClick(window._reminder_dialog.acknowledge_button, Qt.MouseButton.LeftButton)
     assert env.tasks.get(task.id).status is TaskStatus.ACTIVE
     assert repo.get_reminder_delivery(first.delivery.id) == snoozed
-    assert repo.get_reminder_delivery(second.delivery.id).status is ReminderDeliveryStatus.ACKNOWLEDGED
+    assert (
+        repo.get_reminder_delivery(second.delivery.id).status is ReminderDeliveryStatus.ACKNOWLEDGED
+    )
     restarted = ReminderService(repo, env.tasks)
     alerts = restarted.poll_due(now=snoozed.snoozed_until)
     assert any(a.delivery.id == first.delivery.id for a in alerts)
 
 
 @pytest.mark.parametrize("size", [(420, 340), (520, 420)])
-def test_reminder_primary_and_secondary_actions_fit_small_windows(live_window, qtbot, tmp_path, size):
+def test_reminder_primary_and_secondary_actions_fit_small_windows(
+    live_window, qtbot, tmp_path, size
+):
     window, _env, _task, now, _repo = live_window
     alert = window._reminder_service.poll_due(now=now)[0]
     window._present_reminder_alerts((alert,))
     popup = window._reminder_dialog
     popup.resize(*size)
     qtbot.wait(80)
-    for button in (popup.acknowledge_button, popup.complete_button, popup.defer_button, popup.snooze_button):
+    for button in (
+        popup.acknowledge_button,
+        popup.complete_button,
+        popup.defer_button,
+        popup.snooze_button,
+    ):
         from PySide6.QtCore import QRect
 
-        assert popup.rect().contains(QRect(button.mapTo(popup, button.rect().topLeft()), button.size()))
+        assert popup.rect().contains(
+            QRect(button.mapTo(popup, button.rect().topLeft()), button.size())
+        )
         assert button.width() >= button.sizeHint().width()
     assert popup.acknowledge_button.y() < popup.complete_button.y()
     assert popup.grab().save(str(tmp_path / "reminder-action-scope.png"))

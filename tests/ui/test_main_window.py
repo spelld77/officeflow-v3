@@ -598,6 +598,7 @@ def test_focused_quick_add_enter_registers_without_opening_selected_task(
     window._task_list.setCurrentIndex(window._task_model.index_for_task(existing.id))
     opened: list[object] = []
     monkeypatch.setattr(window, "_open_editor", lambda task, **_kwargs: opened.append(task))
+    monkeypatch.setattr(window, "_open_selected_records", lambda: opened.append("records"))
     window.show()
     window.activateWindow()
     qtbot.waitActive(window)
@@ -673,7 +674,10 @@ def test_task_list_enter_still_opens_selected_task_once(
     qtbot.addWidget(window)
     window._task_list.setCurrentIndex(window._task_model.index_for_task(existing.id))
     opened: list[object] = []
-    monkeypatch.setattr(window, "_open_editor", lambda task, **_kwargs: opened.append(task))
+    monkeypatch.setattr(
+        window, "_open_selected_records", lambda: opened.append(window._selected_task_id)
+    )
+    monkeypatch.setattr(window, "_open_editor", lambda *_args, **_kwargs: opened.append("editor"))
     window.show()
     window.activateWindow()
     qtbot.waitActive(window)
@@ -685,7 +689,7 @@ def test_task_list_enter_still_opens_selected_task_once(
     QTest.keyClick(window.windowHandle(), key)
 
     assert len(opened) == 1
-    assert opened[0].id == existing.id
+    assert opened[0] == existing.id
 
 
 def test_tab_moves_from_quick_add_input_to_add_button(
@@ -1219,7 +1223,7 @@ def test_calendar_shows_three_rows_and_marks_remaining_items(
 
     page = window._calendar_page
     assert page.day_list.count() == 5
-    assert page.day_count.text() == "총 5개 일정"
+    assert page.day_count.text() == "총 5개 일정 · 미완료 5"
     assert page.day_count.property("hasMany") is True
     assert page.day_more_hint.isVisible()
     assert "아래에 2개 더 있음" in page.day_more_hint.text()

@@ -487,6 +487,11 @@ class SqlAlchemyTaskRepository:
             select(TaskRecord, attachment_exists)
             .where(*regular)
             .order_by(
+                case(
+                    (TaskRecord.status.in_((TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)), 0),
+                    (TaskRecord.status == TaskStatus.COMPLETED.value, 2),
+                    else_=3,
+                ),
                 TaskRecord.is_pinned.desc(),
                 TaskRecord.starts_at.asc(),
                 TaskRecord.ends_at.asc(),
@@ -498,6 +503,16 @@ class SqlAlchemyTaskRepository:
             select(
                 literal(index).label("day_index"),
                 func.count(TaskRecord.id).label("total"),
+                func.count(
+                    case(
+                        (
+                            TaskRecord.status.in_(
+                                (TaskStatus.ACTIVE.value, TaskStatus.PENDING.value)
+                            ),
+                            TaskRecord.id,
+                        )
+                    )
+                ).label("unfinished"),
             ).where(
                 *common,
                 TaskRecord.recurrence_rule.is_(None),
@@ -539,13 +554,16 @@ class SqlAlchemyTaskRepository:
                 for record, has_attachments in session.execute(recurrence_statement).all()
             )
         counts = [0] * len(day_ranges)
-        for day_index, total in count_rows:
+        unfinished_counts = [0] * len(day_ranges)
+        for day_index, total, unfinished in count_rows:
             counts[int(day_index)] = int(total)
+            unfinished_counts[int(day_index)] = int(unfinished)
         return CalendarRepositoryOverview(
             regular_previews=regular_previews,
             regular_day_counts=tuple(counts),
             regular_total=regular_total,
             recurrence_templates=recurrence_templates,
+            regular_unfinished_day_counts=tuple(unfinished_counts),
         )
 
     def get_occurrence(self, task_id: int, occurrence_start: datetime) -> TaskOccurrence | None:

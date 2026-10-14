@@ -20,7 +20,7 @@ from officeflow.application.file_operations import (
     FileJobCanceledError,
     FileOperationCoordinator,
 )
-from officeflow.application.image_attachments import MAX_IMAGE_BYTES
+from officeflow.application.image_attachments import MAX_IMAGE_BYTES, ImageFailure
 from officeflow.application.tasks import TaskService
 from officeflow.domain.attachment import (
     Attachment,
@@ -41,6 +41,12 @@ class AttachmentCanceledError(AttachmentOperationError):
 
 class AttachmentMissingError(AttachmentOperationError):
     """Raised when an attachment's managed file is absent."""
+
+
+class AttachmentPreviewError(AttachmentOperationError):
+    def __init__(self, kind: ImageFailure, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class DuplicateAttachmentError(AttachmentOperationError):
@@ -502,7 +508,9 @@ class AttachmentService:
             ):
                 size = os.fstat(stream.fileno()).st_size
                 if size > MAX_IMAGE_BYTES:
-                    raise AttachmentOperationError("64 MB를 넘는 이미지는 미리보기할 수 없습니다.")
+                    raise AttachmentPreviewError(
+                        ImageFailure.SIZE, "64 MB를 넘는 이미지는 미리보기할 수 없습니다."
+                    )
                 if attachment.is_frozen:
                     digest = hashlib.sha256()
                     while chunk := stream.read(1024 * 1024):
@@ -513,8 +521,8 @@ class AttachmentService:
                         size != attachment.fixed_size_bytes
                         or digest.hexdigest() != attachment.fixed_checksum
                     ):
-                        raise AttachmentOperationError(
-                            "보관 후 변경된 원본은 미리보기할 수 없습니다."
+                        raise AttachmentPreviewError(
+                            ImageFailure.INTEGRITY, "보관 후 변경된 원본은 미리보기할 수 없습니다."
                         )
                     stream.seek(0)
                 if cancel_requested():

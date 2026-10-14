@@ -29,7 +29,8 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
-from officeflow.application.attachments import AttachmentService
+from officeflow.application.attachments import AttachmentCanceledError, AttachmentService
+from officeflow.application.file_operations import FileJobCanceledError
 from officeflow.domain.attachment import Attachment
 from officeflow.presentation.background import finish_thread
 from officeflow.presentation.file_list import FILE_ROW_ROLE, FileRow
@@ -38,6 +39,7 @@ from officeflow.presentation.image_attachments import (
     is_image_name,
     read_bounded_image,
 )
+from officeflow.presentation.image_failures import image_error_label
 
 
 def visible_items(listing: QListWidget) -> tuple[QListWidgetItem, ...]:
@@ -101,15 +103,7 @@ class ImageState:
             return "읽는 중"
         if self.error_kind:
             return self.error_kind
-        if "찾을 수" in self.error or "파일 없음" in self.error or "No such file" in self.error:
-            return "파일 없음"
-        if self.request.attachment.is_frozen:
-            return "원본 확인 필요"
-        if "크" in self.error or "64 MB" in self.error:
-            return "크기 제한"
-        if "denied" in self.error.casefold() or "권한" in self.error or "사용 중" in self.error:
-            return "읽기 불가"
-        return "이미지 확인 불가"
+        return "미리보기 실패"
 
 
 @dataclass
@@ -321,11 +315,9 @@ class AttachmentImageCoordinator(QObject):
                     self.cache_bytes -= evicted.image.sizeInBytes()
                 state.key = key
             else:
-                state.error = str(result)
-                if isinstance(result, FileNotFoundError):
-                    state.error_kind = "파일 없음"
-                elif isinstance(result, PermissionError):
-                    state.error_kind = "읽기 불가"
+                if not isinstance(result, (AttachmentCanceledError, FileJobCanceledError)):
+                    state.error = str(result)
+                    state.error_kind = image_error_label(result)
             notifications = {request.client}
             # Concurrent requests for the same attachment, policy and observation
             # epoch share one read. A later refocus epoch must verify again.

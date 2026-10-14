@@ -48,11 +48,14 @@ from officeflow.application.image_attachments import (
     MAX_IMAGE_PIXELS,
     MAX_PENDING_BYTES,
     MAX_PENDING_IMAGES,
+    ImageFailure,
+    ImageReadError,
     image_filename,
     suggested_image_name,
 )
 from officeflow.domain.attachment import Attachment
 from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.image_failures import image_error_label
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 if TYPE_CHECKING:
@@ -109,14 +112,25 @@ def read_bounded_image(
         if not device.open(
             stream.fileno(), QIODevice.OpenModeFlag.ReadOnly, QFile.FileHandleFlag.DontCloseHandle
         ):
-            raise ValueError("이미지를 읽을 수 없습니다.")
+            raise ImageReadError(ImageFailure.READ, "이미지를 읽을 수 없습니다.")
         try:
             reader = QImageReader(device)
-            if bytes(reader.format().data()).lower() not in {b"png", b"jpeg", b"jpg", b"bmp"}:
-                raise ValueError("PNG·JPG·BMP 이미지의 미리보기만 지원합니다.")
+            reader.setDecideFormatFromContent(True)
+            if bytes(reader.format().data()).lower() not in {
+                b"png",
+                b"jpeg",
+                b"jpg",
+                b"bmp",
+                b"webp",
+            }:
+                raise ImageReadError(
+                    ImageFailure.UNSUPPORTED, "PNG·JPG·BMP·WebP 이미지의 미리보기만 지원합니다."
+                )
             size = reader.size()
-            if not size.isValid() or size.width() * size.height() > MAX_IMAGE_PIXELS:
-                raise ValueError("이미지가 너무 크거나 이미지 크기를 확인할 수 없습니다.")
+            if not size.isValid():
+                raise ImageReadError(ImageFailure.DECODE, "이미지 크기를 확인할 수 없습니다.")
+            if size.width() * size.height() > MAX_IMAGE_PIXELS:
+                raise ImageReadError(ImageFailure.SIZE, "이미지가 1,600만 픽셀을 넘습니다.")
             if size.width() > target.width() or size.height() > target.height():
                 reader.setScaledSize(size.scaled(target, Qt.AspectRatioMode.KeepAspectRatio))
             reader.setAutoTransform(True)
@@ -124,12 +138,18 @@ def read_bounded_image(
                 raise AttachmentCanceledError("미리보기를 취소했습니다.")
             image = reader.read()
             if image.isNull():
-                raise ValueError("이미지가 손상됐거나 읽을 수 없습니다.")
-            check_image(image)
+                raise ImageReadError(ImageFailure.DECODE, "이미지 내용을 해석할 수 없습니다.")
+            if (
+                image.width() * image.height() > MAX_IMAGE_PIXELS
+                or image.sizeInBytes() > MAX_IMAGE_BYTES
+            ):
+                raise ImageReadError(ImageFailure.SIZE, "이미지가 미리보기 크기 제한을 넘습니다.")
             if canceled():
                 raise AttachmentCanceledError("미리보기를 취소했습니다.")
             if fingerprint() != before:
-                raise ValueError("읽는 중 파일이 변경되었습니다. 저장 후 다시 확인하세요.")
+                raise ImageReadError(
+                    ImageFailure.CHANGING, "읽는 중 파일이 변경되었습니다. 저장 후 다시 확인하세요."
+                )
             if image.width() > target.width() or image.height() > target.height():
                 image = image.scaled(
                     target,
@@ -208,6 +228,7 @@ class ImagePreviewDialog(QDialog):
         self._image = QImage()
         self.caption.clear()
         self.picture.clear()
+        self.picture.setToolTip("")
         self.picture.setText(message)
 
     def load(self, service: AttachmentService, identity: int, name: str) -> None:
@@ -247,7 +268,8 @@ class ImagePreviewDialog(QDialog):
             self._image = picture
             self._render()
         elif state and state.error:
-            self.picture.setText(state.error)
+            self.picture.setText(state.label)
+            self.picture.setToolTip(state.error)
 
     def _start(self) -> None:
         if self._thread is not None or self._pending is None or self._closing:
@@ -281,8 +303,13 @@ class ImagePreviewDialog(QDialog):
 
     @Slot(object)
     def _failed(self, error: object) -> None:
-        if self._active_generation == self._generation and not self._closing:
-            self.picture.setText(str(error))
+        if (
+            self._active_generation == self._generation
+            and not self._closing
+            and not isinstance(error, AttachmentCanceledError)
+        ):
+            self.picture.setText(image_error_label(error))
+            self.picture.setToolTip(str(error))
 
     @Slot()
     def _finished(self) -> None:

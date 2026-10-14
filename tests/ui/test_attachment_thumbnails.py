@@ -235,7 +235,7 @@ def test_original_thumbnail_ignores_edited_view_and_rechecks_frozen_hash(qtbot, 
                 )
             )
             assert coordinator.image_for(client, fixed.id) is None
-            assert coordinator.state_for(client, fixed.id).label == "원본 확인 필요"
+            assert coordinator.state_for(client, fixed.id).label == "고정 내용 불일치"
             assert env.attachments.get_metadata(fixed.id) == fixed
         finally:
             records.shutdown()

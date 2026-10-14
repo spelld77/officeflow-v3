@@ -1,6 +1,7 @@
 """Conservative bounds and user-visible names for explicit image attachments."""
 
 from datetime import datetime
+from enum import StrEnum
 from pathlib import PurePosixPath
 
 from officeflow.domain.attachment import validate_display_name
@@ -9,7 +10,24 @@ MAX_IMAGE_PIXELS = 16_000_000
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_PENDING_BYTES = 128 * 1024 * 1024
 MAX_PENDING_IMAGES = 8
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+
+
+class ImageFailure(StrEnum):
+    UNSUPPORTED = "unsupported"
+    SIZE = "size"
+    READ = "read"
+    INTEGRITY = "integrity"
+    CHANGING = "changing"
+    DECODE = "decode"
+
+
+class ImageReadError(ValueError):
+    """A decoder failure is not evidence that a frozen asset was modified."""
+
+    def __init__(self, kind: ImageFailure, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def image_filename(text: str) -> str:

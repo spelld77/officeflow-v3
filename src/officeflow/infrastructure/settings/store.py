@@ -40,6 +40,7 @@ class AppSettings:
     hourly_notification_holiday_date: str | None = None
     hourly_notification_morning_continuation_date: str | None = None
     attachment_export_directory: str | None = None
+    attachment_import_directory: str | None = None
     attachment_view_mode: str = "list"
     record_window_width: int | None = None
     record_window_height: int | None = None
@@ -69,6 +70,20 @@ class AppSettings:
             or "\x00" in self.attachment_export_directory
         ):
             raise ValueError("첨부 저장 폴더가 올바르지 않습니다.")
+        if self.attachment_import_directory is not None and not valid_import_directory(
+            self.attachment_import_directory
+        ):
+            raise ValueError("첨부 선택 폴더가 올바르지 않습니다.")
+
+
+def valid_import_directory(value: object) -> bool:
+    """Validate syntax only; settings loading must never contact a network share."""
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and "\x00" not in value
+        and Path(value).is_absolute()
+    )
 
 
 def hourly_settings(settings: AppSettings) -> HourlySettings:
@@ -121,6 +136,9 @@ class JsonSettingsStore:
                 or "\x00" in export_directory
             ):
                 values.pop("attachment_export_directory", None)
+            import_directory = values.get("attachment_import_directory")
+            if import_directory is not None and not valid_import_directory(import_directory):
+                values.pop("attachment_import_directory", None)
             collapsed = values.get("collapsed_today_groups")
             if isinstance(collapsed, list):
                 values["collapsed_today_groups"] = tuple(

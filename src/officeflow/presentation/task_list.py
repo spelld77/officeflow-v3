@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import ClassVar
 from zoneinfo import ZoneInfo
 
@@ -19,12 +20,20 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
-from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QHelpEvent, QMouseEvent, QPainter, QPen
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QToolTip,
+)
 
 from officeflow.application.tasks import TaskGroup, TaskPage
 from officeflow.domain.enums import TaskPriority, TaskStatus
 from officeflow.domain.task import Task
+from officeflow.presentation.schedule_help import schedule_help
 
 PageLoader = Callable[[int, int], TaskPage]
 GroupPageLoader = Callable[[TaskGroup, int, int], TaskPage]
@@ -93,6 +102,10 @@ class TaskListModel(QAbstractListModel):
         if isinstance(entry, Task):
             if role == Qt.ItemDataRole.DisplayRole:
                 return entry.title
+            if role == Qt.ItemDataRole.AccessibleTextRole:
+                return entry.title + (
+                    " · 첨부파일 보기: 첨부 버튼 또는 오른쪽 메뉴" if entry.has_attachments else ""
+                )
             if role == Qt.ItemDataRole.ToolTipRole:
                 attachment = "\n첨부파일 있음" if entry.has_attachments else ""
                 snoozed_until = self.snoozed_until_for_task(entry)
@@ -301,6 +314,7 @@ class TaskListModel(QAbstractListModel):
 class TaskItemDelegate(QStyledItemDelegate):
     quickCompleteRequested = Signal(object)
     menuRequested = Signal(object, object)
+    attachmentsRequested = Signal(object)
 
     PRIORITY_COLORS: ClassVar[dict[TaskPriority, QColor]] = {
         TaskPriority.NORMAL: QColor("#94A3B8"),
@@ -319,6 +333,10 @@ class TaskItemDelegate(QStyledItemDelegate):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._compact = False
+        self._pressed_attachment = QPersistentModelIndex()
+        self._blocked_activation = QPersistentModelIndex()
+        self._blocked_until = 0.0
+        self.clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     def set_compact(self, compact: bool) -> None:
         self._compact = compact
@@ -484,7 +502,7 @@ class TaskItemDelegate(QStyledItemDelegate):
 
         status_top = rect.top() + (7 if self._compact else 12)
         if task.has_attachments:
-            attachment_rect = QRectF(rect.right() - 158, status_top, 48, 24)
+            attachment_rect = self.attachment_rect(option)
             painter.setBrush(QColor("#EAF1FF"))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(attachment_rect, 12, 12)
@@ -522,11 +540,29 @@ class TaskItemDelegate(QStyledItemDelegate):
         entry = index.data(TaskListModel.ENTRY_ROLE)
         if (
             not isinstance(entry, Task)
-            or event.type() is not QEvent.Type.MouseButtonRelease
             or not isinstance(event, QMouseEvent)
             or event.button() is not Qt.MouseButton.LeftButton
         ):
             return super().editorEvent(event, model, option, index)
+        badge = entry.has_attachments and self.attachment_rect(option).contains(event.position())
+        if event.type() is QEvent.Type.MouseButtonPress:
+            self._pressed_attachment = (
+                QPersistentModelIndex(index) if badge else QPersistentModelIndex()
+            )
+            if not badge:
+                self._blocked_activation = QPersistentModelIndex()
+            return bool(badge) or super().editorEvent(event, model, option, index)
+        if event.type() is QEvent.Type.MouseButtonDblClick and badge:
+            self._pressed_attachment = QPersistentModelIndex(index)
+            self._request_attachments(entry, index)
+            return True
+        if event.type() is not QEvent.Type.MouseButtonRelease:
+            return super().editorEvent(event, model, option, index)
+        pressed = self._pressed_attachment == index
+        self._pressed_attachment = QPersistentModelIndex()
+        if badge and pressed:
+            self._request_attachments(entry, index)
+            return True
         if self._menu_rect(option).contains(event.position()):
             self.menuRequested.emit(entry, event.globalPosition().toPoint())
             return True
@@ -538,6 +574,62 @@ class TaskItemDelegate(QStyledItemDelegate):
             self.quickCompleteRequested.emit(entry)
             return True
         return super().editorEvent(event, model, option, index)
+
+    def _request_attachments(self, task: Task, index: QModelIndex | QPersistentModelIndex) -> None:
+        self._blocked_activation = QPersistentModelIndex(index)
+        self._blocked_until = monotonic() + QApplication.doubleClickInterval() / 1000.0
+        self.attachmentsRequested.emit(task)
+
+    def suppress_activation(self, index: QModelIndex) -> bool:
+        return self._blocked_activation == index and monotonic() <= self._blocked_until
+
+    def attachment_rect(self, option: QStyleOptionViewItem) -> QRectF:
+        rect = QRectF(option.rect.adjusted(4, 3, -4, -3))
+        return QRectF(rect.right() - 158, rect.top() + (7 if self._compact else 12), 48, 24)
+
+    def schedule_rect(self, option: QStyleOptionViewItem, task: Task) -> QRectF:
+        left = option.rect.left() + 58
+        if self._compact:
+            font = QFont(option.font)
+            font.setBold(True)
+            available = option.rect.width() - 58 - (178 if task.has_attachments else 124)
+            width = min(
+                max(0, available),
+                QFontMetrics(font).horizontalAdvance(format_task_schedule_compact(task)),
+            )
+            return QRectF(left, option.rect.top() + 8, width, option.rect.height() - 16)
+        if task.matched_attachment_name:
+            return QRectF()
+        available = option.rect.width() - 76
+        width = min(
+            max(0, available), option.fontMetrics.horizontalAdvance(format_task_schedule(task))
+        )
+        return QRectF(left, option.rect.top() + 34, width, option.rect.height() - 42)
+
+    def helpEvent(
+        self,
+        event: QHelpEvent,
+        view: QAbstractItemView,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> bool:
+        task = index.data(TaskListModel.ENTRY_ROLE)
+        if isinstance(task, Task):
+            if task.has_attachments and self.attachment_rect(option).contains(event.pos()):
+                QToolTip.showText(event.globalPos(), "첨부파일 보기", view)
+                return True
+            if self.schedule_rect(option, task).contains(event.pos()):
+                QToolTip.showText(
+                    event.globalPos(),
+                    schedule_help(
+                        task,
+                        self.clock(),
+                        confirmed=not task.recurrence_rule or task.occurrence_start is not None,
+                    ),
+                    view,
+                )
+                return True
+        return super().helpEvent(event, view, option, index)
 
     @staticmethod
     def _completion_rect(option: QStyleOptionViewItem) -> QRectF:

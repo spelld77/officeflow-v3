@@ -90,6 +90,13 @@ def test_attachment_space_readability_and_five_rows(qtbot, qapp, tmp_path, dark)
                 )
 
             capture("small-list", five=True)
+            button_image = dialog.add_attachment_button.grab().toImage()
+            assert button_image.pixelColor(10, 10).name() == "#2f6fed"
+            dialog.add_attachment_button.setEnabled(False)
+            assert (
+                dialog.add_attachment_button.grab().toImage().pixelColor(10, 10).lightness() > 200
+            )
+            dialog.add_attachment_button.setEnabled(True)
             dialog.select_attachment(works[0].id)
             qtbot.waitUntil(lambda: "출처:" in dialog.attachment_detail.full_text)
             choose_kind(dialog, "work")

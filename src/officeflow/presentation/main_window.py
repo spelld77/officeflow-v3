@@ -476,6 +476,8 @@ class MainWindow(QMainWindow):
         self._content_stack.setObjectName("workspaceStack")
         self._task_content = self._build_content()
         self._calendar_page = CalendarPage(timezone=self._settings.timezone)
+        self._calendar_page.calendar.clock = self._view_clock
+        self._calendar_page.day_list.clock = self._view_clock
         self._calendar_page.monthChanged.connect(self._refresh_calendar)
         self._calendar_page.dateSelected.connect(self._refresh_calendar_day)
         self._calendar_page.alarmMoreRequested.connect(self._reload_day_reminder_preview)
@@ -599,8 +601,10 @@ class MainWindow(QMainWindow):
         self._task_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._task_delegate = TaskItemDelegate(self._task_list)
         self._task_list.setItemDelegate(self._task_delegate)
+        self._task_delegate.clock = self._view_clock
         self._task_delegate.quickCompleteRequested.connect(self._quick_complete_task)
         self._task_delegate.menuRequested.connect(self._show_task_menu_for_task)
+        self._task_delegate.attachmentsRequested.connect(self._open_task_attachments)
         self._task_list.setMouseTracking(True)
         self._task_list.setFrameShape(QFrame.Shape.NoFrame)
         self._task_list.setSpacing(1)
@@ -920,6 +924,8 @@ class MainWindow(QMainWindow):
         self._refresh_calendar()
 
     def _refresh_tasks(self, *, preserve_state: bool = False) -> None:
+        for record in self.findChildren(TaskRecordsDialog):
+            record.refresh_header()
         self._synchronize_reminder_dialog()
         self._today_reminders.setVisible(
             self._preview_controller is not None and self._current_view is TaskView.TODAY
@@ -1286,6 +1292,8 @@ class MainWindow(QMainWindow):
             dialog.tabChanged.connect(self._remember_record_tab)
         if isinstance(dialog, (TaskRecordsDialog, WorkLogBrowserDialog)):
             dialog.windowSizeChanged.connect(self._remember_record_window_size)
+            dialog.importDirectoryChanged.connect(self._remember_attachment_import_directory)
+            dialog.editRequested.connect(self._edit_viewed_task)
         if isinstance(dialog, (TaskRecordsDialog, WorkLogBrowserDialog, DataManagementDialog)):
             dialog.exportDirectoryChanged.connect(self._remember_attachment_export_directory)
 
@@ -1343,15 +1351,17 @@ class MainWindow(QMainWindow):
                     self._settings.record_window_width,
                     self._settings.record_window_height,
                 ),
-                initial_tab=initial_tab or self._last_record_tab,
+                initial_tab=initial_tab or "checklist",
+                attachment_import_directory=self._settings.attachment_import_directory,
+                clock=self._view_clock,
                 folder_link_service=self._folder_link_service,
                 parent=self,
             )
             dialog.changed.connect(self._refresh_tasks)
             self._keep_file_dialog(dialog)
         else:
-            if initial_tab is not None:
-                dialog.select_tab(initial_tab)
+            dialog.refresh_header()
+            dialog.show_entry(initial_tab)
             self._last_record_tab = dialog.current_tab_key
             dialog.show()
             dialog.raise_()
@@ -1568,7 +1578,9 @@ class MainWindow(QMainWindow):
             self._task_list.setCurrentIndex(index)
         self._selected_task_id = task.id
         self._selected_occurrence_start = (
-            task.starts_at if task.deleted_at is None and task.recurrence_rule else None
+            task.occurrence_start or task.starts_at
+            if task.deleted_at is None and task.recurrence_rule
+            else None
         )
 
     def _build_task_context_menu(self, task: Task, *, calendar_actions: bool = False) -> QMenu:
@@ -2067,7 +2079,20 @@ class MainWindow(QMainWindow):
         if self._calendar_active:
             self._open_selected_records()
         else:
-            self._open_selected_task()
+            self._open_task_from_index(self._task_list.currentIndex(), from_keyboard=True)
+
+    def _edit_viewed_task(self, task_id: int) -> None:
+        try:
+            self._open_editor(self._task_service.get(task_id))
+        except (LookupError, ValueError) as error:
+            self.statusBar().showMessage(str(error), 5000)
+
+    def _open_task_attachments(self, task: Task) -> None:
+        self._selected_task_id = task.id
+        self._selected_occurrence_start = (
+            task.occurrence_start or task.starts_at if task.recurrence_rule else None
+        )
+        self._open_selected_attachments()
 
     def _open_or_restore_selected(self) -> None:
         if self._current_view is TaskView.TRASH:
@@ -2296,23 +2321,23 @@ class MainWindow(QMainWindow):
                 self._settings.record_window_width,
                 self._settings.record_window_height,
             ),
+            attachment_import_directory=self._settings.attachment_import_directory,
+            clock=self._view_clock,
             parent=self,
         )
         dialog.changed.connect(self._refresh_tasks)
         self._keep_file_dialog(dialog)
 
-    def _open_task_from_index(self, index: QModelIndex) -> None:
+    def _open_task_from_index(self, index: QModelIndex, *, from_keyboard: bool = False) -> None:
+        if not from_keyboard and self._task_delegate.suppress_activation(index):
+            return
         task = self._task_model.task_at(index)
         if task is not None:
             self._selected_task_id = task.id
-            if task.deleted_at is not None:
-                self.statusBar().showMessage("휴지통의 업무는 먼저 복원한 뒤 열 수 있습니다.", 3500)
-                return
-            self._open_editor(
-                self._task_service.get(task.id)
-                if task.recurrence_rule and task.id is not None
-                else task
+            self._selected_occurrence_start = (
+                task.occurrence_start or task.starts_at if task.recurrence_rule else None
             )
+            self._open_selected_records()
 
     def _open_editor(self, task: Task | None, *, initial_date: date | None = None) -> None:
         for existing in self._file_dialogs:
@@ -2592,7 +2617,7 @@ class MainWindow(QMainWindow):
         task = self._task_model.task_at(current)
         self._selected_task_id = task.id if task else None
         self._selected_occurrence_start = (
-            task.starts_at
+            task.occurrence_start or task.starts_at
             if task is not None and task.deleted_at is None and task.recurrence_rule
             else None
         )
@@ -3486,6 +3511,21 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     "파일은 저장되었지만 마지막 저장 폴더 설정은 저장하지 못했습니다.", 8000
                 )
+
+    def _remember_attachment_import_directory(self, directory: str) -> None:
+        try:
+            self._settings = replace(self._settings, attachment_import_directory=directory)
+        except ValueError:
+            return
+        for record in self.findChildren(TaskRecordsDialog):
+            record._attachment_import_directory = directory
+        for browser in self.findChildren(WorkLogBrowserDialog):
+            browser._attachment_import_directory = directory
+        if self._save_settings:
+            try:
+                self._save_settings(self._settings)
+            except OSError:
+                self.statusBar().showMessage("선택 폴더를 저장하지 못했습니다.", 8000)
 
     def _save_search_file(self, value: object) -> None:
         if isinstance(value, AttachmentSearchHit) and self._attachment_export_controller:

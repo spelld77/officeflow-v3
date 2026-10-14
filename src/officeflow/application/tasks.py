@@ -151,16 +151,30 @@ class ScheduledTask:
     @property
     def display_task(self) -> Task:
         status = self.task.status
-        if self.occurrence_status is OccurrenceStatus.COMPLETED:
+        if self.occurrence_status is OccurrenceStatus.COMPLETED and status not in (
+            TaskStatus.COMPLETED,
+            TaskStatus.CANCELED,
+            TaskStatus.ARCHIVED,
+        ):
             status = TaskStatus.COMPLETED
-        elif self.occurrence_status is OccurrenceStatus.CANCELED:
+        elif self.occurrence_status in (
+            OccurrenceStatus.CANCELED,
+            OccurrenceStatus.SKIPPED,
+        ) and status not in (TaskStatus.COMPLETED, TaskStatus.CANCELED, TaskStatus.ARCHIVED):
             status = TaskStatus.CANCELED
         return replace(
             self.task,
             starts_at=self.starts_at,
             ends_at=self.ends_at,
             status=status,
-            completed_at=self.completed_at if status is TaskStatus.COMPLETED else None,
+            completed_at=(
+                self.task.completed_at
+                if self.task.status is TaskStatus.COMPLETED
+                else self.completed_at
+            )
+            if status is TaskStatus.COMPLETED
+            else None,
+            occurrence_start=self.occurrence_start,
         )
 
 
@@ -172,6 +186,7 @@ class CalendarRepositoryOverview:
     regular_day_counts: tuple[int, ...]
     regular_total: int
     recurrence_templates: tuple[Task, ...]
+    regular_unfinished_day_counts: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +197,8 @@ class CalendarOverview:
     day_counts: tuple[tuple[date, int], ...]
     total: int
     summary_mode: bool
+    day_unfinished_counts: tuple[tuple[date, int], ...] | None = None
+    previews_complete: bool | None = None
 
     def count_for(self, day: date) -> int:
         return next((count for item_day, count in self.day_counts if item_day == day), 0)
@@ -469,6 +486,26 @@ class TaskService:
             self.get_including_deleted(occurrence.task_id)
         return occurrence
 
+    def view_task(self, task: Task, occurrence_start: datetime | None = None) -> Task:
+        """Project a selected occurrence without materializing it or changing its template."""
+        if occurrence_start is None:
+            return task
+        occurrence = self._validated_occurrence(task, occurrence_start)
+        shown = ScheduledTask(
+            task,
+            occurrence.starts_at,
+            occurrence.ends_at,
+            occurrence_start,
+            occurrence.status,
+            occurrence.completed_at,
+        ).display_task
+        if occurrence.status is OccurrenceStatus.SKIPPED:
+            shown = replace(shown, status=TaskStatus.CANCELED)
+        # Closing the whole task takes precedence over a pending/completed historical occurrence.
+        if task.status in (TaskStatus.CANCELED, TaskStatus.ARCHIVED, TaskStatus.COMPLETED):
+            shown = replace(shown, status=task.status, completed_at=task.completed_at)
+        return replace(shown, occurrence_start=occurrence_start)
+
     def ensure_occurrence(
         self,
         task_id: int,
@@ -674,6 +711,8 @@ class TaskService:
         summary_threshold: int = CALENDAR_SUMMARY_THRESHOLD,
     ) -> CalendarOverview:
         """Return exact day counts and bounded previews for a visible calendar range."""
+        from officeflow.application.calendar_display import CalendarState, calendar_state
+
         if end_date <= start_date:
             raise ValueError("캘린더 종료일은 시작일보다 늦어야 합니다.")
         if preview_limit < 1:
@@ -702,6 +741,11 @@ class TaskService:
             preview_limit=preview_limit,
         )
         counts = list(source.regular_day_counts)
+        unfinished = (
+            list(source.regular_unfinished_day_counts)
+            if source.regular_unfinished_day_counts is not None
+            else None
+        )
         recurring = self._expand_recurring_templates(
             source.recurrence_templates,
             range_start,
@@ -715,6 +759,8 @@ class TaskService:
             last = min(span[1], end_date - timedelta(days=1))
             for offset in range((last - first).days + 1):
                 counts[(first + timedelta(days=offset) - start_date).days] += 1
+                if unfinished is not None and calendar_state(scheduled) is CalendarState.UNFINISHED:
+                    unfinished[(first + timedelta(days=offset) - start_date).days] += 1
 
         total = source.regular_total + len(recurring)
         summary_mode = total > summary_threshold
@@ -729,6 +775,7 @@ class TaskService:
                 sorted(
                     (*regular, *recurring),
                     key=lambda item: (
+                        calendar_state(item),
                         item.starts_at,
                         not item.task.is_pinned,
                         item.task.title.casefold(),
@@ -741,6 +788,10 @@ class TaskService:
             day_counts=tuple(zip(days, counts, strict=True)),
             total=total,
             summary_mode=summary_mode,
+            day_unfinished_counts=(
+                tuple(zip(days, unfinished, strict=True)) if unfinished is not None else None
+            ),
+            previews_complete=len(previews) == total,
         )
 
     def _expand_recurring_templates(

@@ -7,7 +7,7 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 ## 현재 상태
 
 - 단계: Phase 8 완료
-- 버전: OfficeFlow 3.0.11
+- 버전: OfficeFlow 3.0.12
 - 구현 상태: 설치·업그레이드·제거 검증을 마친 Windows 데스크톱 앱
 - 주요 개선: 첨부 종류 필터·작업본 출처·창 크기 기억·외부 폴더 연결·HTML/Excel 업무 보관·간편 시간 입력·캡처 이미지·썸네일
 - 대상 플랫폼: Windows 10/11
@@ -15,9 +15,22 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 - 데이터 저장소: SQLite
 - 배포 형태: 단일 사용자용 설치 프로그램, 전체 EXE 폴더 ZIP 또는 Python 3.12 실행 모드
 
-3.0.11은 DB0016·전체 백업 v3를 유지하며 3.0.10에서 추가 DB 이행은 없다.
+3.0.12는 DB0016·전체 백업 v3를 유지하며 3.0.10/3.0.11에서 추가 DB 이행은 없다.
+이번 버전에는 첨부 드롭/버튼·달력 미완료 우선 표시와
+WebP·이미지 오류 구분·첨부 입력 보완, 설명을 포함한 업무 보기,
+첨부 배지 클릭과 날짜 도움말이 추가됐다. 업무 보기 생성 중 작은 창이 잠깐 나타나는 현상도 보완했다.
 기존 DB는 첫 실행에서 보호 사본을 만든 뒤 필요한 이행을 순서대로 적용한다.
 0016 DB와 이 DB가 포함된 백업은 **3.0.10 이상**에서 사용한다. 구버전 복귀에는 업데이트 전 자료가 필요하다.
+
+## 3.0.12 주요 개선
+
+목록과 달력의 더블클릭/Enter는 설명·일정·상태가 있는 `업무 보기`로 통일한다. 편집은 `수정`에서 한다.
+목록의 첨부 배지를 누르면 같은 창의 첨부 탭으로 바로 이동한다. 미저장 결과·일지와 원래 반복 회차는 유지한다.
+WebP와 PNG 이름의 실제 WebP도 미리보기하며 형식·크기·권한·누락과 고정 내용 불일치를 구분한다.
+첨부 이름 변경은 전체 파일명을 받아 같은 확장자를 한 번만 붙이고, 완성 이름은 한 줄·전체 도움말로 보여준다.
+파일 추가의 마지막 선택 폴더를 기억하고 날짜 도움말에는 시작/종료까지의 달력 날짜 차이를 표시한다.
+드롭/파일 추가 버튼·달력 미완료 우선/숨은 건수·알림 대상 스크롤을 보완했다.
+자세한 내용은 [릴리스 노트](docs/release-notes-3.0.12.md), 검증/공개 결과는 [체크리스트](docs/67-release-checklist.md)를 따른다.
 
 ## 3.0.11 주요 개선
 
@@ -117,6 +130,8 @@ PNG/JPEG/BMP를 지원하며 추가 DB 이행이나 의존성은 없다.
 - [3.0.10 릴리스 노트](docs/release-notes-3.0.10.md)
 - [3.0.11 릴리스 체크리스트](docs/62-release-checklist.md)
 - [3.0.11 릴리스 노트](docs/release-notes-3.0.11.md)
+- [3.0.12 릴리스 체크리스트](docs/67-release-checklist.md)
+- [3.0.12 릴리스 노트](docs/release-notes-3.0.12.md)
 - [외부 폴더·업무 보관 공통설계](docs/46-folder-and-external-archive-common-design.md)
 - [외부 폴더·업무 보관 상세설계](docs/47-folder-and-external-archive-detail.md)
 - [외부 폴더·업무 보관 구현·검증](docs/48-folder-and-external-archive-results.md)
@@ -128,11 +143,15 @@ PNG/JPEG/BMP를 지원하며 추가 DB 이행이나 의존성은 없다.
 - [화면 정돈 8~14번 구현·검증](docs/58-ui-simplification-phase-2-results.md)
 - [첨부 공간·종류 필터·출처 상세설계](docs/60-attachment-space-and-source-design.md)
 - [첨부 공간·종류 필터·출처 구현·검증](docs/61-attachment-space-and-source-results.md)
+- [첨부 드롭·버튼/달력 미완료 우선 상세설계](docs/63-attachment-drop-and-calendar-attention-design.md)
+- [첨부 드롭·버튼/달력 미완료 우선 구현·검증](docs/64-attachment-drop-and-calendar-attention-results.md)
+- [첨부 호환·입력/업무 보기 통합 상세설계](docs/65-attachment-and-task-view-combined-design.md)
+- [첨부 호환·입력/업무 보기 통합 구현·검증](docs/66-attachment-and-task-view-combined-results.md)
 - [Phase 8 완료 보고서](docs/phase-reports/phase-8.md)
 
 ## 설치
 
-3.0.11은 기존 기능과 첨부 공간·종류 필터·작업본 출처·창 크기 기억 개선을 포함한다.
+3.0.12는 기존 기능과 업무 보기·첨부 입력/WebP·달력 조회 개선을 포함한다.
 업데이트 전 전체 백업을 만들고 OfficeFlow를 트레이까지 종료한다. 기존 업무·첨부를 자동 삭제하지 않는다.
 
 3.0.9는 백업 실패의 지속 안내, 수동 자료 검사와 종료 진단, 보관 자료·메모 검색,
@@ -162,14 +181,14 @@ PNG/JPEG/BMP를 지원하며 추가 DB 이행이나 의존성은 없다.
 `매시 알림` 또는 `설정 → 매시 알림 설정...`에서 조정한다. 인사랑 기록은 직접 해야 하며
 이 기능은 기록·출근 인증을 하지 않는다. 이번 실행에서 끄더라도 다음 실행에는 다시 켜진다.
 
-[최신 릴리스](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.11)의
-`OfficeFlow-3.0.11-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
+[최신 릴리스](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.12)의
+`OfficeFlow-3.0.12-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
 기본적으로 현재 사용자에게 설치된다. 기존 버전 위에 설치하면 업무 DB와 첨부파일을
 유지한 채 프로그램 파일만 갱신한다.
 
 설치본에는 앱 안에서 열 수 있는 한국어 도움말이 포함된다. 프로그램을 제거해도
 `%LOCALAPPDATA%\OfficeFlow`의 사용자 데이터는 자동 삭제하지 않는다.
-설치 없이 EXE로 실행하려면 `OfficeFlow-3.0.11-Windows.zip` 전체를 압축 해제하고
+설치 없이 EXE로 실행하려면 `OfficeFlow-3.0.12-Windows.zip` 전체를 압축 해제하고
 `OfficeFlow/OfficeFlow.exe`를 실행한다. `_internal`을 포함한 폴더 전체가 필요하다.
 이 ZIP 방식도 기본 사용자 데이터 위치를 사용하며 USB 독립 데이터 모드는 아니다.
 

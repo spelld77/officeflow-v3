@@ -63,6 +63,24 @@ def validate_display_name(name: str, *, extension: str | None = None) -> str:
     return value
 
 
+def renamed_display_name(text: str, extension: str) -> str:
+    """Accept a stem or one complete filename, never change the fixed extension."""
+    if not text.strip() or text.endswith((" ", ".")):
+        raise AttachmentValidationError(
+            "이름을 입력하세요. 끝의 공백이나 마침표는 사용할 수 없습니다."
+        )
+    stem = text
+    if extension and stem.casefold().endswith(extension.casefold()):
+        stem = stem[: -len(extension)]
+        if stem.casefold().endswith(extension.casefold()):
+            raise AttachmentValidationError(
+                "확장자를 여러 번 입력했습니다. 파일 이름을 확인하세요."
+            )
+    if not stem.strip() or stem.endswith((" ", ".")):
+        raise AttachmentValidationError("확장자를 제외한 파일 이름을 입력하세요.")
+    return validate_display_name(stem + extension, extension=extension)
+
+
 @dataclass(frozen=True, slots=True)
 class FileObservation:
     size_bytes: int

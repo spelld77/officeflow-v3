@@ -12,6 +12,20 @@ QMainWindow, #appRoot {
 QDialog {
     background: #F4F6FA;
 }
+QPlainTextEdit#taskDescription {
+    color: #172033;
+    background: #FFFFFF;
+    min-height: 0px;
+    padding: 4px 8px;
+}
+QPushButton#taskDescriptionToggle {
+    padding: 2px 7px;
+    min-height: 20px;
+}
+QPushButton#editViewedTaskButton {
+    padding: 3px 9px;
+    min-height: 20px;
+}
 QWidget#taskEditorBody {
     color: #172033;
     background: #F4F6FA;
@@ -453,6 +467,15 @@ QPushButton[primaryAction="true"] {
 }
 QPushButton[primaryAction="true"]:hover {
     background: #245CCC;
+}
+QWidget#attachmentBody, QWidget#attachmentBodyViewport {
+    color: #172033;
+    background: #FFFFFF;
+}
+QPushButton#addAttachmentButton:disabled {
+    color: #9AA5B7;
+    background: #F7F8FA;
+    border: 1px solid #D9E0EA;
 }
 QPushButton#primaryButton:hover {
     background: #245CCC;

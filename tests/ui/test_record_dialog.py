@@ -252,10 +252,7 @@ def test_work_log_browser_pages_search_results_and_filters_date_range(
     dialog._refresh()
 
     assert dialog.list_widget.count() == 4
-    assert (
-        dialog.result_count_label.text()
-        == "2026-08-10(월)~2026-08-12(수) 검색 결과 4개 업무"
-    )
+    assert dialog.result_count_label.text() == "2026-08-10(월)~2026-08-12(수) 검색 결과 4개 업무"
 
 
 def test_work_log_browser_groups_completion_and_logs_by_task(
@@ -527,6 +524,7 @@ def test_task_records_dialog_imports_files_dropped_on_attachment_list(
         task_service=task_service,
         record_service=record_service,
         attachment_service=attachment_service,
+        initial_tab="attachments",
     )
     qtbot.addWidget(dialog)
     dialog.show()
@@ -541,7 +539,10 @@ def test_task_records_dialog_imports_files_dropped_on_attachment_list(
     )
 
     dialog.attachment_list.dropEvent(event)
-    qtbot.waitUntil(lambda: dialog._attachment_thread is None, timeout=3_000)
+    qtbot.waitUntil(
+        lambda: not dialog._attachment_drop_router.pending and dialog._attachment_thread is None,
+        timeout=3_000,
+    )
 
     assert event.isAccepted()
     assert dialog.attachment_list.count() == 2
