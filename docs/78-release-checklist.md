@@ -1,6 +1,6 @@
 # OfficeFlow 3.0.13 릴리스 체크리스트
 
-작성일: 2026-10-17 (Asia/Seoul). 상태: **검증·배포물 생성 완료, 커밋·GitHub 공개 준비 중.**
+작성일: 2026-10-17 (Asia/Seoul). 상태: **문서·검증·EXE/설치본/ZIP·커밋/태그 업로드·최신 정식 릴리스 공개 완료.**
 
 ## 범위와 안전
 
@@ -17,8 +17,8 @@ DB0016·백업 v3 유지, 실제 사용자 자료/설치/Python 실행 폴더를
 - [x] Windows 대표 화면 100/150/200%, 밝은/어두운 팔레트·좁은 창 검증
 - [x] EXE·격리 설치/재설치/제거·Windows/Python ZIP·체크섬/manifest
 - [x] 새 프로필·기존 자료/파일/설정·백업 호환·추출 실행·ZIP 소스 대조
-- [ ] 소스 커밋/태그·원격 업로드·GitHub 자산 해시 대조·정식 공개
-- [ ] 공개 다운로드 검증·소유 임시 fixture 정리
+- [x] 소스 커밋/태그·원격 업로드·GitHub 자산 해시 대조·정식 공개
+- [x] 공개 다운로드 검증·소유 임시 fixture 정리
 
 ## 검증 결과
 
@@ -66,6 +66,21 @@ Windows 11 / Python 3.12.4 / PySide6·Qt 6.11.2. 사용자 자료가 아닌 합�
 | OfficeFlow-Python-3.0.13.zip.sha256.txt | 96 | `d9979d39219c054bafacb22d4d5ca6903e991a0e56b159d3ae09bd058347957d` |
 | SHA256SUMS.txt | 105,208 | `33c1bbcd1e79ef2b7b6cfc953216755d3d71dddd979d4c14972ef3c6cb95af70` |
 | release-manifest.json | 167,164 | `dc829143f9895f2d7028c168869ee5db1e4f89472b9af72b56f34853d30c9a2b` |
+
+## GitHub 공개 결과
+
+- 2026-10-17 00:18:28 KST(2026-10-16 15:18:28 UTC)에
+  [OfficeFlow 3.0.13](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.13)을 최신 정식 릴리스로 공개했다.
+  release ID `415100370`, draft/prerelease=false, 직접 업로드한 자산 6개다.
+- 소스 커밋 `4c6087cb3dda00cbde9c631a2f7fc21e43e8f49a`와 annotated tag `v3.0.13`을 원격 main/태그에 atomic push했다.
+  태그 객체 `deb7d5303b5b6d68ff5c7eca18789045dd400fc4`, peeled commit은 소스 커밋과 같다.
+- 초안 목록의 정확한 릴리스 ID로 6개 자산의 고유 이름·uploaded 상태·크기·GitHub SHA-256 digest를 대조한 후 공개했다.
+  GitHub 초안은 태그 endpoint에서 404를 반환해 초안 목록/ID 조회를 사용했다. 공개 후 태그/latest endpoint 모두 정상 확인했다.
+- 공개 Python ZIP과 체크섬을 실제 내려받아 로컬 배포물과 SHA-256을 대조했다.
+  검증용 다운로드 중복 폴더(573,617 bytes)는 경로/파일/연결 여부 확인 후 정리했으며 최종 dist는 유지했다.
+  GitHub에서 다시 받을 수 있다. 앞선 격리 fixture 8개와 합해 이번 소유 임시 폴더 9개를 정리했다.
+- 기존 3.0.12 release ID `412913464`와 자산 6개는 유지했다. 기존 공개 릴리스/실사용 실행 폴더를 변경하지 않았다.
+- 공개 결과는 문서 전용 후속 커밋으로 main에 반영한다. 태그·배포물은 검증한 소스 커밋에 유지한다.
 
 ## 업데이트와 미검증 환경
 
