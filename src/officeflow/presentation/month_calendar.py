@@ -27,12 +27,15 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStyle,
+    QStyleOptionButton,
     QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from officeflow.application.calendar_display import CalendarState, calendar_row_key, calendar_state
+from officeflow.application.day_overview import DayOverviewResult
 from officeflow.application.reminder_groups import (
     ReminderGroup,
     merge_day_reminders,
@@ -41,8 +44,9 @@ from officeflow.application.reminder_groups import (
 from officeflow.application.reminder_preview import ReminderPreviewItem, ReminderPreviewResult
 from officeflow.application.reminder_runtime import scope_label
 from officeflow.application.tasks import CalendarOverview, ScheduledTask
-from officeflow.domain.enums import TaskPriority
-from officeflow.presentation.dates import WEEKDAYS
+from officeflow.presentation.calendar_style import priority_color
+from officeflow.presentation.dates import WEEKDAYS, format_date
+from officeflow.presentation.day_calendar import DayCalendarPanel
 from officeflow.presentation.reminder_groups import (
     ReminderGroupDetailsDialog,
     group_summary,
@@ -729,17 +733,16 @@ class MonthCalendarWidget(QWidget):
     def _task_color(task: ScheduledTask) -> QColor:
         if calendar_state(task) in {CalendarState.COMPLETED, CalendarState.INACTIVE}:
             return QColor("#7D899E")
-        return QColor(
-            {
-                TaskPriority.NORMAL: "#4778D9",
-                TaskPriority.ATTENTION: "#3B8D78",
-                TaskPriority.IMPORTANT: "#CF7B2A",
-                TaskPriority.URGENT: "#C74A55",
-            }[task.priority]
-        )
+        return QColor(priority_color(task.priority))
 
 
 class CalendarPage(QFrame):
+    modeChanged = Signal(str)
+    dayScheduleMoreRequested = Signal()
+    daySchedulePageRequested = Signal(object)
+    alarmSelected = Signal(object)
+    alarmActivated = Signal(object)
+    alarmContextRequested = Signal(object, object)
     monthChanged = Signal(int, int)
     dateSelected = Signal(object)
     taskSelected = Signal(object)
@@ -763,6 +766,8 @@ class CalendarPage(QFrame):
         self._selected_task: ScheduledTask | None = None
         self._snoozed_until: dict[tuple[int, datetime | None], datetime] = {}
         self._compact = False
+        self.mode = "month"
+        self._return_mode = "month"
         self._records_available = True
         self._attachments_available = True
         self._normal_splitter_sizes = [380, 170]
@@ -792,6 +797,15 @@ class CalendarPage(QFrame):
         self.summary_label.hide()
         toolbar.addWidget(self.summary_label)
         toolbar.addStretch()
+        self.view_button = QPushButton("하루 보기", self)
+        self.view_button.setProperty("calendarAction", True)
+        self.view_button.clicked.connect(self._toggle_view)
+        toolbar.addWidget(self.view_button)
+        self.day_alarm_button = QPushButton("하루 알림", self)
+        self.day_alarm_button.setProperty("calendarAction", True)
+        self.day_alarm_button.setToolTip("선택 날짜에 등록된 모든 업무의 알림")
+        self.day_alarm_button.clicked.connect(lambda: self.set_mode("alarms"))
+        toolbar.addWidget(self.day_alarm_button)
         self.create_button = QPushButton("+ 일정")
         self.create_button.setObjectName("calendarCreate")
         self.create_button.setProperty("calendarPrimary", True)
@@ -857,7 +871,7 @@ class CalendarPage(QFrame):
         alarm_summary = QHBoxLayout()
         alarm_summary.addWidget(self.day_count, 1)
         self.day_count.setWordWrap(True)
-        self.reminder_details_button = QPushButton("알림 시각 보기")
+        self.reminder_details_button = QPushButton("선택 업무 알림")
         self.reminder_details_button.setProperty("calendarAction", True)
         self.reminder_details_button.setEnabled(False)
         self.reminder_details_button.clicked.connect(self._show_reminder_details)
@@ -888,6 +902,16 @@ class CalendarPage(QFrame):
         self.calendar_splitter.setStretchFactor(1, 2)
         self.calendar_splitter.setSizes(self._normal_splitter_sizes)
         self._layout.addWidget(self.calendar_splitter, 1)
+        self.day_view = DayCalendarPanel(timezone, self)
+        self.day_view.hide()
+        self._layout.addWidget(self.day_view, 1)
+        self.day_view.selected.connect(self._day_selected)
+        self.day_view.activated.connect(self._day_activated)
+        self.day_view.contextRequested.connect(self._day_context)
+        self.day_view.scheduleMoreRequested.connect(self.dayScheduleMoreRequested.emit)
+        self.day_view.scheduleCursorRequested.connect(self.daySchedulePageRequested.emit)
+        self.day_view.selectionCleared.connect(self.taskSelectionCleared.emit)
+        self.day_view.alarmMoreRequested.connect(self.alarmMoreRequested.emit)
 
         self.previous_button.clicked.connect(lambda: self._move_month(-1))
         self.next_button.clicked.connect(lambda: self._move_month(1))
@@ -917,6 +941,62 @@ class CalendarPage(QFrame):
     def visible_date_range(self) -> tuple[date, date]:
         return self.calendar.visible_date_range
 
+    def _toggle_view(self) -> None:
+        self.set_mode(
+            self._return_mode
+            if self.mode == "alarms"
+            else "day"
+            if self.mode == "month"
+            else "month"
+        )
+
+    def set_mode(self, mode: str) -> None:
+        if mode == self.mode:
+            return
+        if mode == "alarms":
+            self._return_mode = self.mode
+        self.mode = mode
+        self.calendar_splitter.setVisible(mode == "month")
+        self.summary_label.hide()
+        self.day_view.set_day(self.selected_date)
+        self.day_view.setVisible(mode != "month")
+        self.day_view.set_mode(mode)
+        self.view_button.setText(
+            "돌아가기" if mode == "alarms" else "하루 보기" if mode == "month" else "월 보기"
+        )
+        self.previous_button.setToolTip("이전 달" if mode == "month" else "이전 날짜")
+        self.next_button.setToolTip("다음 달" if mode == "month" else "다음 날짜")
+        self._update_month_label()
+        self.modeChanged.emit(mode)
+
+    def set_day_overview(self, result: DayOverviewResult) -> None:
+        self.day_view.set_result(result)
+
+    def _day_selected(self, value: object) -> None:
+        if isinstance(value, ScheduledTask):
+            self._selected_task = value
+            self.taskSelected.emit(value)
+        elif isinstance(value, ReminderPreviewItem):
+            self.alarmSelected.emit(value)
+
+    def _day_activated(self, value: object) -> None:
+        if isinstance(value, ScheduledTask):
+            self.taskActivated.emit(value)
+        elif isinstance(value, ReminderPreviewItem):
+            self.alarmActivated.emit(value)
+
+    def _day_context(self, value: object, position: QPoint) -> None:
+        if isinstance(value, ScheduledTask):
+            self.taskContextRequested.emit(value, position)
+        elif isinstance(value, ReminderPreviewItem):
+            self.alarmContextRequested.emit(value, position)
+
+    def _update_day_alarm_count(self, result: ReminderPreviewResult) -> None:
+        alarms = result.for_date(self.selected_date, self._timezone)
+        count = sum(item.is_pending or item.needs_attention for item in alarms)
+        self.day_alarm_button.setText(f"하루 알림 {count}{'' if result.complete else '+'}건")
+        self._fit_toolbar_controls()
+
     @property
     def selected_date(self) -> date:
         return self.calendar.selected_date
@@ -942,6 +1022,15 @@ class CalendarPage(QFrame):
 
     def set_reminder_preview(self, result: ReminderPreviewResult) -> None:
         self._reminder_preview = result
+        selected = (
+            self._day_alarm_override[1]
+            if self._day_alarm_override and self._day_alarm_override[0] == self.selected_date
+            else result
+        )
+        self.day_view.set_reminders(selected)
+        self._update_day_alarm_count(selected)
+        if self.mode != "month":
+            return
         start, end = self.visible_date_range
         counts = {
             start + timedelta(days=i): sum(
@@ -960,6 +1049,8 @@ class CalendarPage(QFrame):
     def set_day_reminder_preview(self, day: date, result: ReminderPreviewResult) -> None:
         self._day_alarm_override = (day, result)
         if day == self.selected_date:
+            self.day_view.set_reminders(result)
+            self._update_day_alarm_count(result)
             self._refresh_day_list(preserve_selection=True)
 
     def set_snoozed_reminders(
@@ -974,11 +1065,40 @@ class CalendarPage(QFrame):
         self._layout.setContentsMargins(*(12, 8, 12, 9) if compact else (18, 15, 18, 14))
         self._layout.setSpacing(6 if compact else 10)
         self.calendar.setMinimumHeight(146 if compact else 220)
-        for button in (self.previous_button, self.next_button, self.today_button):
-            button.setFixedHeight(30 if compact else 38)
+        self._fit_toolbar_controls()
         self._update_day_list_minimum_height()
         self.create_button.setVisible(not compact)
         self._update_more_hint(self.day_list.count())
+
+    def _fit_toolbar_controls(self) -> None:
+        self.month_label.ensurePolished()
+        self.month_label.setMinimumWidth(
+            max(120, self.month_label.fontMetrics().horizontalAdvance(self.month_label.text()) + 4)
+        )
+        self.month_label.setMinimumHeight(self.month_label.fontMetrics().height() + 2)
+        navigation = (self.previous_button, self.next_button, self.today_button)
+        heights = []
+        for button in (*navigation, self.view_button, self.day_alarm_button, self.create_button):
+            if button in navigation:
+                button.setMinimumHeight(0)
+                button.setMaximumHeight(16_777_215)
+            button.ensurePolished()
+            option = QStyleOptionButton()
+            button.initStyleOption(option)
+            content = button.style().subElementRect(
+                QStyle.SubElement.SE_PushButtonContents, option, button
+            )
+            metrics = button.fontMetrics()
+            width = metrics.horizontalAdvance(button.text()) + button.width() - content.width() + 2
+            button.setMinimumWidth(max(46 if button in navigation[:2] else 0, width))
+            height = metrics.height() + button.height() - content.height() + 2
+            if button in navigation:
+                heights.append(height)
+            else:
+                button.setMinimumHeight(height)
+        height = max(30 if self._compact else 38, *heights)
+        for button in navigation:
+            button.setFixedHeight(height)
 
     def set_record_capabilities(self, *, records: bool, attachments: bool) -> None:
         self._records_available = records
@@ -1041,12 +1161,15 @@ class CalendarPage(QFrame):
             self._normal_splitter_sizes = sizes
 
     def _move_month(self, delta: int) -> None:
+        if self.mode != "month":
+            self._select_date(self.selected_date + timedelta(days=delta))
+            return
         year, month = shift_month(*self.calendar.displayed_month, delta)
         target = date(year, month, min(self.selected_date.day, _days_in_month(year, month)))
         self._set_month_and_date(target)
 
     def _go_today(self) -> None:
-        self._set_month_and_date(datetime.now(ZoneInfo(self._timezone)).date())
+        self._set_month_and_date(self.calendar.clock().astimezone(ZoneInfo(self._timezone)).date())
 
     def _select_alarm_date(self, selected: date) -> None:
         self._select_date(selected, focus_alarm=True)
@@ -1086,6 +1209,8 @@ class CalendarPage(QFrame):
             self._set_month_and_date(selected)
             return
         self.calendar.set_selected_date(selected)
+        self.day_view.set_day(selected)
+        self.taskSelectionCleared.emit()
         self._selected_task = None
         self._day_tasks = ()
         self._refresh_day_list()
@@ -1094,6 +1219,8 @@ class CalendarPage(QFrame):
     def _set_month_and_date(self, selected: date) -> None:
         self.calendar.set_month(selected.year, selected.month)
         self.calendar.set_selected_date(selected)
+        self.day_view.set_day(selected)
+        self.taskSelectionCleared.emit()
         self._selected_task = None
         self._day_tasks = ()
         self._update_month_label()
@@ -1102,9 +1229,17 @@ class CalendarPage(QFrame):
 
     def _update_month_label(self) -> None:
         year, month = self.calendar.displayed_month
-        self.month_label.setText(f"{year}년 {MONTH_LABELS[month - 1]}")
+        self.month_label.setText(
+            f"{year}년 {MONTH_LABELS[month - 1]}"
+            if self.mode == "month"
+            else format_date(self.selected_date)
+        )
+        self._fit_toolbar_controls()
 
     def _refresh_day_list(self, *, preserve_selection: bool = False) -> None:
+        if self.mode != "month":
+            self._update_month_label()
+            return
         selected_key = (
             (
                 self._selected_task.id,
@@ -1337,6 +1472,7 @@ class CalendarPage(QFrame):
             self.taskActivated.emit(task)
 
     def shutdown(self) -> None:
+        self.day_view.shutdown()
         if self._reminder_details:
             self._reminder_details.reject()
 

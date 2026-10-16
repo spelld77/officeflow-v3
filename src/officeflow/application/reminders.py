@@ -201,7 +201,7 @@ class ReminderService:
                     if now is not None
                     else self._initial_schedule_anchor(target)
                 )
-                candidate = self._next_candidate(
+                candidate = self._effective_candidate(
                     target,
                     after=schedule_from,
                     inclusive=True,
@@ -295,7 +295,7 @@ class ReminderService:
                 reminder_id = target.reminder.id
                 if reminder_id is None:
                     continue
-                candidate = self._next_candidate(
+                candidate = self._effective_candidate(
                     target,
                     after=window_start,
                     inclusive=True,
@@ -320,9 +320,20 @@ class ReminderService:
                     continue
                 occurrence_start = target.reminder.next_occurrence_start
                 scheduled_at = target.reminder.next_fire_at
+                if target.task.recurrence_rule and getattr(
+                    self._repository, "moved_occurrences", None
+                ):
+                    candidate = self._effective_candidate(
+                        target, after=window_start, inclusive=True
+                    )
+                    occurrence_start, scheduled_at = candidate if candidate else (None, None)
+                    # Cache validation must not consume the entire work budget:
+                    # max_candidates=1 still has to deliver/advance this target.
                 if scheduled_at is not None and scheduled_at < window_start:
                     # Seek to the recovery window, rather than walking months of misses.
-                    candidate = self._next_candidate(target, after=window_start, inclusive=True)
+                    candidate = self._effective_candidate(
+                        target, after=window_start, inclusive=True
+                    )
                     calculations += 1
                     occurrence_start, scheduled_at = (
                         candidate if candidate is not None else (None, None)
@@ -361,7 +372,7 @@ class ReminderService:
                                     < current - timedelta(seconds=recovery_threshold_seconds),
                                 )
                             )
-                    candidate = self._next_candidate(
+                    candidate = self._effective_candidate(
                         target,
                         after=scheduled_at,
                         inclusive=False,
@@ -443,6 +454,81 @@ class ReminderService:
         occurrence = occurrence_start.astimezone(UTC).isoformat() if occurrence_start else "single"
         scheduled = scheduled_at.astimezone(UTC).isoformat()
         return f"task:{task_id}|occurrence:{occurrence}|reminder:{reminder_id}|at:{scheduled}"
+
+    def _effective_candidates(
+        self,
+        target: ReminderTarget,
+        *,
+        after: datetime,
+        inclusive: bool,
+    ) -> tuple[tuple[datetime | None, datetime], ...]:
+        reader = getattr(self._repository, "moved_occurrences", None)
+        if (
+            not target.task.recurrence_rule
+            or target.reminder.relation is ReminderRelation.ABSOLUTE
+            or reader is None
+            or target.task.id is None
+        ):
+            candidate = self._next_candidate(target, after=after, inclusive=inclusive)
+            return (candidate,) if candidate else ()
+        moved = reader(target.task.id)
+        if not moved:
+            candidate = self._next_candidate(target, after=after, inclusive=inclusive)
+            return (candidate,) if candidate else ()
+        delivery_reader = getattr(self._repository, "delivered_occurrences", None)
+        delivered = delivery_reader(target.reminder.id) if delivery_reader else set()
+        return self._candidates_with_overrides(
+            target, after=after, inclusive=inclusive, moved=moved, delivered=delivered
+        )
+
+    @classmethod
+    def _candidates_with_overrides(
+        cls,
+        target: ReminderTarget,
+        *,
+        after: datetime,
+        inclusive: bool,
+        moved: tuple[TaskOccurrence, ...],
+        delivered: set[datetime],
+    ) -> tuple[tuple[datetime | None, datetime], ...]:
+        if not target.task.recurrence_rule or target.reminder.relation is ReminderRelation.ABSOLUTE:
+            candidate = cls._next_candidate(target, after=after, inclusive=inclusive)
+            return (candidate,) if candidate else ()
+        by_key = {item.occurrence_start: item for item in moved}
+        normal = cls._next_candidate(target, after=after, inclusive=inclusive)
+        while normal is not None and normal[0] in by_key:
+            normal = cls._next_candidate(target, after=normal[1], inclusive=False)
+        result = [normal] if normal is not None else []
+        for occurrence in moved:
+            if (
+                occurrence.status is not OccurrenceStatus.PENDING
+                or occurrence.occurrence_start in delivered
+            ):
+                continue
+            base = (
+                occurrence.starts_at
+                if target.reminder.relation is ReminderRelation.START
+                else occurrence.ends_at
+            )
+            if base is None:
+                continue
+            due = cls._relative_due(target.task, base, target.reminder.offset_minutes or 0)
+            if due > after or (inclusive and due == after):
+                result.append((occurrence.occurrence_start, due))
+        return tuple(result)
+
+    def _effective_candidate(
+        self,
+        target: ReminderTarget,
+        *,
+        after: datetime,
+        inclusive: bool,
+    ) -> tuple[datetime | None, datetime] | None:
+        return min(
+            self._effective_candidates(target, after=after, inclusive=inclusive),
+            key=lambda item: (item[1], item[0] or item[1]),
+            default=None,
+        )
 
     @staticmethod
     def _next_candidate(

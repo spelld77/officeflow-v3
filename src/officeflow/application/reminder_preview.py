@@ -184,7 +184,7 @@ class ReminderPreviewService:
                         if len(items) >= limit or exhausted():
                             complete = False
                             break
-                        candidate = self._reminders._next_candidate(
+                        candidate = self._reminders._effective_candidate(
                             target, after=after, inclusive=inclusive
                         )
                         if candidate is None or candidate[1] >= end:

@@ -254,9 +254,12 @@ class CompleteTaskDialog(QDialog):
         task: Task,
         *,
         result_note: str = "",
+        on_save: Callable[[str], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._on_save = on_save
+        self._saving = False
         self.setWindowTitle("업무 완료")
         self.setModal(True)
         self.resize(500, 320)
@@ -280,6 +283,14 @@ class CompleteTaskDialog(QDialog):
         self.result_edit.setTabChangesFocus(True)
         root.addWidget(self.result_edit, 1)
 
+        self.error_label = QLabel(self)
+        self.error_label.setObjectName("formError")
+        self.error_label.setStyleSheet("color: #C62828; font-weight: 600;")
+        self.error_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        root.addWidget(self.error_label)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -288,6 +299,22 @@ class CompleteTaskDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    def accept(self) -> None:
+        if self._saving:
+            return
+        self._saving = True
+        self.error_label.hide()
+        try:
+            if self._on_save is not None:
+                self._on_save(self.result_note())
+        except Exception as error:
+            self.error_label.setText(f"완료 저장에 실패했습니다. {error}")
+            self.error_label.show()
+            return
+        finally:
+            self._saving = False
+        super().accept()
 
     def result_note(self) -> str:
         return self.result_edit.toPlainText().strip()
@@ -1008,8 +1035,22 @@ class TaskRecordsDialog(QDialog):
         save_button.setObjectName("saveResultButton")
         save_button.setProperty("primaryAction", True)
         save_button.clicked.connect(self._save_result)
-        layout.addWidget(save_button, alignment=Qt.AlignmentFlag.AlignRight)
+        feedback = QHBoxLayout()
+        self.result_save_feedback = CompactLabel(parent=tab)
+        self.result_save_feedback.setObjectName("mutedText")
+        feedback.addWidget(self.result_save_feedback, 1)
+        feedback.addWidget(save_button)
+        layout.addLayout(feedback)
+        self.result_edit.textChanged.connect(self._result_edited)
         return tab
+
+    def _result_edited(self) -> None:
+        if hasattr(self, "_expected_result"):
+            self.result_save_feedback.setText(
+                "편집 중 · 미저장"
+                if self.result_edit.toPlainText().strip() != self._expected_result
+                else ""
+            )
 
     def _build_work_log_tab(self) -> QWidget:
         tab = QWidget()
@@ -1476,12 +1517,8 @@ class TaskRecordsDialog(QDialog):
         if replayed:
             self.result_edit.setPlainText(saved_note)
         self.changed.emit()
-        QMessageBox.information(
-            self,
-            "저장 완료",
-            "이미 처리된 요청입니다. 현재 완료 요약을 표시했습니다."
-            if replayed
-            else "완료 요약을 저장했습니다.",
+        self.result_save_feedback.setText(
+            "이미 저장된 요청 · 현재 내용 표시" if replayed else "저장됨"
         )
 
     def _refresh_work_logs(self) -> None:

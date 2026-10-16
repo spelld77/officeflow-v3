@@ -10,6 +10,7 @@ from sqlalchemy import (
     Select,
     and_,
     case,
+    exists,
     func,
     literal,
     literal_column,
@@ -415,10 +416,13 @@ class SqlAlchemyTaskRepository:
             TaskRecord.deleted_at.is_(None),
             TaskRecord.status != TaskStatus.ARCHIVED.value,
             TaskRecord.starts_at.is_not(None),
-            TaskRecord.starts_at < ends_at,
             or_(
                 and_(
+                    TaskRecord.recurrence_rule.is_not(None), self._moved_overlap(starts_at, ends_at)
+                ),
+                and_(
                     TaskRecord.recurrence_rule.is_not(None),
+                    TaskRecord.starts_at < ends_at,
                     or_(
                         TaskRecord.recurrence_until.is_(None),
                         TaskRecord.recurrence_until >= starts_at,
@@ -426,6 +430,7 @@ class SqlAlchemyTaskRepository:
                 ),
                 and_(
                     TaskRecord.recurrence_rule.is_(None),
+                    TaskRecord.starts_at < ends_at,
                     or_(
                         TaskRecord.ends_at > starts_at,
                         and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at >= starts_at),
@@ -453,6 +458,119 @@ class SqlAlchemyTaskRepository:
                 for record, has_attachments in session.execute(statement).all()
             )
         return self._with_matches(items, search)
+
+    def day_templates_page(
+        self,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        after_id: int = 0,
+        include_after: bool = False,
+        search: str = "",
+        limit: int = 200,
+    ) -> tuple[Task, ...]:
+        """ID-cursor bounded source, including saved occurrences moved into the day."""
+        if not 1 <= limit <= 200 or ends_at <= starts_at:
+            raise ValueError("하루 일정 조회 범위가 잘못되었습니다.")
+        moved = (
+            select(TaskOccurrenceRecord.id)
+            .where(
+                TaskOccurrenceRecord.task_id == TaskRecord.id,
+                TaskOccurrenceRecord.effective_start.is_not(None),
+                TaskOccurrenceRecord.effective_start < ends_at,
+                or_(
+                    TaskOccurrenceRecord.effective_end > starts_at,
+                    and_(
+                        TaskOccurrenceRecord.effective_end.is_(None),
+                        TaskOccurrenceRecord.effective_start >= starts_at,
+                    ),
+                ),
+                TaskOccurrenceRecord.status.not_in(
+                    (OccurrenceStatus.SKIPPED.value, OccurrenceStatus.CANCELED.value)
+                ),
+            )
+            .exists()
+        )
+        ordinary = and_(
+            TaskRecord.starts_at < ends_at,
+            or_(
+                and_(
+                    TaskRecord.recurrence_rule.is_not(None),
+                    or_(
+                        TaskRecord.recurrence_until.is_(None),
+                        TaskRecord.recurrence_until >= starts_at,
+                    ),
+                ),
+                and_(
+                    TaskRecord.recurrence_rule.is_(None),
+                    or_(
+                        TaskRecord.ends_at > starts_at,
+                        and_(TaskRecord.ends_at.is_(None), TaskRecord.starts_at >= starts_at),
+                    ),
+                ),
+            ),
+        )
+        statement = (
+            select(TaskRecord, self._attachment_exists())
+            .where(
+                TaskRecord.deleted_at.is_(None),
+                TaskRecord.status != TaskStatus.ARCHIVED.value,
+                TaskRecord.starts_at.is_not(None),
+                TaskRecord.id >= after_id if include_after else TaskRecord.id > after_id,
+                or_(ordinary, and_(TaskRecord.recurrence_rule.is_not(None), moved)),
+            )
+            .order_by(TaskRecord.id)
+            .limit(limit)
+        )
+        if search.strip():
+            statement = statement.where(self._search_predicate(search.strip()))
+        with self._sessions.transaction() as session:
+            return tuple(
+                self._to_domain(record, has_attachments=bool(attached))
+                for record, attached in session.execute(statement)
+            )
+
+    def day_moved_page(
+        self,
+        task_id: int,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        original_from: datetime,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> tuple[TaskOccurrence, ...]:
+        if not 1 <= limit <= 200:
+            raise ValueError("하루 회차 조회 상한이 잘못되었습니다.")
+        statement = (
+            select(TaskOccurrenceRecord)
+            .where(
+                TaskOccurrenceRecord.task_id == task_id,
+                TaskOccurrenceRecord.id > after_id,
+                TaskOccurrenceRecord.effective_start.is_not(None),
+                TaskOccurrenceRecord.effective_start < ends_at,
+                or_(
+                    TaskOccurrenceRecord.effective_end > starts_at,
+                    and_(
+                        TaskOccurrenceRecord.effective_end.is_(None),
+                        TaskOccurrenceRecord.effective_start >= starts_at,
+                    ),
+                ),
+                or_(
+                    TaskOccurrenceRecord.occurrence_start < original_from,
+                    TaskOccurrenceRecord.occurrence_start >= ends_at,
+                ),
+                TaskOccurrenceRecord.status.not_in(
+                    (OccurrenceStatus.SKIPPED.value, OccurrenceStatus.CANCELED.value)
+                ),
+            )
+            .order_by(TaskOccurrenceRecord.id)
+            .limit(limit)
+        )
+        with self._sessions.transaction() as session:
+            return tuple(
+                self._occurrence_to_domain(record) for record in session.scalars(statement)
+            )
 
     def calendar_overview(
         self,
@@ -532,10 +650,15 @@ class SqlAlchemyTaskRepository:
             .where(
                 *common,
                 TaskRecord.recurrence_rule.is_not(None),
-                TaskRecord.starts_at < ends_at,
                 or_(
-                    TaskRecord.recurrence_until.is_(None),
-                    TaskRecord.recurrence_until >= starts_at,
+                    self._moved_overlap(starts_at, ends_at),
+                    and_(
+                        TaskRecord.starts_at < ends_at,
+                        or_(
+                            TaskRecord.recurrence_until.is_(None),
+                            TaskRecord.recurrence_until >= starts_at,
+                        ),
+                    ),
                 ),
             )
             .order_by(TaskRecord.starts_at, TaskRecord.id)
@@ -653,10 +776,18 @@ class SqlAlchemyTaskRepository:
     @staticmethod
     def _reschedule_future_reminders(session: Session, record: TaskRecord, now: datetime) -> None:
         from officeflow.application.reminders import ReminderService, ReminderTarget
+        from officeflow.application.tasks import TaskService
         from officeflow.domain.enums import ReminderRelation
         from officeflow.domain.reminder import Reminder
+        from officeflow.infrastructure.database.reminder_repository import (
+            SqlAlchemyReminderRepository,
+        )
 
         task = SqlAlchemyTaskRepository._to_domain(record)
+        sessions = SessionFactory(session.connection())
+        service = ReminderService(
+            SqlAlchemyReminderRepository(sessions), TaskService(SqlAlchemyTaskRepository(sessions))
+        )
         for rule in session.scalars(
             select(ReminderRecord).where(
                 ReminderRecord.task_id == record.id, ReminderRecord.enabled.is_(True)
@@ -670,7 +801,7 @@ class SqlAlchemyTaskRepository:
                 rule.absolute_at,
                 rule.enabled,
             )
-            candidate = ReminderService._next_candidate(
+            candidate = service._effective_candidate(
                 ReminderTarget(reminder, task),
                 after=now.replace(second=0, microsecond=0),
                 inclusive=True,
@@ -690,8 +821,22 @@ class SqlAlchemyTaskRepository:
             select(TaskOccurrenceRecord)
             .where(
                 TaskOccurrenceRecord.task_id.in_(task_ids),
-                TaskOccurrenceRecord.occurrence_start >= starts_at,
-                TaskOccurrenceRecord.occurrence_start < ends_at,
+                or_(
+                    and_(
+                        TaskOccurrenceRecord.occurrence_start >= starts_at,
+                        TaskOccurrenceRecord.occurrence_start < ends_at,
+                    ),
+                    and_(
+                        TaskOccurrenceRecord.effective_start < ends_at,
+                        or_(
+                            TaskOccurrenceRecord.effective_end > starts_at,
+                            and_(
+                                TaskOccurrenceRecord.effective_end.is_(None),
+                                TaskOccurrenceRecord.effective_start >= starts_at,
+                            ),
+                        ),
+                    ),
+                ),
             )
             .order_by(TaskOccurrenceRecord.occurrence_start, TaskOccurrenceRecord.id)
         )
@@ -699,6 +844,23 @@ class SqlAlchemyTaskRepository:
             return tuple(
                 self._occurrence_to_domain(record) for record in session.scalars(statement).all()
             )
+
+    @staticmethod
+    def _moved_overlap(starts_at: datetime, ends_at: datetime) -> Any:
+        return exists().where(
+            TaskOccurrenceRecord.task_id == TaskRecord.id,
+            TaskOccurrenceRecord.effective_start < ends_at,
+            or_(
+                TaskOccurrenceRecord.effective_end > starts_at,
+                and_(
+                    TaskOccurrenceRecord.effective_end.is_(None),
+                    TaskOccurrenceRecord.effective_start >= starts_at,
+                ),
+            ),
+            TaskOccurrenceRecord.status.not_in(
+                (OccurrenceStatus.SKIPPED.value, OccurrenceStatus.CANCELED.value)
+            ),
+        )
 
     @classmethod
     def _predicates(

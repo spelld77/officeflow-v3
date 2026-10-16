@@ -1,6 +1,86 @@
 from __future__ import annotations
 
 LIGHT_STYLESHEET = """
+QPushButton#quickAddOpenButton {
+    padding: 2px 8px;
+    min-height: 0px;
+}
+QPushButton[timeStep="true"] {
+    padding: 6px 8px;
+}
+QLabel#dateCautionNotice, QLabel#reminderDateNotice {
+    color: #89540D;
+    background: transparent;
+    font-weight: 600;
+}
+QDateEdit[dateCaution="true"], QDateEdit[dateCaution="true"]:focus,
+QPushButton[dateCaution="true"] {
+    color: #663C00;
+    background: #FFF4DD;
+    border: 2px solid #C37B18;
+}
+QPushButton[dayTimeAction="true"] {
+    padding: 3px 7px;
+    min-height: 22px;
+}
+QScrollArea#dayTimelineScroll {
+    background: #FFFFFF;
+    border: 1px solid #DCE2EC;
+}
+QScrollArea#dayTimelineScroll QWidget#qt_scrollarea_viewport {
+    background: #FFFFFF;
+}
+QScrollArea#dayTimelineScroll QScrollBar:vertical,
+QListWidget#dayOverviewList QScrollBar:vertical {
+    width: 13px;
+    background: #EDF1F7;
+    border: none;
+    border-radius: 6px;
+    margin: 2px;
+}
+QScrollArea#dayTimelineScroll QScrollBar::handle:vertical,
+QListWidget#dayOverviewList QScrollBar::handle:vertical {
+    min-height: 28px;
+    background: #7FA3EF;
+    border-radius: 5px;
+}
+QScrollArea#dayTimelineScroll QScrollBar::handle:vertical:hover,
+QListWidget#dayOverviewList QScrollBar::handle:vertical:hover {
+    background: #4F7FDF;
+}
+QScrollArea#dayTimelineScroll QScrollBar::add-line:vertical,
+QScrollArea#dayTimelineScroll QScrollBar::sub-line:vertical,
+QScrollArea#dayTimelineScroll QScrollBar::add-page:vertical,
+QScrollArea#dayTimelineScroll QScrollBar::sub-page:vertical,
+QListWidget#dayOverviewList QScrollBar::add-line:vertical,
+QListWidget#dayOverviewList QScrollBar::sub-line:vertical,
+QListWidget#dayOverviewList QScrollBar::add-page:vertical,
+QListWidget#dayOverviewList QScrollBar::sub-page:vertical {
+    background: transparent;
+    border: none;
+    height: 0;
+}
+QFrame#sidebarNavigation, QScrollArea#sidebarScroll,
+QScrollArea#sidebarScroll QWidget#qt_scrollarea_viewport {
+    background: #172033;
+    border: none;
+}
+QListWidget#dayOverviewList {
+    color: #172033;
+    background: #FFFFFF;
+    selection-color: #172033;
+    selection-background-color: #DFE9FF;
+    border: 1px solid #DCE2EC;
+    border-radius: 6px;
+    padding: 2px;
+}
+QListWidget#dayOverviewList::item {
+    padding: 7px 8px;
+}
+QListWidget#dayOverviewList::item:selected {
+    color: #172033;
+    background: #DFE9FF;
+}
 QWidget {
     color: #172033;
     font-family: "Segoe UI", "Malgun Gothic";
@@ -218,7 +298,10 @@ QSplitter#calendarDaySplitter::handle:hover {
     min-width: 34px;
     max-width: 34px;
     font-size: 20px;
-    padding: 5px;
+    padding: 2px 5px;
+}
+QPushButton#calendarToday {
+    padding: 4px 10px;
 }
 QPushButton[calendarPrimary="true"] {
     color: #245CCC;
@@ -533,7 +616,7 @@ QPlainTextEdit QWidget#qt_scrollarea_viewport {
     color: #172033;
     background: #FFFFFF;
 }
-QLineEdit[inputError="true"], QDateEdit[inputError="true"],
+QLineEdit[inputError="true"], QDateEdit[inputError="true"], QDateEdit[inputError="true"]:focus,
 QComboBox[inputError="true"], QPushButton[inputError="true"] {
     border: 2px solid #C62828;
     background-color: #FFF4F4;

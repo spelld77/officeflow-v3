@@ -12,6 +12,7 @@ from PySide6.QtCore import (
     QEvent,
     QItemSelectionModel,
     QModelIndex,
+    QObject,
     QPoint,
     QSignalBlocker,
     Qt,
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QSystemTrayIcon,
@@ -56,6 +58,7 @@ from officeflow.application.attachment_documents import InternalRecoveryReport
 from officeflow.application.attachment_export import AttachmentExportService
 from officeflow.application.attachment_search import AttachmentSearchHit, AttachmentSearchService
 from officeflow.application.attachments import AttachmentService
+from officeflow.application.day_overview import DayCursor, DayOverviewResult, DayOverviewService
 from officeflow.application.exporting import ExportService
 from officeflow.application.file_operations import FileInUseError
 from officeflow.application.folder_links import FolderLinkService
@@ -83,6 +86,7 @@ from officeflow.application.tasks import (
 )
 from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskPriority, TaskStatus
 from officeflow.domain.hourly_notification import HourlySettings
+from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.reminder import Reminder, ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
 from officeflow.infrastructure.backup import BackupInfo, BackupManager
@@ -98,14 +102,17 @@ from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_search_page import AttachmentSearchPageWidget
 from officeflow.presentation.attachment_thumbnails import AttachmentImageCoordinator
 from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.data_dialog import DataManagementDialog
-from officeflow.presentation.dates import WEEKDAYS, format_datetime
+from officeflow.presentation.dates import WEEKDAYS, format_date, format_datetime
+from officeflow.presentation.day_controller import DayOverviewController
 from officeflow.presentation.help import open_user_help
 from officeflow.presentation.hourly_notification_controller import (
     HourlyNotificationController,
     NotificationClock,
 )
 from officeflow.presentation.hourly_notification_dialog import format_next
+from officeflow.presentation.list_location import ListLocation
 from officeflow.presentation.month_calendar import CalendarPage
 from officeflow.presentation.notification_coordinator import NotificationCoordinator
 from officeflow.presentation.record_dialog import (
@@ -119,6 +126,7 @@ from officeflow.presentation.reminder_preview import (
     ReminderPreviewWidget,
 )
 from officeflow.presentation.reminder_settings import ReminderSettingsDialog, reminder_summary
+from officeflow.presentation.schedule_change_dialog import ScheduleChangeDialog
 from officeflow.presentation.settings_dialog import SettingsDialog
 from officeflow.presentation.task_editor import TaskEditorDialog
 from officeflow.presentation.task_list import (
@@ -140,6 +148,15 @@ class _CompletionUndo:
     occurrence_start: datetime | None
     previous_status: TaskStatus
     title: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ScheduleUndo:
+    before: Task
+    after: Task
+    rules: tuple[Reminder, ...]
+    before_occurrence: TaskOccurrence | None
+    after_occurrence: TaskOccurrence | None
 
 
 class MainWindow(QMainWindow):
@@ -198,8 +215,14 @@ class MainWindow(QMainWindow):
         )
         self._image_coordinator.viewModeChanged.connect(self._remember_attachment_view_mode)
         self._task_service = task_service
+        self._day_overview_controller = DayOverviewController(
+            DayOverviewService(task_service), self
+        )
+        self._day_overview_controller.ready.connect(self._apply_day_overview)
+        self._day_overview_controller.failed.connect(self._day_overview_failed)
         self._transition_attempt = MutationAttempt()
         self._quick_add_attempt = MutationAttempt()
+        self._quick_add_saved: Task | None = None
         self._undo_attempt = MutationAttempt()
         self._reminder_attempt = MutationAttempt()
         self._reminder_service = reminder_service
@@ -218,6 +241,7 @@ class MainWindow(QMainWindow):
         self._preview_limit = 5000
         if self._day_preview_controller:
             self._day_preview_controller.rangeReady.connect(self._apply_day_reminder_preview)
+            self._day_preview_controller.failed.connect(self._day_reminder_failed)
         if self._preview_controller:
             self._preview_controller.ready.connect(self._apply_reminder_preview)
             self._preview_controller.failed.connect(self._reminder_preview_failed)
@@ -263,6 +287,11 @@ class MainWindow(QMainWindow):
         self._calendar_active = False
         self._selected_task_id: int | None = None
         self._selected_occurrence_start: datetime | None = None
+        self._view_locations: dict[TaskView, ListLocation] = {}
+        self._return_location: ListLocation | None = None
+        self._return_timer = QTimer(self)
+        self._return_timer.setSingleShot(True)
+        self._return_timer.timeout.connect(self._restore_list_location)
         self._active_snoozes: dict[tuple[int, datetime | None], datetime] = {}
         self._compact_navigation = False
         self._collapsed_groups = {
@@ -417,48 +446,58 @@ class MainWindow(QMainWindow):
         self._sidebar_layout.addWidget(self._brand_caption)
         self._sidebar_layout.addSpacing(22)
 
-        for index, (label, view) in enumerate(
-            (
-                ("오늘", TaskView.TODAY),
-                ("예정", TaskView.UPCOMING),
-                ("중요", TaskView.IMPORTANT),
-                ("대기", TaskView.PENDING),
-                ("완료", TaskView.COMPLETED),
-                ("전체 업무", TaskView.ALL),
-                ("휴지통", TaskView.TRASH),
+        navigation = QFrame(sidebar)
+        navigation.setObjectName("sidebarNavigation")
+        nav_layout = QVBoxLayout(navigation)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        nav_scroll = QScrollArea(sidebar)
+        nav_scroll.setObjectName("sidebarScroll")
+        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        nav_scroll.setWidget(navigation)
+        self._sidebar_layout.addWidget(nav_scroll, 1)
+        for label, view in (("오늘", TaskView.TODAY), ("예정", TaskView.UPCOMING)):
+            nav_layout.addWidget(
+                self._create_nav_button(label, view=view, selected=view is TaskView.TODAY)
             )
-        ):
-            self._sidebar_layout.addWidget(
-                self._create_nav_button(label, view=view, selected=index == 0)
-            )
-
-        self._sidebar_layout.addSpacing(16)
         self._calendar_button = self._create_nav_button("캘린더")
         self._calendar_button.clicked.connect(self._show_calendar)
-        self._calendar_button.setToolTip("월간 일정 보기")
-        self._sidebar_layout.addWidget(self._calendar_button)
+        self._calendar_button.setToolTip("월간 일정 · 하루 일정과 알림 보기")
+        nav_layout.addWidget(self._calendar_button)
+        nav_layout.addWidget(self._create_nav_button("전체 업무", view=TaskView.ALL))
+        nav_layout.addSpacing(8)
+        for label, view in (("중요", TaskView.IMPORTANT), ("대기", TaskView.PENDING)):
+            nav_layout.addWidget(self._create_nav_button(label, view=view))
+        nav_layout.addSpacing(8)
+        nav_layout.addWidget(self._create_nav_button("완료", view=TaskView.COMPLETED))
         self._work_log_button = self._create_nav_button("업무일지")
         self._work_log_button.setEnabled(self._record_service is not None)
         self._work_log_button.setToolTip("날짜별 업무일지 보기")
         self._work_log_button.clicked.connect(self._open_work_logs)
-        self._sidebar_layout.addWidget(self._work_log_button)
-        self._data_button = self._create_nav_button("데이터")
-        self._data_button.setEnabled(
+        nav_layout.addWidget(self._work_log_button)
+        nav_layout.addStretch()
+        self._sidebar_layout.addWidget(self._create_nav_button("휴지통", view=TaskView.TRASH))
+        self._management_button = self._create_nav_button("관리")
+        self._management_button.setToolTip("데이터 관리 · 설정 · 도움말")
+        self._management_menu = QMenu(self._management_button)
+        self._data_action = self._management_menu.addAction("데이터 관리")
+        self._data_action.setEnabled(
             self._export_service is not None and self._backup_manager is not None
         )
-        self._data_button.setToolTip("내보내기·백업·복원 및 첨부 정리")
-        self._data_button.clicked.connect(self._open_data_management)
-        self._sidebar_layout.addWidget(self._data_button)
-        self._help_button = self._create_nav_button("도움말")
-        self._help_button.setToolTip("사용 방법과 문제 해결 안내")
-        self._help_button.clicked.connect(self._open_help)
-        self._sidebar_layout.addWidget(self._help_button)
-        self._settings_button = self._create_nav_button("설정")
-        self._settings_button.setToolTip("실행, 트레이와 알림 설정")
-        self._settings_button.clicked.connect(self._open_settings)
-        self._sidebar_layout.addWidget(self._settings_button)
-
-        self._sidebar_layout.addStretch()
+        self._data_action.setToolTip(
+            "백업·복원·내보내기·자료 검사·첨부 정리"
+            if self._data_action.isEnabled()
+            else "자료 관리 서비스를 사용할 수 없습니다"
+        )
+        self._data_action.triggered.connect(lambda: self._open_data_management())
+        self._settings_action = self._management_menu.addAction("설정")
+        self._settings_action.triggered.connect(self._open_settings)
+        self._help_action = self._management_menu.addAction("도움말")
+        self._help_action.triggered.connect(self._open_help)
+        self._management_button.setMenu(self._management_menu)
+        self._sidebar_layout.addWidget(self._management_button)
         self._version_label = self._named_label(f"OfficeFlow {__version__}", "brandCaption")
         self._sidebar_layout.addWidget(self._version_label)
         return sidebar
@@ -477,8 +516,15 @@ class MainWindow(QMainWindow):
         self._task_content = self._build_content()
         self._calendar_page = CalendarPage(timezone=self._settings.timezone)
         self._calendar_page.calendar.clock = self._view_clock
+        self._calendar_page.day_view.timeline.clock = self._view_clock
         self._calendar_page.day_list.clock = self._view_clock
         self._calendar_page.monthChanged.connect(self._refresh_calendar)
+        self._calendar_page.modeChanged.connect(self._calendar_mode_changed)
+        self._calendar_page.dayScheduleMoreRequested.connect(self._reload_day_schedules)
+        self._calendar_page.daySchedulePageRequested.connect(self._request_day_schedule_cursor)
+        self._calendar_page.alarmSelected.connect(self._select_preview_detail)
+        self._calendar_page.alarmActivated.connect(self._open_preview_record)
+        self._calendar_page.alarmContextRequested.connect(self._show_day_alarm_context_menu)
         self._calendar_page.dateSelected.connect(self._refresh_calendar_day)
         self._calendar_page.alarmMoreRequested.connect(self._reload_day_reminder_preview)
         self._calendar_page.reminderSettingsRequested.connect(self._open_reminder_settings)
@@ -509,6 +555,27 @@ class MainWindow(QMainWindow):
         self._detail_panel = self._build_detail()
         self._body_layout.addWidget(self._detail_panel, 2)
         self._workspace_layout.addLayout(self._body_layout, 1)
+        self._schedule_undo: _ScheduleUndo | None = None
+        self._schedule_result_day: date | None = None
+        self._schedule_result_bar = QWidget()
+        result_layout = QHBoxLayout(self._schedule_result_bar)
+        result_layout.setContentsMargins(0, 0, 0, 0)
+        self._schedule_feedback = CompactLabel(parent=self._schedule_result_bar)
+        result_layout.addWidget(self._schedule_feedback, 1)
+        self._schedule_date_button = QPushButton("날짜 보기")
+        self._schedule_date_button.clicked.connect(self._show_moved_date)
+        result_layout.addWidget(self._schedule_date_button)
+        self._schedule_undo_button = QPushButton("되돌리기")
+        self._schedule_undo_button.clicked.connect(self._undo_schedule_move)
+        result_layout.addWidget(self._schedule_undo_button)
+        dismiss = QPushButton("닫기")
+        dismiss.clicked.connect(self._hide_schedule_result)
+        result_layout.addWidget(dismiss)
+        self._workspace_layout.addWidget(self._schedule_result_bar)
+        self._schedule_result_bar.hide()
+        self._schedule_result_timer = QTimer(self)
+        self._schedule_result_timer.setSingleShot(True)
+        self._schedule_result_timer.timeout.connect(self._hide_schedule_result)
         return workspace
 
     def _build_top_bar(self) -> QWidget:
@@ -586,6 +653,23 @@ class MainWindow(QMainWindow):
         self._quick_add_button.clicked.connect(self._quick_add_task)
         quick_add.addWidget(self._quick_add_button)
         self._content_layout.addLayout(quick_add)
+        self._quick_add_context = QWidget()
+        self._quick_add_context.setMinimumHeight(30)
+        context_layout = QHBoxLayout(self._quick_add_context)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(6)
+        self._quick_add_hint = CompactLabel(parent=self._quick_add_context)
+        self._quick_add_hint.setObjectName("mutedText")
+        context_layout.addWidget(self._quick_add_hint, 1)
+        self._quick_add_open_button = QPushButton("업무 보기", self._quick_add_context)
+        self._quick_add_open_button.setObjectName("quickAddOpenButton")
+        self._quick_add_open_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._quick_add_open_button.clicked.connect(self._open_quick_added_task)
+        self._quick_add_open_button.hide()
+        context_layout.addWidget(self._quick_add_open_button)
+        self._content_layout.addWidget(self._quick_add_context)
+        self._quick_add_edit.textChanged.connect(self._clear_quick_add_receipt)
+        self._refresh_quick_add_hint()
         self._today_reminders = ReminderPreviewWidget(self._settings.timezone)
         self._today_reminders.recordRequested.connect(self._open_preview_record)
         self._today_reminders.selected.connect(self._select_preview_detail)
@@ -596,6 +680,7 @@ class MainWindow(QMainWindow):
 
         self._task_model = TaskListModel()
         self._task_list = QListView()
+        self._task_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._task_list.setObjectName("taskList")
         self._task_list.setModel(self._task_model)
         self._task_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -606,6 +691,8 @@ class MainWindow(QMainWindow):
         self._task_delegate.menuRequested.connect(self._show_task_menu_for_task)
         self._task_delegate.attachmentsRequested.connect(self._open_task_attachments)
         self._task_list.setMouseTracking(True)
+        self._task_list.viewport().installEventFilter(self)
+        self._task_list.installEventFilter(self)
         self._task_list.setFrameShape(QFrame.Shape.NoFrame)
         self._task_list.setSpacing(1)
         self._task_list.setUniformItemSizes(False)
@@ -617,6 +704,8 @@ class MainWindow(QMainWindow):
         self._task_list.customContextMenuRequested.connect(self._show_task_context_menu)
         self._task_model.modelReset.connect(self._update_result_count)
         self._task_model.rowsInserted.connect(self._update_result_count)
+        self._task_model.modelReset.connect(self._refresh_quick_add_hint)
+        self._task_model.rowsInserted.connect(self._refresh_quick_add_hint)
         self._content_layout.addWidget(self._task_list, 1)
 
         self._empty_panel = QFrame()
@@ -884,7 +973,96 @@ class MainWindow(QMainWindow):
         self._nav_buttons.append(button)
         return button
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched in (self._task_list, self._task_list.viewport()) and event.type() in {
+            QEvent.Type.Wheel,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.KeyPress,
+        }:
+            self._return_timer.stop()
+            self._return_location = None
+        return super().eventFilter(watched, event)
+
+    def _list_query_key(self) -> tuple[object, ...]:
+        return (
+            self._current_view,
+            self._selected_sort(),
+            self._selected_statuses(),
+            self._selected_priorities(),
+            self._pinned_filter.isChecked(),
+            self._attachment_filter.isChecked(),
+        )
+
+    def _remember_list_location(self) -> None:
+        self._return_timer.stop()
+        if self._calendar_active or self._file_search_active or self._search.text().strip():
+            return
+        model, listing = self._task_model, self._task_list
+        top_index = listing.indexAt(QPoint(8, 8))
+        top_task = model.task_at(top_index)
+        selected = (
+            (self._selected_task_id, self._selected_occurrence_start)
+            if self._selected_task_id is not None
+            else None
+        )
+        top = (
+            (top_task.id, top_task.occurrence_start)
+            if top_task and top_task.id is not None
+            else None
+        )
+        self._view_locations[self._current_view] = ListLocation(
+            self._list_query_key(),
+            self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date(),
+            selected,
+            top,
+            listing.visualRect(top_index).top() if top_index.isValid() else 0,
+            listing.verticalScrollBar().value(),
+            min(500, model.loaded_task_count),
+            {group: min(500, count) for group, count in model.loaded_group_counts.items()},
+            any(count > 500 for count in model.loaded_group_counts.values())
+            if self._current_view is TaskView.TODAY
+            else model.loaded_task_count > 500,
+        )
+
+    def _restore_list_location(self) -> None:
+        location = self._return_location
+        self._return_location = None
+        if (
+            location is None
+            or self._shutdown_done
+            or self._calendar_active
+            or location.query != self._list_query_key()
+            or self._search.text().strip()
+            or (
+                self._current_view is TaskView.TODAY
+                and location.day
+                != self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
+            )
+        ):
+            return
+        self._task_list.doItemsLayout()
+        index = QModelIndex()
+        if location.top is not None:
+            for row in range(self._task_model.rowCount()):
+                item = self._task_model.task_at(self._task_model.index(row, 0))
+                if item and (item.id, item.occurrence_start) == location.top:
+                    index = self._task_model.index(row, 0)
+                    break
+        if index.isValid():
+            self._task_list.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtTop)
+            bar = self._task_list.verticalScrollBar()
+            bar.setValue(bar.value() - location.inset)
+        else:
+            self._task_list.verticalScrollBar().setValue(
+                0 if location.truncated else location.scroll
+            )
+
     def _set_view(self, view: TaskView) -> None:
+        self._hide_schedule_result()
+        self._remember_list_location()
+        self._return_location = None
+        self._quick_add_saved = None
+        self._day_overview_controller.cancel()
         self._leave_file_search()
         self._reset_search()
         self._remember_view_preferences()
@@ -905,10 +1083,30 @@ class MainWindow(QMainWindow):
         trash = view is TaskView.TRASH
         self._quick_add_edit.setVisible(not trash)
         self._quick_add_button.setVisible(not trash)
+        self._quick_add_context.setVisible(not trash)
+        self._refresh_quick_add_hint()
+        saved_location = self._view_locations.get(view)
+        if (
+            saved_location
+            and saved_location.query == self._list_query_key()
+            and (
+                view is not TaskView.TODAY
+                or saved_location.day
+                == self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
+            )
+        ):
+            self._return_location = saved_location
+            if saved_location.selected:
+                self._selected_task_id, self._selected_occurrence_start = saved_location.selected
         self._apply_responsive_layout()
         self._refresh_tasks()
+        if self._return_location is not None:
+            self._return_timer.start(0)
 
     def _show_calendar(self) -> None:
+        self._hide_schedule_result()
+        self._remember_list_location()
+        self._return_location = None
         self._leave_file_search()
         self._reset_search()
         self._remember_view_preferences()
@@ -924,6 +1122,7 @@ class MainWindow(QMainWindow):
         self._refresh_calendar()
 
     def _refresh_tasks(self, *, preserve_state: bool = False) -> None:
+        self._refresh_quick_add_hint()
         for record in self.findChildren(TaskRecordsDialog):
             record.refresh_header()
         self._synchronize_reminder_dialog()
@@ -951,7 +1150,13 @@ class MainWindow(QMainWindow):
             )
             scroll_value = self._task_list.verticalScrollBar().value()
             current = self._view_clock()
-            loaded_groups = self._task_model.loaded_group_counts if preserve_state else {}
+            loaded_groups = (
+                self._task_model.loaded_group_counts
+                if preserve_state
+                else self._return_location.groups
+                if self._return_location
+                else {}
+            )
             if self._current_view is TaskView.TODAY:
                 local_day = current.astimezone(ZoneInfo(self._settings.timezone)).date()
                 self._page_title.setText(
@@ -977,6 +1182,8 @@ class MainWindow(QMainWindow):
                 count = (
                     max(TaskListModel.PAGE_SIZE, self._task_model.loaded_task_count)
                     if preserve_state
+                    else max(TaskListModel.PAGE_SIZE, self._return_location.loaded)
+                    if self._return_location
                     else TaskListModel.PAGE_SIZE
                 )
                 page = self._refresh_page(None, count, current)
@@ -1012,14 +1219,17 @@ class MainWindow(QMainWindow):
 
             if selected_id is not None:
                 index = self._task_model.index_for_task(selected_id)
-                if preserve_state and selected_start is not None:
+                if (
+                    preserve_state or self._return_location is not None
+                ) and selected_start is not None:
+                    index = QModelIndex()
                     for row in range(self._task_model.rowCount()):
                         candidate = self._task_model.index(row, 0)
                         task = self._task_model.task_at(candidate)
                         if (
                             task is not None
                             and task.id == selected_id
-                            and task.starts_at == selected_start
+                            and (task.occurrence_start or task.starts_at) == selected_start
                         ):
                             index = candidate
                             break
@@ -1110,6 +1320,9 @@ class MainWindow(QMainWindow):
     def _refresh_calendar(self, _year: int | None = None, _month: int | None = None) -> None:
         if self._file_search_active:
             return
+        if self._calendar_page.mode != "month":
+            self._refresh_calendar_day(self._calendar_page.selected_date)
+            return
         try:
             self._refresh_snoozed_indicators()
             start_date, end_date = self._calendar_page.visible_date_range
@@ -1131,6 +1344,20 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"캘린더를 불러오지 못했습니다: {error}", 5000)
 
     def _refresh_calendar_day(self, selected_date: date, *, request_preview: bool = True) -> bool:
+        if self._calendar_page.mode != "month":
+            self._calendar_page.day_view.set_day(selected_date)
+            self._day_overview_controller.request(
+                selected_date, self._settings.timezone, self._search.text()
+            )
+            if self._day_preview_controller:
+                self._day_preview_controller.request(
+                    selected_date, selected_date, self._settings.timezone, self._view_clock()
+                )
+            elif not self._calendar_page.day_view._alarm_loaded:
+                self._calendar_page.set_day_reminder_preview(
+                    selected_date, ReminderPreviewResult((), True)
+                )
+            return True
         try:
             tasks = self._task_service.calendar_schedule(
                 selected_date,
@@ -1149,6 +1376,86 @@ class MainWindow(QMainWindow):
             self._calendar_page.set_day_tasks(())
             self.statusBar().showMessage(f"선택한 날짜를 불러오지 못했습니다: {error}", 5000)
             return False
+
+    def _calendar_mode_changed(self, _mode: str) -> None:
+        self._day_overview_controller.cancel()
+        self._refresh_calendar()
+
+    def _apply_day_overview(self, result: DayOverviewResult) -> None:
+        if (
+            self._shutdown_done
+            or self._file_search_active
+            or not self._calendar_active
+            or self._calendar_page.mode == "month"
+        ):
+            return
+        if result.day == self._calendar_page.selected_date and result.search == self._search.text():
+            self._calendar_page.set_day_overview(result)
+
+    def _day_overview_failed(self, error: object) -> None:
+        if (
+            not self._shutdown_done
+            and self._calendar_active
+            and self._calendar_page.mode != "month"
+        ):
+            self._calendar_page.day_view.set_error(error)
+
+    def _day_reminder_failed(self, error: object) -> None:
+        if (
+            not self._shutdown_done
+            and self._calendar_active
+            and self._calendar_page.mode != "month"
+        ):
+            self._calendar_page.day_view.set_error(error, source="alarm")
+
+    def _reload_day_schedules(self) -> None:
+        panel = self._calendar_page.day_view
+        if panel.result.cursor is not None:
+            panel.set_mode("schedule-list")
+            self._request_day_schedule_cursor(panel.result.cursor)
+
+    def _request_day_schedule_cursor(self, cursor: DayCursor | None) -> None:
+        panel = self._calendar_page.day_view
+        if self._calendar_active and panel.day == self._calendar_page.selected_date:
+            self._day_overview_controller.request(
+                panel.day,
+                self._settings.timezone,
+                self._search.text(),
+                cursor if panel.result.search == self._search.text() else None,
+            )
+
+    def _show_day_alarm_context_menu(self, item: ReminderPreviewItem, position: QPoint) -> None:
+        self._select_preview_detail(item)
+        task = item.task
+        if item.occurrence_status is OccurrenceStatus.COMPLETED:
+            task = replace(task, status=TaskStatus.COMPLETED)
+        elif item.occurrence_status in {OccurrenceStatus.CANCELED, OccurrenceStatus.SKIPPED}:
+            task = replace(task, status=TaskStatus.CANCELED)
+        menu = self._build_task_context_menu(task)
+        details = menu.addAction("선택 업무 알림")
+        details.triggered.connect(lambda: self._open_day_alarm_details(item))
+        try:
+            menu.exec(position)
+        finally:
+            menu.deleteLater()
+
+    def _open_day_alarm_details(self, item: ReminderPreviewItem) -> None:
+        from officeflow.application.reminder_groups import group_reminders, reminder_scope_key
+        from officeflow.presentation.reminder_groups import ReminderGroupDetailsDialog
+
+        groups = group_reminders(self._calendar_page.day_view.reminders.items)
+        group = next((value for value in groups if value.key == reminder_scope_key(item)), None)
+        if group is None:
+            return
+        dialog = ReminderGroupDetailsDialog(
+            group,
+            self._settings.timezone,
+            complete=self._calendar_page.day_view.reminders.complete,
+            parent=self,
+        )
+        dialog.recordRequested.connect(self._open_preview_record)
+        dialog.settingsRequested.connect(self._open_reminder_settings)
+        self._keep_file_dialog(dialog)
 
     def _build_query(
         self,
@@ -1194,12 +1501,17 @@ class MainWindow(QMainWindow):
         return TaskSort(str(self._sort_combo.currentData()))
 
     def _on_filter_changed(self, _value: object = None) -> None:
+        self._return_timer.stop()
+        self._return_location = None
+        self._view_locations.pop(self._current_view, None)
         self._remember_view_preferences()
         self._update_filter_feedback()
         self._selected_task_id = None
         self._refresh_tasks()
 
     def _on_search_changed(self, _text: str) -> None:
+        self._return_timer.stop()
+        self._return_location = None
         self._update_search_feedback()
         if self._file_search_active and self._file_page is not None:
             self._file_page.set_search(_text)
@@ -1211,6 +1523,7 @@ class MainWindow(QMainWindow):
             return
         self._search_timer.stop()
         if index == 1:
+            self._day_overview_controller.cancel()
             self._open_task_shortcut.setEnabled(False)
             self._file_search_active = True
             self._selected_task_id = None
@@ -1614,6 +1927,20 @@ class MainWindow(QMainWindow):
             delete.triggered.connect(self._delete_selected_permanently)
             return menu
         if task.status in {TaskStatus.ACTIVE, TaskStatus.PENDING}:
+            if self._task_save_service is not None:
+                for label, tomorrow in (("내일로 이동…", True), ("날짜·시간 변경…", False)):
+                    movement = menu.addAction(label)
+                    movement.setEnabled(
+                        not task.recurrence_rule
+                        or task.occurrence_start is not None
+                        or self._current_view is TaskView.TODAY
+                        or calendar_actions
+                    )
+                    movement.triggered.connect(
+                        lambda _checked=False, captured=task, next_day=tomorrow: (
+                            self._open_schedule_change(captured, tomorrow=next_day)
+                        )
+                    )
             complete_now = menu.addAction("바로 완료")
             complete_now.triggered.connect(self._quick_complete_selected)
             complete_with_result = menu.addAction("완료 요약 입력 후 완료…")
@@ -1636,6 +1963,153 @@ class MainWindow(QMainWindow):
         delete = menu.addAction("휴지통으로 이동")
         delete.triggered.connect(self._move_selected_to_trash)
         return menu
+
+    def _open_schedule_change(self, displayed: Task, *, tomorrow: bool = False) -> None:
+        if displayed.id is None or self._task_save_service is None:
+            return
+        try:
+            task = self._task_service.get(displayed.id)
+            assert task.id is not None
+            if task.deleted_at is not None or task.status not in {
+                TaskStatus.ACTIVE,
+                TaskStatus.PENDING,
+            }:
+                raise ValueError("진행 또는 대기 업무만 이동할 수 있습니다.")
+            key = (
+                displayed.occurrence_start or displayed.starts_at if task.recurrence_rule else None
+            )
+            occurrence = (
+                self._task_service._validated_occurrence(task, key) if key is not None else None
+            )
+            if occurrence is not None and occurrence.status is not OccurrenceStatus.PENDING:
+                raise ValueError("이미 처리한 반복 회차입니다.")
+            if task.recurrence_rule and occurrence is None:
+                raise ValueError("달력 또는 오늘 화면에서 이동할 회차를 선택하세요.")
+            start = occurrence.starts_at if occurrence else task.starts_at
+            end = occurrence.ends_at if occurrence else task.ends_at
+            rules = (
+                self._reminder_service.reminders_for_task(task.id) if self._reminder_service else ()
+            )
+            today = self._view_clock().astimezone(ZoneInfo(task.timezone)).date()
+            target = (
+                today + timedelta(days=1)
+                if tomorrow
+                else start.astimezone(ZoneInfo(task.timezone)).date()
+                if start
+                else today
+            )
+            attempt = MutationAttempt()
+
+            def save(new_start: datetime, new_end: datetime | None, all_day: bool) -> None:
+                assert self._task_save_service is not None and task.id is not None
+                if (start, end, task.all_day) == (new_start, new_end, all_day):
+                    return
+                saved = self._task_save_service.move_schedule(
+                    task.id,
+                    new_start,
+                    new_end,
+                    all_day,
+                    expected_task=task,
+                    expected_rules=rules,
+                    occurrence_start=key,
+                    expected_occurrence=occurrence,
+                    now=self._view_clock(),
+                    command_id=attempt.identify((task.id, key, new_start, new_end, all_day)),
+                )
+                attempt.succeeded()
+                if saved.command_replayed:
+                    # Receipts replay the current object, not a historic image.
+                    # Never turn that later state into permission to undo it.
+                    self._schedule_undo = None
+                    self._schedule_result_day = None
+                    self._schedule_feedback.setText(
+                        "이미 처리된 요청 · 현재 업무를 다시 확인하세요."
+                    )
+                    self._schedule_undo_button.setEnabled(False)
+                    self._schedule_date_button.setEnabled(False)
+                    self._show_schedule_result()
+                    self._refresh_tasks(preserve_state=True)
+                    return
+                # Use this command's result, not a fresh read that could include
+                # a later edit and accidentally authorize undoing that edit.
+                after = saved if isinstance(saved, Task) else task
+                self._schedule_undo = _ScheduleUndo(
+                    task,
+                    after,
+                    rules,
+                    occurrence,
+                    saved if isinstance(saved, TaskOccurrence) else None,
+                )
+                self._schedule_result_day = new_start.astimezone(ZoneInfo(task.timezone)).date()
+                self._schedule_feedback.setText(
+                    f"날짜 이동됨 · {format_date(self._schedule_result_day)} · {task.title}"
+                )
+                self._schedule_undo_button.setEnabled(True)
+                self._schedule_date_button.setEnabled(True)
+                self._show_schedule_result()
+                self._refresh_tasks(preserve_state=True)
+
+            dialog = ScheduleChangeDialog(
+                title=task.title,
+                starts_at=start,
+                ends_at=end,
+                all_day=task.all_day,
+                timezone=task.timezone,
+                target=target,
+                today=today,
+                recurring=occurrence is not None,
+                absolute_count=sum(
+                    r.enabled and r.relation is ReminderRelation.ABSOLUTE for r in rules
+                ),
+                save=save,
+                parent=self,
+            )
+            self._keep_file_dialog(dialog)
+        except (LookupError, ValueError, RuntimeError) as error:
+            self.statusBar().showMessage(str(error), 8000)
+
+    def _show_schedule_result(self) -> None:
+        self._schedule_result_bar.show()
+        self._schedule_result_timer.start(8000)
+
+    def _hide_schedule_result(self) -> None:
+        self._schedule_result_timer.stop()
+        self._schedule_result_bar.hide()
+        self._schedule_undo = None
+        self._schedule_result_day = None
+        self._schedule_undo_button.setEnabled(False)
+        self._schedule_date_button.setEnabled(False)
+
+    def _undo_schedule_move(self) -> None:
+        undo = self._schedule_undo
+        if undo is None or self._task_save_service is None or undo.before.id is None:
+            return
+        try:
+            occurrence = undo.before_occurrence
+            self._task_save_service.move_schedule(
+                undo.before.id,
+                occurrence.starts_at if occurrence else undo.before.starts_at,
+                occurrence.ends_at if occurrence else undo.before.ends_at,
+                undo.before.all_day,
+                expected_task=undo.after,
+                expected_rules=undo.rules,
+                occurrence_start=occurrence.occurrence_start if occurrence else None,
+                expected_occurrence=undo.after_occurrence,
+                now=self._view_clock(),
+            )
+        except Exception as error:
+            self._schedule_result_timer.stop()
+            self._schedule_feedback.setText(f"되돌리지 못했습니다 · {error}")
+            return
+        self._hide_schedule_result()
+        self.statusBar().showMessage("날짜 이동을 되돌렸습니다.", 3000)
+        self._refresh_tasks(preserve_state=True)
+
+    def _show_moved_date(self) -> None:
+        day = self._schedule_result_day
+        if day is not None:
+            self._show_calendar()
+            self._calendar_page._set_month_and_date(day)
 
     def _quick_complete_task(self, task: Task) -> None:
         self._select_task_for_action(task)
@@ -1720,13 +2194,57 @@ class MainWindow(QMainWindow):
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
 
+    def _clear_quick_add_receipt(self, _text: str) -> None:
+        self._return_timer.stop()
+        self._return_location = None
+        self._quick_add_saved = None
+        self._refresh_quick_add_hint()
+
+    def _refresh_quick_add_hint(self) -> None:
+        if not hasattr(self, "_quick_add_hint"):
+            return
+        saved = self._quick_add_saved
+        self._quick_add_open_button.setVisible(saved is not None)
+        self._quick_add_open_button.setEnabled(self._record_service is not None)
+        if saved is not None:
+            visible = saved.id is not None and self._task_model.index_for_task(saved.id).isValid()
+            outside = " · 목록 밖" if not visible else ""
+            self._quick_add_hint.setText(
+                f"등록됨{outside} · {saved.title} · {format_task_schedule(saved)} · 알림 없음"
+            )
+            return
+        day = self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
+        if self._current_view in {TaskView.TODAY, TaskView.UPCOMING}:
+            tomorrow = self._current_view is TaskView.UPCOMING
+            if tomorrow:
+                day += timedelta(days=1)
+            text = f"{'내일' if tomorrow else '오늘'} {format_date(day, short=True)} · 종일 · 알림 없음"
+        else:
+            text = "일정 없음 · 알림 없음"
+            if self._current_view is not TaskView.ALL:
+                text += " · 등록 후 전체 업무로 이동"
+        self._quick_add_hint.setText(text)
+
+    def _open_quick_added_task(self) -> None:
+        saved = self._quick_add_saved
+        if saved is None or saved.id is None or self._record_service is None:
+            return
+        try:
+            task = self._task_service.get(saved.id)
+            self._show_task_records(task)
+        except (LookupError, ValueError) as error:
+            self.statusBar().showMessage(f"등록한 업무를 열 수 없습니다: {error}", 5000)
+
     def _quick_add_task(self) -> None:
+        self._return_timer.stop()
+        self._return_location = None
         title = self._quick_add_edit.text()
         try:
-            day = self._view_clock().astimezone(ZoneInfo(self._settings.timezone)).date()
+            current = self._view_clock()
+            day = current.astimezone(ZoneInfo(self._settings.timezone)).date()
             identity = self._quick_add_attempt.identify((title, self._current_view, day))
             task = self._task_service.quick_add(
-                title, view=self._current_view, local_date=day, command_id=identity
+                title, view=self._current_view, local_date=day, now=current, command_id=identity
             )
         except TaskValidationError as error:
             self.statusBar().showMessage(str(error), 4000)
@@ -1738,10 +2256,23 @@ class MainWindow(QMainWindow):
 
         self._quick_add_edit.clear()
         self._quick_add_attempt.succeeded()
-        if self._current_view not in {TaskView.TODAY, TaskView.ALL}:
+        if self._current_view not in {TaskView.TODAY, TaskView.UPCOMING, TaskView.ALL}:
             self._set_view(TaskView.ALL)
         self._selected_task_id = task.id
+        self._return_timer.stop()
+        self._return_location = None
         self._refresh_tasks()
+        if self._current_view is TaskView.TODAY:
+            self._collapsed_groups.discard(TaskGroup.IN_PROGRESS)
+            self._task_model.expand_group(TaskGroup.IN_PROGRESS)
+        index = self._task_model.index_for_task(task.id) if task.id is not None else QModelIndex()
+        if index.isValid():
+            self._task_list.setCurrentIndex(index)
+            self._task_list.doItemsLayout()
+            self._task_list.scrollTo(index, QAbstractItemView.ScrollHint.EnsureVisible)
+        self._quick_add_saved = task
+        self._refresh_quick_add_hint()
+        self._quick_add_edit.setFocus()
         self.statusBar().showMessage("업무를 등록했습니다.", 2500)
 
     def _open_new_task(self) -> None:
@@ -1996,7 +2527,7 @@ class MainWindow(QMainWindow):
         health = self._backup_manager.health.snapshot() if self._backup_manager else None
         self._backup_warning_button.setVisible(bool(health and health.attention))
         self._backup_warning_button.setToolTip(
-            "백업 실패·완료 미확인 또는 상태 기록 문제를 데이터 화면에서 확인하세요."
+            "백업 실패·완료 미확인 또는 상태 기록 문제를 관리 → 데이터 관리에서 확인하세요."
         )
 
     @Slot(str)
@@ -2224,7 +2755,7 @@ class MainWindow(QMainWindow):
                 self,
                 "업무는 삭제했지만 첨부파일 정리가 필요합니다.",
                 f"업무는 영구 삭제했습니다. 첨부파일 {len(failed_paths):,}개는 "
-                "지우지 못했으므로 데이터 → 첨부 정리에서 확인해 주세요.",
+                "지우지 못했으므로 관리 → 데이터 관리 → 첨부 정리에서 확인해 주세요.",
             )
             return
         self.statusBar().showMessage(f"'{task.title}' 업무를 영구 삭제했습니다.", 4000)
@@ -2287,24 +2818,33 @@ class MainWindow(QMainWindow):
     def _complete_selected_with_result(self) -> None:
         if self._selected_task_id is None:
             return
+        task_id = self._selected_task_id
+        occurrence_start = self._selected_occurrence_start
         try:
-            task = self._task_service.get(self._selected_task_id)
-            current_result = self._task_service.result_note(
-                self._selected_task_id,
-                self._selected_occurrence_start,
-            )
+            task = self._task_service.get(task_id)
+            current_result = self._task_service.result_note(task_id, occurrence_start)
         except (LookupError, ValueError) as error:
             self._show_error("업무를 열지 못했습니다.", error)
             return
+        attempt = MutationAttempt()
+
+        def save(note: str) -> None:
+            self._transition_task(
+                task_id,
+                occurrence_start,
+                TaskStatus.COMPLETED,
+                result_note=note,
+                attempt=attempt,
+            )
+
         dialog = CompleteTaskDialog(
             task,
             result_note=current_result,
+            on_save=save,
             parent=self,
         )
         dialog.setStyleSheet(LIGHT_STYLESHEET)
-        if dialog.exec() != CompleteTaskDialog.DialogCode.Accepted:
-            return
-        self._transition_selected(TaskStatus.COMPLETED, result_note=dialog.result_note())
+        dialog.exec()
 
     def _open_work_logs(self) -> None:
         if self._record_service is None:
@@ -2483,6 +3023,11 @@ class MainWindow(QMainWindow):
             return
         now = self._view_clock()
         if self._calendar_active:
+            if self._calendar_page.mode != "month":
+                if self._day_preview_controller:
+                    day = self._calendar_page.selected_date
+                    self._day_preview_controller.request(day, day, self._settings.timezone, now)
+                return
             start, end = self._calendar_page.visible_date_range
             self._preview_controller.request(
                 start, end - timedelta(days=1), self._settings.timezone, now
@@ -2694,7 +3239,11 @@ class MainWindow(QMainWindow):
             self._detail_schedule.setText(f"{self._detail_schedule.text()}\n반복 일정")
         if not deleted and self._reminder_service is not None and task.id is not None:
             try:
-                reminder_rules = self._reminder_service.rules_for_task(task.id)
+                runtime = self._reminder_service.runtime_state(task.id)
+                reminder_rules = tuple(
+                    ReminderRuleInput(r.relation, r.offset_minutes, r.absolute_at, r.enabled)
+                    for r in runtime.reminders
+                )
             except Exception:
                 logger.exception("업무 알림 규칙을 읽지 못했습니다.")
             else:
@@ -2703,7 +3252,7 @@ class MainWindow(QMainWindow):
                         ReminderEdit(rule, r.id)
                         for rule, r in zip(
                             reminder_rules,
-                            self._reminder_service.reminders_for_task(task.id),
+                            runtime.reminders,
                             strict=True,
                         )
                     )
@@ -2711,7 +3260,8 @@ class MainWindow(QMainWindow):
                         edits,
                         task,
                         self._view_clock(),
-                        self._reminder_service.task_deliveries(task.id),
+                        runtime.deliveries,
+                        runtime,
                     )
                     self._detail_schedule.setText(
                         f"{self._detail_schedule.text()}\n알림: {reminder_text}"
@@ -2764,44 +3314,56 @@ class MainWindow(QMainWindow):
         if self._selected_task_id is None:
             return False
         try:
-            identity = self._transition_attempt.identify(
-                (self._selected_task_id, self._selected_occurrence_start, status, result_note)
+            self._transition_task(
+                self._selected_task_id,
+                self._selected_occurrence_start,
+                status,
+                result_note=result_note,
+                attempt=self._transition_attempt,
             )
-            if self._selected_occurrence_start is not None:
-                occurrence_status = (
-                    OccurrenceStatus.COMPLETED
-                    if status is TaskStatus.COMPLETED
-                    else OccurrenceStatus.SKIPPED
-                )
-                self._task_service.transition_occurrence(
-                    self._selected_task_id,
-                    self._selected_occurrence_start,
-                    occurrence_status,
-                    result_note=result_note,
-                    command_id=identity,
-                )
-                if occurrence_status is OccurrenceStatus.SKIPPED:
-                    self._selected_occurrence_start = None
-                    self._selected_task_id = None
-                    self._update_detail(None)
-            else:
-                if status is TaskStatus.COMPLETED:
-                    self._task_service.complete(
-                        self._selected_task_id,
-                        result_note=result_note,
-                        command_id=identity,
-                    )
-                else:
-                    self._task_service.transition(
-                        self._selected_task_id, status, command_id=identity
-                    )
         except Exception as error:
             self._show_error("상태를 변경하지 못했습니다.", error)
             return False
-        self._refresh_tasks()
-        self._transition_attempt.succeeded()
-        self.statusBar().showMessage("업무 상태를 변경했습니다.", 2500)
         return True
+
+    def _transition_task(
+        self,
+        task_id: int,
+        occurrence_start: datetime | None,
+        status: TaskStatus,
+        *,
+        result_note: str | None,
+        attempt: MutationAttempt,
+    ) -> None:
+        """Execute a captured intent, independent of selection changes during dialogs."""
+        identity = attempt.identify((task_id, occurrence_start, status, result_note))
+        if occurrence_start is not None:
+            occurrence_status = (
+                OccurrenceStatus.COMPLETED
+                if status is TaskStatus.COMPLETED
+                else OccurrenceStatus.SKIPPED
+            )
+            self._task_service.transition_occurrence(
+                task_id,
+                occurrence_start,
+                occurrence_status,
+                result_note=result_note,
+                command_id=identity,
+            )
+            if occurrence_status is OccurrenceStatus.SKIPPED and (
+                self._selected_task_id,
+                self._selected_occurrence_start,
+            ) == (task_id, occurrence_start):
+                self._selected_occurrence_start = None
+                self._selected_task_id = None
+                self._update_detail(None)
+        elif status is TaskStatus.COMPLETED:
+            self._task_service.complete(task_id, result_note=result_note, command_id=identity)
+        else:
+            self._task_service.transition(task_id, status, command_id=identity)
+        self._refresh_tasks()
+        attempt.succeeded()
+        self.statusBar().showMessage("업무 상태를 변경했습니다.", 2500)
 
     def _show_unclean_shutdown_warning(self) -> None:
         QMessageBox.warning(
@@ -2810,7 +3372,7 @@ class MainWindow(QMainWindow):
             "이전 OfficeFlow 실행이 정상적으로 종료되지 않았습니다.\n\n"
             "저장된 데이터는 그대로 유지됩니다. 놓친 알림은 설정된 복구 범위 안에서 "
             "다시 확인하고 있으니 알림 창과 오늘 업무를 확인해 주세요.\n\n"
-            "자료 점검과 종료 진단 기록은 데이터 → 자료 검사에서 확인할 수 있습니다. "
+            "자료 점검과 종료 진단 기록은 관리 → 데이터 관리 → 자료 검사에서 확인할 수 있습니다. "
             "강제 종료 원인이 기록되지 않을 수도 있습니다.",
         )
         self._start_reminder_monitoring()
@@ -3215,6 +3777,9 @@ class MainWindow(QMainWindow):
             application.quit()
 
     def shutdown(self) -> None:
+        self._hide_schedule_result()
+        self._return_timer.stop()
+        self._return_location = None
         self._backup_health_timer.stop()
         if self._shutdown_done:
             return
@@ -3232,6 +3797,7 @@ class MainWindow(QMainWindow):
             self._preview_controller.shutdown()
         if self._day_preview_controller:
             self._day_preview_controller.shutdown()
+        self._day_overview_controller.shutdown()
         self._today_reminders.shutdown()
         self._calendar_page.shutdown()
         if self._attachment_export_controller:

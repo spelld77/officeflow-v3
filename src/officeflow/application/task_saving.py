@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from officeflow.application.reminders import ReminderService, ReminderTarget
 from officeflow.application.task_mutations import tracked_command
 from officeflow.application.tasks import TaskDraft, TaskService
-from officeflow.domain.enums import ReminderRelation, TaskStatus
+from officeflow.domain.enums import OccurrenceStatus, ReminderRelation, TaskStatus
+from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.reminder import Reminder, ReminderRuleInput
 from officeflow.domain.task import Task
 
@@ -23,6 +24,10 @@ class ReminderEdit:
 
 
 class EditableReminderRepository(Protocol):
+    def delivered_occurrences(self, reminder_id: int) -> set[datetime]: ...
+    def dismiss_occurrence_deliveries(
+        self, task_id: int, occurrence_start: datetime, now: datetime
+    ) -> None: ...
     def list_reminders(self, task_id: int) -> tuple[Reminder, ...]: ...
     def apply_edits(
         self, task_id: int, edits: tuple[ReminderEdit, ...], *, now: datetime
@@ -190,7 +195,7 @@ class TaskSaveService:
                 )
                 target = ReminderTarget(rule, saved)
                 candidate = (
-                    work.reminders._next_candidate(target, after=minute, inclusive=True)
+                    work.reminders._effective_candidate(target, after=minute, inclusive=True)
                     if rule.enabled
                     else None
                 )
@@ -226,4 +231,118 @@ class TaskSaveService:
                     # The legacy task-update trigger resets every rule. Restore
                     # only untouched rules inside this same write transaction.
                     work.repository.restore_reminder_schedule(old)
+            return saved
+
+    @tracked_command
+    def move_schedule(
+        self,
+        task_id: int,
+        starts_at: datetime | None,
+        ends_at: datetime | None,
+        all_day: bool,
+        *,
+        expected_task: Task,
+        expected_rules: tuple[Reminder, ...],
+        occurrence_start: datetime | None = None,
+        expected_occurrence: TaskOccurrence | None = None,
+        now: datetime | None = None,
+        command_id: str | None = None,
+    ) -> Task | TaskOccurrence:
+        from officeflow.application.schedule_change import schedule_draft
+
+        current = now or datetime.now(UTC)
+        if expected_task.id != task_id:
+            raise ValueError("이동할 업무가 일치하지 않습니다.")
+        if (
+            expected_task.status not in {TaskStatus.ACTIVE, TaskStatus.PENDING}
+            or expected_task.deleted_at is not None
+        ):
+            raise ValueError("진행 또는 대기 업무만 날짜를 바꿀 수 있습니다.")
+        edits = tuple(
+            ReminderEdit(
+                ReminderRuleInput(r.relation, r.offset_minutes, r.absolute_at, r.enabled), r.id
+            )
+            for r in expected_rules
+        )
+        draft = schedule_draft(expected_task, starts_at, ends_at, all_day)
+        # Validate the same schedule domain as the full editor before any write.
+        Task.create(
+            title=draft.title,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            all_day=all_day,
+            timezone=draft.timezone,
+        )
+        if not expected_task.recurrence_rule:
+            if occurrence_start is not None:
+                raise ValueError("일반 업무에는 반복 회차를 지정할 수 없습니다.")
+            return self.save(
+                draft,
+                task_id=task_id,
+                edits=edits,
+                expected_task=expected_task,
+                expected_rules=expected_rules,
+                now=current,
+            )
+        if occurrence_start is None or expected_occurrence is None or starts_at is None:
+            raise ValueError("달력 또는 오늘 화면에서 이동할 반복 회차를 선택하세요.")
+        with self._unit_of_work() as work:
+            task = work.tasks.get(task_id)
+            if replace(task, has_attachments=False, command_replayed=False) != replace(
+                expected_task, has_attachments=False, command_replayed=False
+            ):
+                raise ValueError("업무가 다른 창에서 변경되었습니다. 다시 확인하세요.")
+            rules = work.repository.list_reminders(task_id)
+            if {(r.id, r.identity, r.enabled) for r in rules} != {
+                (r.id, r.identity, r.enabled) for r in expected_rules
+            }:
+                raise ValueError("알림 설정이 다른 창에서 변경되었습니다.")
+            occurrence = work.tasks._validated_occurrence(task, occurrence_start)
+            if (
+                replace(occurrence, id=None, command_replayed=False)
+                != replace(expected_occurrence, id=None, command_replayed=False)
+                or occurrence.status is not OccurrenceStatus.PENDING
+            ):
+                raise ValueError("반복 회차가 변경되거나 이미 처리되었습니다.")
+            if all_day != task.all_day:
+                raise ValueError("종일 여부는 반복 전체 수정에서 변경하세요.")
+            if (occurrence.starts_at, occurrence.ends_at) == (starts_at, ends_at):
+                return work.tasks._repository.save_occurrence(occurrence)
+            # Retain an explicit exception even when returning to the original
+            # date, so delivered rules cannot be rearmed by a move/undo cycle.
+            saved = work.tasks._repository.save_occurrence(
+                replace(occurrence, effective_start=starts_at, effective_end=ends_at)
+            )
+            minute = current.replace(second=0, microsecond=0)
+            for rule in rules:
+                if (
+                    not rule.enabled
+                    or rule.relation is ReminderRelation.ABSOLUTE
+                    or rule.id is None
+                ):
+                    continue
+                delivered = occurrence_start in work.repository.delivered_occurrences(rule.id)
+                base = starts_at if rule.relation is ReminderRelation.START else ends_at
+                if base is None:
+                    continue
+                due = work.reminders._relative_due(task, base, rule.offset_minutes or 0)
+                if not delivered and due < minute:
+                    raise ValueError(
+                        "이 회차의 미발생 알림이 과거가 됩니다. 알림 설정 또는 시각을 확인하세요."
+                    )
+                target = ReminderTarget(rule, task)
+                candidates = work.reminders._effective_candidates(target, after=due, inclusive=True)
+                if not delivered and sum(item[1] == due for item in candidates) > 1:
+                    raise ValueError(
+                        "다른 반복 회차의 알림과 같은 시각입니다. 다른 날짜·시각을 지정하세요."
+                    )
+                candidate = work.reminders._effective_candidate(
+                    target, after=minute, inclusive=True
+                )
+                work.repository.save_reminder_schedule(
+                    rule.id,
+                    candidate[1] if candidate else None,
+                    candidate[0] if candidate else None,
+                )
+            work.repository.dismiss_occurrence_deliveries(task_id, occurrence_start, current)
             return saved

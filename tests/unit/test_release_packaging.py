@@ -14,7 +14,7 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.12"
+    assert __version__ == "3.0.13"
     assert project["project"]["version"] == __version__
     assert f"FileVersion', '{__version__}'" in version_info
     assert f"ProductVersion', '{__version__}'" in version_info

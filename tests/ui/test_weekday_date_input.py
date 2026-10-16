@@ -81,7 +81,9 @@ def test_editor_and_reminder_date_fields_contain_weekday(qtbot, tmp_path, advanc
     editor.show()
     qtbot.wait(60)
     for field in (editor.start_date_edit, editor.end_date_edit, editor.repeat_until_date):
-        assert editor._date_rows[field] is field
+        # The wrapper holds the caution line, not a separate weekday label.
+        assert editor._date_rows[field].edit is field
+        assert not editor._date_rows[field].findChildren(QLabel, "dateWeekday")
         assert field.sectionCount() == 3
         assert "(" in field.text()
     assert editor.grab().save(str(tmp_path / "weekday-inside-editor.png"))
@@ -89,7 +91,8 @@ def test_editor_and_reminder_date_fields_contain_weekday(qtbot, tmp_path, advanc
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.wait(50)
-    assert dialog.date_row is dialog.date_edit
+    assert dialog.date_row.edit is dialog.date_edit
+    assert not dialog.date_row.findChildren(QLabel, "dateWeekday")
     assert dialog.date_edit.sectionCount() == 3
     assert dialog.grab().save(str(tmp_path / "weekday-inside-reminder.png"))
 

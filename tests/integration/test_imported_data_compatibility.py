@@ -265,7 +265,7 @@ def test_application_starts_with_imported_data_without_an_importer(
         app.processEvents()
         task = window._task_service.list(TaskView.ALL, search="원본", now=NOW)[0]
         assert task.legacy_id == 26
-        assert "2.6" not in window._data_button.toolTip()
+        assert "2.6" not in window._data_action.toolTip()
         assert not paths.pending_restore_file.exists()
         assert not (paths.root / "migration-reports").exists()
         assert _snapshot(paths) == before

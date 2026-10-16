@@ -371,9 +371,11 @@ class TaskService:
         starts_at: datetime | None = None
         ends_at: datetime | None = None
         all_day = False
-        if view is TaskView.TODAY:
+        if view in {TaskView.TODAY, TaskView.UPCOMING}:
             zone = ZoneInfo(self._timezone)
-            day = local_date or datetime.now(zone).date()
+            day = local_date or (now or datetime.now(UTC)).astimezone(zone).date()
+            if view is TaskView.UPCOMING:
+                day += timedelta(days=1)
             starts_at = datetime.combine(day, time.min, tzinfo=zone).astimezone(UTC)
             ends_at = (datetime.combine(day, time.min, tzinfo=zone) + timedelta(days=1)).astimezone(
                 UTC
@@ -819,19 +821,41 @@ class TaskService:
         for task in templates:
             if task.id is None or task.starts_at is None or not task.recurrence_rule:
                 continue
-            for occurrence_start, occurrence_end in expand_recurrence(
-                task.recurrence_rule,
-                template_start=task.starts_at,
-                template_end=task.ends_at,
-                timezone=task.timezone,
-                range_start=range_start,
-                range_end=range_end,
-            ):
+            generated = dict(
+                expand_recurrence(
+                    task.recurrence_rule,
+                    template_start=task.starts_at,
+                    template_end=task.ends_at,
+                    timezone=task.timezone,
+                    range_start=range_start,
+                    range_end=range_end,
+                )
+            )
+            for saved_occurrence in saved:
+                if (
+                    saved_occurrence.task_id == task.id
+                    and saved_occurrence.effective_start is not None
+                ):
+                    generated.setdefault(
+                        saved_occurrence.occurrence_start, saved_occurrence.occurrence_end
+                    )
+            for occurrence_start, occurrence_end in generated.items():
                 occurrence = saved_by_key.get((task.id, occurrence_start))
                 if occurrence is not None and occurrence.status in {
                     OccurrenceStatus.SKIPPED,
                     OccurrenceStatus.CANCELED,
                 }:
+                    continue
+                effective_start = occurrence.starts_at if occurrence else occurrence_start
+                effective_end = occurrence.ends_at if occurrence else occurrence_end
+                if not (
+                    effective_start < range_end
+                    and (
+                        effective_end > range_start
+                        if effective_end
+                        else effective_start >= range_start
+                    )
+                ):
                     continue
                 scheduled.append(
                     ScheduledTask(

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QWidget,
 )
 
@@ -133,7 +134,9 @@ class TimeInput(QWidget):
         self.minus_button = QPushButton("-", self)
         self.plus_button = QPushButton("+", self)
         for button, delta in ((self.minus_button, -1), (self.plus_button, 1)):
-            button.setFixedWidth(32)
+            button.setProperty("timeStep", True)
+            button.setMinimumWidth(36)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.setAutoDefault(False)
             label = "한 시간 이전" if delta < 0 else "한 시간 이후"

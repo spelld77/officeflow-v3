@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from officeflow.application.input_review import DateInput, review_dates
 from officeflow.application.reminder_runtime import ReminderRuntimeState, scope_label
 from officeflow.application.reminders import ReminderService, ReminderTarget
 from officeflow.application.task_saving import ReminderEdit
@@ -35,6 +36,7 @@ from officeflow.domain.reminder import ReminderRuleInput as Rule
 from officeflow.domain.task import Task
 from officeflow.presentation.dates import date_with_weekday, format_datetime
 from officeflow.presentation.input_controls import TimeInput, WheelScrollGuard, default_start_at
+from officeflow.presentation.input_review import DateCaution, DateReview
 
 
 def candidate(edit: ReminderEdit, task: Task, now: datetime) -> datetime | None:
@@ -106,7 +108,7 @@ def state_label(
         task = runtime.task
         deliveries = runtime.deliveries
     label = rule_label(edit, task, now)
-    history = _matching_history(edit, task, deliveries)
+    history = _matching_history(edit, task, deliveries, runtime)
     if closed_scope := scope_label(task):
         handled = {
             ReminderDeliveryStatus.ACKNOWLEDGED: "알림 확인함",
@@ -157,13 +159,40 @@ def state_label(
 
 
 def _matching_history(
-    edit: ReminderEdit, task: Task, deliveries: tuple[ReminderDelivery, ...]
+    edit: ReminderEdit,
+    task: Task,
+    deliveries: tuple[ReminderDelivery, ...],
+    runtime: ReminderRuntimeState | None = None,
 ) -> tuple[ReminderDelivery, ...]:
     r = edit.rule
     reminder = Reminder(
         edit.reminder_id, task.id or 0, r.relation, r.offset_minutes, r.absolute_at, r.enabled
     )
     target = ReminderTarget(reminder, task)
+    if runtime and runtime.moved:
+        moved = {item.occurrence_start: item for item in runtime.moved}
+        result = []
+        for delivery in deliveries:
+            if delivery.reminder_id != edit.reminder_id:
+                continue
+            occurrence = moved.get(delivery.occurrence_start) if delivery.occurrence_start else None
+            if occurrence and r.relation is not ReminderRelation.ABSOLUTE:
+                base = (
+                    occurrence.starts_at
+                    if r.relation is ReminderRelation.START
+                    else occurrence.ends_at
+                )
+                if (
+                    base
+                    and ReminderService._relative_due(task, base, r.offset_minutes or 0)
+                    == delivery.scheduled_at
+                ):
+                    result.append(delivery)
+            elif ReminderService._next_candidate(
+                target, after=delivery.scheduled_at, inclusive=True
+            ) == (delivery.occurrence_start, delivery.scheduled_at):
+                result.append(delivery)
+        return tuple(result)
     return tuple(
         d
         for d in deliveries
@@ -203,15 +232,35 @@ def _unhandled_candidate(
         ),
         task,
     )
+
+    def next_item(after: datetime, inclusive: bool) -> tuple[datetime | None, datetime] | None:
+        if runtime and runtime.moved:
+            values = ReminderService._candidates_with_overrides(
+                target,
+                after=after,
+                inclusive=inclusive,
+                moved=runtime.moved,
+                delivered={
+                    start
+                    for rule_id, start in runtime.moved_deliveries
+                    if rule_id == edit.reminder_id
+                },
+            )
+            return min(values, key=lambda item: (item[1], item[0] or item[1]), default=None)
+        return ReminderService._next_candidate(target, after=after, inclusive=inclusive)
+
+    if runtime and runtime.moved:
+        first = next_item(now.replace(second=0, microsecond=0), True)
+        due = first[1] if first else None
     for _attempt in range(512):
         if due is None:
             return None
-        current = ReminderService._next_candidate(target, after=due, inclusive=True)
+        current = next_item(due, True)
         if due not in handled and not (
             runtime and current and scope_label(task, runtime.occurrence_status(current[0]))
         ):
             return due
-        result = ReminderService._next_candidate(target, after=due, inclusive=False)
+        result = next_item(due, False)
         due = result[1] if result else None
     return None
 
@@ -232,7 +281,7 @@ def reminder_summary(
     active = tuple(
         d
         for e in edits
-        for d in _matching_history(e, task, deliveries)
+        for d in _matching_history(e, task, deliveries, runtime)
         if e.rule.enabled
         and d.status in {ReminderDeliveryStatus.FIRED, ReminderDeliveryStatus.SNOOZED}
         and not (runtime and scope_label(task, runtime.occurrence_status(d.occurrence_start)))
@@ -242,7 +291,7 @@ def reminder_summary(
         for e in edits
         if (
             due := _unhandled_candidate(
-                e, task, now, _matching_history(e, task, deliveries), runtime
+                e, task, now, _matching_history(e, task, deliveries, runtime), runtime
             )
         )
         is not None
@@ -320,6 +369,7 @@ class ReminderRuleDialog(QDialog):
                 )
         value = existing_time.astimezone(ZoneInfo(task.timezone)) if existing_time else default
         self.date_edit.setDate(QDate(value.year, value.month, value.day))
+        self.initial_date = value.date()
         self.time_edit.setTime(QTime(value.hour, value.minute))
         self.offset = QSpinBox()
         self.offset.setRange(0, 43200)
@@ -350,7 +400,7 @@ class ReminderRuleDialog(QDialog):
         self.quick.currentIndexChanged.connect(self._quick_changed)
         self.enabled = QCheckBox("이 알림 사용")
         self.enabled.setChecked(edit.rule.enabled if edit else True)
-        self.date_row = date_with_weekday(self.date_edit)
+        self.date_row = DateCaution(date_with_weekday(self.date_edit), self)
         form.addRow("방식", self.mode)
         form.addRow("날짜", self.date_row)
         form.addRow("시각", self.time_input)
@@ -482,6 +532,18 @@ class ReminderRuleDialog(QDialog):
 
     def _refresh(self) -> None:
         absolute = self.mode.currentData() == "absolute"
+        if absolute and self.enabled.isChecked():
+            self.date_row.review(
+                DateInput(
+                    "알림 날짜",
+                    self.initial_date,
+                    cast(date, self.date_edit.date().toPython()),
+                    self._original is None,
+                ),
+                datetime.now(ZoneInfo(self._task.timezone)).date(),
+            )
+        else:
+            self.date_row.set_warning("")
         for field, visible in (
             (self.date_row, absolute),
             (self.time_input, absolute),
@@ -490,7 +552,8 @@ class ReminderRuleDialog(QDialog):
         ):
             self._form.setRowVisible(field, visible)
         try:
-            self.preview.setText(rule_label(self._edit(), self._task, datetime.now(UTC)))
+            text = rule_label(self._edit(), self._task, datetime.now(UTC))
+            self.preview.setText(text)
         except ValueError as error:
             self.preview.setText(str(error))
 
@@ -525,6 +588,7 @@ class ReminderSettingsDialog(QDialog):
         edits: tuple[ReminderEdit, ...],
         *,
         save: Callable[[tuple[ReminderEdit, ...]], None] | None = None,
+        date_baselines: dict[int, date] | None = None,
         deliveries: tuple[ReminderDelivery, ...] = (),
         parent: QWidget | None = None,
     ) -> None:
@@ -532,6 +596,13 @@ class ReminderSettingsDialog(QDialog):
         self._task = task
         self._edits = list(edits)
         self._save = save
+        self._date_review = DateReview(self)
+        self._date_baselines = dict(date_baselines or {})
+        for edit in edits:
+            if edit.rule.absolute_at is not None:
+                self._date_baselines.setdefault(
+                    id(edit), edit.rule.absolute_at.astimezone(ZoneInfo(task.timezone)).date()
+                )
         self._original_edits = edits
         self._deliveries = deliveries
         self._runtime: ReminderRuntimeState | None = None
@@ -579,6 +650,26 @@ class ReminderSettingsDialog(QDialog):
 
     def edits(self) -> tuple[ReminderEdit, ...]:
         return tuple(self._edits)
+
+    def date_baselines(self) -> dict[int, date]:
+        return {
+            id(edit): self._date_baselines[id(edit)]
+            for edit in self._edits
+            if id(edit) in self._date_baselines
+        }
+
+    def date_inputs(self) -> tuple[DateInput, ...]:
+        today = datetime.now(ZoneInfo(self._task.timezone)).date()
+        return tuple(
+            DateInput(
+                "알림 날짜",
+                self._date_baselines.get(id(edit), today),
+                edit.rule.absolute_at.astimezone(ZoneInfo(self._task.timezone)).date(),
+                edit.reminder_id is None,
+            )
+            for edit in self._edits
+            if edit.rule.enabled and edit.rule.absolute_at is not None
+        )
 
     def update_runtime_state(self, state: ReminderRuntimeState) -> None:
         self._runtime = state
@@ -674,6 +765,7 @@ class ReminderSettingsDialog(QDialog):
                 self.error.setText(
                     "최종 저장하면 이 알림의 미확인·재알림과 발생 이력도 제거됩니다. 취소하면 유지됩니다."
                 )
+            self._date_baselines.pop(id(self._edits[row]), None)
             del self._edits[row]
             self._refresh()
 
@@ -703,7 +795,14 @@ class ReminderSettingsDialog(QDialog):
                 ):
                     self.error.setText("동일한 알림이 이미 있습니다.")
                 else:
+                    before = (
+                        self._date_baselines.get(id(self._edits[row]), child.initial_date)
+                        if editing
+                        else child.initial_date
+                    )
+                    self._date_baselines[id(edit)] = before
                     if editing:
+                        self._date_baselines.pop(id(self._edits[row]), None)
                         self._edits[row] = edit
                     else:
                         self._edits.append(edit)
@@ -717,6 +816,11 @@ class ReminderSettingsDialog(QDialog):
     def _apply(self) -> None:
         try:
             if self._save:
+                notices = review_dates(
+                    self.date_inputs(), today=datetime.now(ZoneInfo(self._task.timezone)).date()
+                )
+                if not self._date_review.allow(self.edits(), notices, self._apply):
+                    return
                 self._save(self.edits())
         except Exception as error:
             self.error.setText(str(error))
@@ -724,6 +828,7 @@ class ReminderSettingsDialog(QDialog):
         self.accept()
 
     def done(self, result: int) -> None:
+        self._date_review.close()
         if self._child:
             self._child.reject()
         super().done(result)

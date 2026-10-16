@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from officeflow.domain.enums import OccurrenceStatus, TaskStatus
+from officeflow.domain.occurrence import TaskOccurrence
 from officeflow.domain.reminder import Reminder, ReminderDelivery
 from officeflow.domain.task import Task
 
@@ -36,6 +37,8 @@ class ReminderRuntimeState:
     deliveries: tuple[ReminderDelivery, ...]
     reminders: tuple[Reminder, ...]
     read_at: datetime
+    moved: tuple[TaskOccurrence, ...] = ()
+    moved_deliveries: tuple[tuple[int, datetime], ...] = ()
 
     def occurrence_status(self, start: datetime | None) -> OccurrenceStatus | None:
         return next((status for key, status in self.occurrences if key == start), None)

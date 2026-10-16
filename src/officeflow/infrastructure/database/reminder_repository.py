@@ -104,10 +104,12 @@ class SqlAlchemyReminderRepository:
                 if r.next_occurrence_start is not None
             )
             from officeflow.application.reminders import ReminderService
+            from officeflow.application.tasks import TaskService
 
+            resolver = ReminderService(repo, TaskService(tasks))
             next_starts = []
             for reminder in reminders:
-                next_item = ReminderService._next_candidate(
+                next_item = resolver._effective_candidate(
                     ReminderTarget(reminder, task),
                     after=datetime.now(UTC).replace(second=0, microsecond=0),
                     inclusive=True,
@@ -141,6 +143,8 @@ class SqlAlchemyReminderRepository:
                 deliveries,
                 reminders,
                 datetime.now(UTC),
+                repo.moved_occurrences(task_id),
+                repo.moved_deliveries(task_id),
             )
 
     @staticmethod
@@ -191,6 +195,34 @@ class SqlAlchemyReminderRepository:
             repo = SqlAlchemyReminderRepository(scoped)
             if not self._target_matches(repo.get_reminder_target(delivery.reminder_id), target):
                 return None
+            if delivery.occurrence_start is not None:
+                occurrence = repo.get_task_occurrence(delivery.task_id, delivery.occurrence_start)
+                if occurrence is not None:
+                    if occurrence.status is not OccurrenceStatus.PENDING:
+                        return None
+                    if (
+                        occurrence.effective_start is not None
+                        and target.reminder.relation is not ReminderRelation.ABSOLUTE
+                    ):
+                        from officeflow.application.reminders import ReminderService
+
+                        base = (
+                            occurrence.starts_at
+                            if target.reminder.relation is ReminderRelation.START
+                            else occurrence.ends_at
+                        )
+                        if (
+                            base is None
+                            or ReminderService._relative_due(
+                                target.task, base, target.reminder.offset_minutes or 0
+                            )
+                            != delivery.scheduled_at
+                        ):
+                            return None
+                        if delivery.occurrence_start in repo.delivered_occurrences(
+                            delivery.reminder_id
+                        ):
+                            return None
             return repo.claim_reminder_delivery(delivery)
 
     def preview_targets(
@@ -522,6 +554,72 @@ class SqlAlchemyReminderRepository:
             return ReminderTarget(
                 reminder=self._to_reminder(reminder),
                 task=SqlAlchemyTaskRepository._to_domain(task),
+            )
+
+    def moved_occurrences(self, task_id: int) -> tuple[TaskOccurrence, ...]:
+        with self._sessions.transaction() as session:
+            return tuple(
+                SqlAlchemyTaskRepository._occurrence_to_domain(row)
+                for row in session.scalars(
+                    select(TaskOccurrenceRecord).where(
+                        TaskOccurrenceRecord.task_id == task_id,
+                        TaskOccurrenceRecord.effective_start.is_not(None),
+                    )
+                )
+            )
+
+    def delivered_occurrences(self, reminder_id: int) -> set[datetime]:
+        with self._sessions.transaction() as session:
+            return set(
+                session.scalars(
+                    select(ReminderDeliveryRecord.occurrence_start).where(
+                        ReminderDeliveryRecord.reminder_id == reminder_id,
+                        ReminderDeliveryRecord.occurrence_start.is_not(None),
+                    )
+                )
+            )
+
+    def moved_deliveries(self, task_id: int) -> tuple[tuple[int, datetime], ...]:
+        with self._sessions.transaction() as session:
+            return tuple(
+                (rule_id, start)
+                for rule_id, start in session.execute(
+                    select(
+                        ReminderDeliveryRecord.reminder_id, ReminderDeliveryRecord.occurrence_start
+                    )
+                    .join(
+                        TaskOccurrenceRecord,
+                        (TaskOccurrenceRecord.task_id == ReminderDeliveryRecord.task_id)
+                        & (
+                            TaskOccurrenceRecord.occurrence_start
+                            == ReminderDeliveryRecord.occurrence_start
+                        ),
+                    )
+                    .where(
+                        ReminderDeliveryRecord.task_id == task_id,
+                        TaskOccurrenceRecord.effective_start.is_not(None),
+                    )
+                    .distinct()
+                )
+            )
+
+    def dismiss_occurrence_deliveries(
+        self, task_id: int, occurrence_start: datetime, now: datetime
+    ) -> None:
+        with self._sessions.transaction() as session:
+            session.execute(
+                update(ReminderDeliveryRecord)
+                .where(
+                    ReminderDeliveryRecord.task_id == task_id,
+                    ReminderDeliveryRecord.occurrence_start == occurrence_start,
+                    ReminderDeliveryRecord.status.in_(("fired", "snoozed")),
+                    ReminderDeliveryRecord.reminder_id.in_(
+                        select(ReminderRecord.id).where(ReminderRecord.relation != "absolute")
+                    ),
+                )
+                .values(
+                    status="acknowledged", acknowledged_at=now, updated_at=now, snoozed_until=None
+                )
             )
 
     def get_task_occurrence(

@@ -62,7 +62,7 @@ def test_help_button_opens_packaged_user_guide(
     window = MainWindow(AppSettings(), task_service)
     qtbot.addWidget(window)
 
-    window._help_button.click()
+    window._help_action.trigger()
 
     assert opened == [True]
     assert window._version_label.text() == f"OfficeFlow {__version__}"
@@ -243,12 +243,13 @@ def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> N
         DialogCode = QDialog.DialogCode
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+            self.on_save = _kwargs["on_save"]
 
         def setStyleSheet(self, _style: str) -> None:
             pass
 
         def exec(self) -> QDialog.DialogCode:
+            self.on_save(self.result_note())
             return QDialog.DialogCode.Accepted
 
         def result_note(self) -> str:
