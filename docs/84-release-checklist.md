@@ -1,6 +1,6 @@
 # OfficeFlow 3.0.14 릴리스 체크리스트
 
-작성일: 2026-10-26, 마감 2026-10-27 (Asia/Seoul). 상태: 배포물 검증 완료, 원격 공개 준비.
+작성일: 2026-10-26, 마감 2026-10-27 (Asia/Seoul). 상태: **배포물·커밋/태그·최신 정식 릴리스 공개·다운로드 검증 완료.**
 
 ## 범위와 보호
 
@@ -15,8 +15,8 @@ DB0017 색인만 추가, 전체 백업 v3 유지. 실제 사용자 DB/첨부/설
 - [x] 마지막 정적/패키지 관련 검사와 대표 Windows 검사
 - [x] EXE/격리 설치·재설치·제거·Windows/Python ZIP·manifest/체크섬
 - [x] 빈 프로필·0016 자료 업그레이드/파일·설정 보존·백업·추출 실행 대조
-- [ ] 소스 커밋/태그·원격 업로드·초안 자산 대조·정식 공개
-- [ ] 공개 다운로드/해시 대조·소유 임시 자료 정리
+- [x] 소스 커밋/태그·원격 업로드·초안 자산 대조·정식 공개
+- [x] 공개 다운로드/해시 대조·소유 임시 자료 정리
 
 ## 개발 검증 근거
 
@@ -58,3 +58,25 @@ DB0017 색인만 추가, 전체 백업 v3 유지. 실제 사용자 DB/첨부/설
 | OfficeFlow-Python-3.0.14.zip.sha256.txt | 96 | `7b0f08a8b8d08c714326b8af89509012394ceca3bfef18db8ae36b721c09eb2c` |
 | SHA256SUMS.txt | 105,383 | `59b364eabb247547734215129303e6b0d77a23ecc9d9f412e1f2a7e56b5d5c5f` |
 | release-manifest.json | 167,409 | `abb5da8032d0d302091e26a0e98edeef14b2921088e3cee52ef6b40d3e75d421` |
+
+## GitHub 공개
+
+- 2026-10-27 00:06:26 KST(2026-10-26 15:06:26 UTC)에
+  [OfficeFlow 3.0.14](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.14)를 최신 정식 릴리스로 공개했다.
+  release ID `424397261`, draft/prerelease=false, 업로드 자산 6개이며 공개 tag/latest endpoint를 확인했다.
+- 소스 커밋 `a9f4bc59c9c5566e3e9f4d660e9d09ec12294b83`, annotated tag `v3.0.14`를 atomic push했다.
+  태그 객체 `17f856c9d05ae6eae3a270ea823b83ea31399092`의 peeled commit이 소스 커밋과 일치한다.
+- 초안 ID로 6개 자산의 고유 이름·uploaded 상태·크기·GitHub SHA-256 digest를 로컬 배포물과 대조한 뒤 공개했다.
+  기록: `artifacts/release-3.0.14-assets-verified.json`.
+- 인증 없이 공개 Python ZIP과 체크섬을 다운로드해 SHA-256을 대조했고, 공개 latest API도 3.0.14를 가리킨다.
+  기록: `artifacts/release-3.0.14-public-verification.json`.
+- 기존 3.0.13 release ID `415100370`와 자산 6개는 유지했다. 실제 설치/Python 실행 폴더는 교체하지 않았다.
+- 공개 결과는 문서 전용 후속 커밋으로 main에 기록한다. 태그/배포물은 검증한 소스 커밋에 유지한다.
+
+## 임시 자료 정리와 한계
+
+이번 소유 합성 검사/추출/시험 Python/공개 다운로드/빌드 smoke 폴더 9개를 절대 경로·reparse point 확인 후 정리했다.
+이 소유 폴더의 잔여는 0개다. 최종 dist·이전 배포물·XML/로그/작은 캡처·검증 코드는 보존했다.
+실제 사용자 DB/첨부·실행 폴더와 다른 작업 자료는 정리하지 않았다.
+회사 DRM/외부 문서 편집기·6시간 이상 운영·OS 테마/DPI 실시간 전환은 별도 확인이다.
+0017을 모르는 이전 실행기로 열 수 있다고 보장하지 않으며 이전 버전 복귀에는 업데이트 전 자료가 필요하다.
