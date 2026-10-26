@@ -13,6 +13,7 @@ from officeflow.application.attachment_deletion import AttachmentDeletionService
 from officeflow.application.attachment_documents import (
     AttachmentDocumentService,
     InternalRecoveryReport,
+    MaintenanceTickHint,
 )
 from officeflow.application.attachment_export import AttachmentExportService
 from officeflow.application.attachment_search import AttachmentSearchService
@@ -21,6 +22,7 @@ from officeflow.application.document_lifecycle import DocumentLifecycle
 from officeflow.application.exporting import ExportService
 from officeflow.application.file_operations import FileOperationCoordinator
 from officeflow.application.folder_links import FolderLinkService
+from officeflow.application.recent_tasks import RecentTasks
 from officeflow.application.records import RecordService
 from officeflow.application.reminder_preview import ReminderPreviewService
 from officeflow.application.reminders import ReminderService
@@ -50,12 +52,16 @@ from officeflow.infrastructure.database.attachment_repository import (
 from officeflow.infrastructure.database.attachment_search_repository import (
     SqlAlchemyAttachmentSearchRepository,
 )
+from officeflow.infrastructure.database.completed_browse_repository import (
+    SqlAlchemyCompletedBrowseRepository,
+)
 from officeflow.infrastructure.database.document_catalog import DocumentCatalog
 from officeflow.infrastructure.database.folder_link_repository import SqlAlchemyFolderLinkRepository
 from officeflow.infrastructure.database.migrate import (
     needs_database_upgrade,
     upgrade_database,
 )
+from officeflow.infrastructure.database.recent_task_repository import SqlAlchemyRecentTaskRepository
 from officeflow.infrastructure.database.record_repository import SqlAlchemyRecordRepository
 from officeflow.infrastructure.database.reminder_repository import SqlAlchemyReminderRepository
 from officeflow.infrastructure.database.session import SessionFactory, create_database_engine
@@ -65,6 +71,7 @@ from officeflow.infrastructure.database.task_saving import task_save_service
 from officeflow.infrastructure.exports.calendar import ICalendarTaskExporter
 from officeflow.infrastructure.exports.excel import ExcelTaskExporter
 from officeflow.infrastructure.exports.task_archive import HtmlExcelArchiveWriter
+from officeflow.infrastructure.recent_tasks import RecentTaskStore
 from officeflow.infrastructure.settings.store import JsonSettingsStore
 from officeflow.infrastructure.windows.startup import WindowsStartupManager
 from officeflow.presentation.database_upgrade import DatabaseUpgradeDialog
@@ -89,9 +96,14 @@ def build_application(
     configure_logging(paths.log_dir)
     file_coordinator = FileOperationCoordinator()
     backup_manager = BackupManager(paths, coordinator=file_coordinator)
+    recent_disk_allowed = True
 
     def apply_restore() -> None:
+        nonlocal recent_disk_allowed
         if backup_manager.restore_is_pending:
+            recent_disk_allowed = RecentTaskStore(
+                paths.recent_tasks_file, paths.database_file
+            ).invalidate()
 
             def restore(progress: Callable[[str], None]) -> None:
                 progress(
@@ -189,7 +201,9 @@ def build_application(
         SqlAlchemyArchiveRepository(sessions), attachment_exports, HtmlExcelArchiveWriter
     )
 
-    def recover_internal(canceled: Callable[[], bool]) -> InternalRecoveryReport:
+    def recover_internal(
+        canceled: Callable[[], bool],
+    ) -> InternalRecoveryReport | MaintenanceTickHint:
         nonlocal legacy_pending
         if legacy_pending and not canceled():
             warnings = backup_manager.recover_attachment_deletions()
@@ -198,10 +212,17 @@ def build_application(
                 file_coordinator.unprotect("legacy:pending")
             else:
                 return InternalRecoveryReport(0, len(warnings), warnings)
-        return maintenance.tick(canceled)
+        return maintenance.tick_hint(canceled)
 
     window = MainWindow(
+        completed_repository=SqlAlchemyCompletedBrowseRepository(sessions),
+        recent_tasks=RecentTasks(SqlAlchemyRecentTaskRepository(sessions)),
+        recent_store=RecentTaskStore(paths.recent_tasks_file, paths.database_file)
+        if recent_disk_allowed
+        else None,
+        resource_log_directory=paths.log_dir,
         internal_recovery=recover_internal,
+        internal_recovery_wake=maintenance.wake,
         settings=settings,
         task_service=task_service,
         reminder_service=reminder_service,

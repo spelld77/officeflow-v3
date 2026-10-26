@@ -61,6 +61,7 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
             "src/officeflow/infrastructure/database/migrations/versions/0014_task_history.py",
             "src/officeflow/infrastructure/database/migrations/versions/0015_task_snapshots.py",
             "src/officeflow/infrastructure/database/migrations/versions/0016_task_folder_links.py",
+            "src/officeflow/infrastructure/database/migrations/versions/0017_completion_browse_index.py",
             "src/officeflow/application/task_snapshots.py",
             "src/officeflow/presentation/task_history_dialog.py",
             "src/officeflow/presentation/task_snapshot_dialog.py",
@@ -162,7 +163,7 @@ def verify(archive: Path, python: Path, destination: Path, expected: str) -> Non
     with closing(sqlite3.connect(database)) as connection:
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0016_task_folder_links"
+            == "0017_completion_browse_index"
         )
         assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM attachment_search").fetchone()[0] == 0

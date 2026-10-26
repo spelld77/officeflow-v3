@@ -139,7 +139,7 @@ def test_0015_upgrade_keeps_data_and_adds_links(tmp_path):
     with sqlite3.connect(database) as db:
         assert (
             db.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0016_task_folder_links"
+            == "0017_completion_browse_index"
         )
         assert db.execute("SELECT key FROM app_settings").fetchone()[0] == "marker"
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

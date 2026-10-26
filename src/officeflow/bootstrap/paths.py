@@ -46,6 +46,10 @@ class AppPaths:
         return self.root / "settings.json"
 
     @property
+    def recent_tasks_file(self) -> Path:
+        return self.root / "recent-tasks.json"
+
+    @property
     def pending_restore_file(self) -> Path:
         return self.root / "pending-restore.ofbackup"
 

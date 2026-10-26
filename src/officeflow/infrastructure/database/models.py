@@ -205,6 +205,7 @@ class TaskOccurrenceRecord(Base):
     __table_args__ = (
         UniqueConstraint("task_id", "occurrence_start"),
         Index("ix_task_occurrences_window", "task_id", "status", "occurrence_start"),
+        Index("ix_task_occurrences_completed", "status", "completed_at", "task_id", "id"),
         CheckConstraint(
             "status IN ('pending','completed','skipped','canceled')",
             name="valid_status",

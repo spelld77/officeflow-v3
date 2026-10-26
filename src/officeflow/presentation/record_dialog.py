@@ -2347,7 +2347,10 @@ class TaskRecordsDialog(QDialog):
             editor = AttachmentMetadataDialog(
                 attachment, edit_memo=edit_memo, parent=self, submit=submit
             )
-            editor.exec()
+            try:
+                editor.exec()
+            finally:
+                editor.deleteLater()
         except (ValueError, LookupError, AttachmentOperationError) as error:
             QMessageBox.warning(self, "첨부 정보를 변경하지 못했습니다.", str(error))
         self._refresh_pending_attachments()
@@ -2571,8 +2574,12 @@ class TaskRecordsDialog(QDialog):
             )
         self._attachment_thread = None
         self._attachment_worker = None
-        if self._attachment_progress is not None:
-            self._attachment_progress.close()
+        progress = self._attachment_progress
+        self._attachment_progress = None
+        if progress is not None:
+            progress.blockSignals(True)
+            progress.close()
+            progress.deleteLater()
         self._attachment_progress = None
         self.reject()
 
@@ -2642,13 +2649,19 @@ class TaskRecordsDialog(QDialog):
     def _attachment_import_finished(self) -> None:
         if self._owner_shutting_down:
             return
-        if self._attachment_progress is not None:
-            self._attachment_progress.close()
+        progress = self._attachment_progress
+        self._attachment_progress = None
+        if progress is not None:
+            progress.blockSignals(True)
+            progress.close()
+            progress.deleteLater()
         if hasattr(self, "add_attachment_button"):
             self.add_attachment_button.setEnabled(not self._read_only)
         if hasattr(self, "attachment_list"):
             self.attachment_list.setAcceptDrops(not self._read_only)
         thread = self._attachment_thread
+        if thread is not None:
+            thread.wait()
         self._attachment_thread = None
         self._attachment_worker = None
         self._attachment_progress = None
@@ -3105,6 +3118,7 @@ class TaskRecordsDialog(QDialog):
 
 class WorkLogBrowserDialog(QDialog):
     changed = Signal()
+    taskViewed = Signal(object, object)
     exportDirectoryChanged = Signal(str)
     windowSizeChanged = Signal(int, int)
     importDirectoryChanged = Signal(str)
@@ -3590,6 +3604,11 @@ class WorkLogBrowserDialog(QDialog):
                 existing.show()
                 existing.raise_()
                 existing.activateWindow()
+                try:
+                    viewed_task = self._task_service.get_including_deleted(task_id)
+                except LookupError:
+                    return
+                self.taskViewed.emit(viewed_task, occurrence_start)
                 return
         try:
             task = self._task_service.get(task_id)
@@ -3628,6 +3647,7 @@ class WorkLogBrowserDialog(QDialog):
 
         dialog.finished.connect(finished)
         dialog.show()
+        self.taskViewed.emit(task, occurrence_start)
 
     def done(self, result: int) -> None:
         self._search_timer.stop()

@@ -94,6 +94,7 @@ class DataManagementDialog(QDialog):
         timezone: str = "Asia/Seoul",
         parent: QWidget | None = None,
         task_archive_service: TaskArchiveService | None = None,
+        automatic_backup_waiting: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setStyleSheet(LIGHT_STYLESHEET)
@@ -122,6 +123,7 @@ class DataManagementDialog(QDialog):
         self._automatic_backup_enabled = automatic_backup_enabled
         self._automatic_backup_interval_hours = automatic_backup_interval_hours
         self._automatic_backup_keep = automatic_backup_keep
+        self._automatic_backup_waiting = automatic_backup_waiting or (lambda: False)
         self._timezone = timezone
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
@@ -238,6 +240,8 @@ class DataManagementDialog(QDialog):
             "\n\n".join(lines) or "백업 시도 기록이 없습니다. 백업 파일 현황도 확인하세요."
         )
         summary = [health.recording_warning] if health.recording_warning else []
+        if self._automatic_backup_waiting():
+            summary.append("자동 백업: 메모리 여유 부족으로 대기")
         problem = bool(health.recording_warning)
         for row in health.attempts:
             name = "자동" if row.reason == "automatic" else "수동"
@@ -744,7 +748,7 @@ class DataManagementDialog(QDialog):
         layout.addWidget(
             self._section(
                 "내보내기",
-                "Excel: 현재 검색·필터 결과 · ICS: 목록·선택·기간 지정",
+                "업무 단위 내보내기 · 완료 회차별/펼친 월 범위 아님\nExcel: 현재 검색·필터 결과 · ICS: 목록·선택·기간 지정",
                 (("현재 목록 Excel", self._export_excel), ("일정 선택 ICS", self._export_ics)),
             )
         )
@@ -1013,13 +1017,16 @@ class DataManagementDialog(QDialog):
         if self._task_archive_service is None or self._thread is not None:
             return
         dialog = TaskArchiveDialog(self._selected_task_ids, timezone=self._timezone, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            options = dialog.options()
+        finally:
+            dialog.deleteLater()
         directory = QFileDialog.getExistingDirectory(self, "업무 묶음을 남길 외부 폴더 선택")
         if not directory:
             return
         service = self._task_archive_service
-        options = dialog.options()
         # A long archive job must not make the main window/reminders modal.
         was_visible = self.isVisible()
         if was_visible:
@@ -1079,9 +1086,12 @@ class DataManagementDialog(QDialog):
             selected_task_ids=self._selected_task_ids,
             parent=self,
         )
-        if options_dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        options = options_dialog.options()
+        try:
+            if options_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            options = options_dialog.options()
+        finally:
+            options_dialog.deleteLater()
         name, _ = QFileDialog.getSaveFileName(
             self, "일정 내보내기", "OfficeFlow-일정.ics", "iCalendar (*.ics)"
         )

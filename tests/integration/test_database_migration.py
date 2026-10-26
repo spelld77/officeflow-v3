@@ -99,7 +99,7 @@ def test_initial_migration_creates_expected_tables(tmp_path: Path) -> None:
         "attachment_search_update",
         "attachment_search_delete",
     } <= triggers
-    assert revision == "0016_task_folder_links"
+    assert revision == "0017_completion_browse_index"
     assert "sort_order" in attachment_columns
     assert "ix_attachments_task_order" in attachment_indexes
     assert "ix_attachments_created_id" in attachment_indexes

@@ -14,7 +14,7 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.13"
+    assert __version__ == "3.0.14"
     assert project["project"]["version"] == __version__
     assert f"FileVersion', '{__version__}'" in version_info
     assert f"ProductVersion', '{__version__}'" in version_info
@@ -80,7 +80,7 @@ def test_user_help_is_available_in_development_tree() -> None:
     assert "setup-officeflow-python.cmd" in content
     assert "%LOCALAPPDATA%\\OfficeFlow" in content
     assert f"OfficeFlow {__version__} 사용자 안내" in content
-    assert "0016" in content
+    assert "0017" in content
     assert "공개 이후 개발 소스" not in content
     assert "배포물은 아직 재생성하지 않았습니다" not in content
     assert "개발 소스에 반영되어" not in content

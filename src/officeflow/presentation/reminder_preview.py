@@ -338,7 +338,10 @@ class ReminderPreviewWidget(QWidget):
         menu.addAction("알림 설정…").triggered.connect(
             lambda: self.settingsRequested.emit(data.task)
         )
-        menu.exec(widget.viewport().mapToGlobal(point))
+        try:
+            menu.exec(widget.viewport().mapToGlobal(point))
+        finally:
+            menu.deleteLater()
 
     def set_result(self, result: ReminderPreviewResult, *, now: datetime | None = None) -> None:
         self._error = None

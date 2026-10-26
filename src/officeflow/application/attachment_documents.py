@@ -169,6 +169,13 @@ class InternalRecoveryReport:
     warnings: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MaintenanceTickHint:
+    report: InternalRecoveryReport
+    progressed: bool
+    next_due: float | None = None
+
+
 class DocumentRepository(Protocol):
     def source(self, command: DocumentCommand) -> DocumentSource: ...
     def committed(self, command: DocumentCommand) -> CommittedDocument | None: ...

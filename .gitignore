@@ -33,6 +33,7 @@ Thumbs.db
 backups/
 logs/
 settings.json
+recent-tasks.json
 backup-health.json
 migration-reports/
 

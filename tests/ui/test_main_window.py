@@ -255,6 +255,9 @@ def test_task_context_menu_completes_with_result(qtbot: QtBot, monkeypatch) -> N
         def result_note(self) -> str:
             return "검수까지 완료"
 
+        def deleteLater(self) -> None:
+            pass
+
     monkeypatch.setattr(main_window_module, "CompleteTaskDialog", FakeCompleteDialog)
     window._complete_selected_with_result()
 

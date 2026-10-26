@@ -5,6 +5,7 @@ from __future__ import annotations
 import heapq
 import os
 from collections.abc import Callable
+from threading import Event
 from time import monotonic, time
 from typing import Any
 
@@ -17,6 +18,7 @@ from officeflow.application.attachment_documents import (
     AttachmentDocumentService,
     InternalRecoveryItem,
     InternalRecoveryReport,
+    MaintenanceTickHint,
 )
 from officeflow.infrastructure.attachments.deletion_storage import DeletionFileStorage
 from officeflow.infrastructure.attachments.internal_storage import (
@@ -50,6 +52,7 @@ class FileMaintenance:
         self.warnings: dict[str, str] = {}
         self._reported: tuple[str, ...] = ()
         self.snapshots: Any = None
+        self._wake = Event()
 
     def _scan(self) -> None:
         for kind, path in (
@@ -62,6 +65,9 @@ class FileMaintenance:
 
     def tick(self, canceled: Callable[[], bool]) -> InternalRecoveryReport:
         start, count, recovered = monotonic(), 0, 0
+        if self._wake.is_set():
+            self._wake.clear()
+            self._next_scan = 0
         if not self.scans and time() >= self._next_scan:
             self._scan()
         while self.scans and count < 20 and monotonic() - start < 2 and not canceled():
@@ -143,3 +149,16 @@ class FileMaintenance:
         for _kind, scan in self.scans:
             scan.close()
         self.scans.clear()
+
+    def tick_hint(self, canceled: Callable[[], bool]) -> MaintenanceTickHint:
+        active = (
+            self._wake.is_set()
+            or bool(self.scans)
+            or bool(self.queue and self.queue[0][0] <= time())
+        )
+        report = self.tick(canceled)
+        due = min(self._next_scan, self.queue[0][0] if self.queue else self._next_scan)
+        return MaintenanceTickHint(report, active or bool(report.recovered), max(1.0, due - time()))
+
+    def wake(self) -> None:
+        self._wake.set()

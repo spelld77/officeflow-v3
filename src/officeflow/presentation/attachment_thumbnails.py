@@ -163,6 +163,8 @@ class AttachmentImageCoordinator(QObject):
         self._worker: _ImageWorker | None = None
         self._closing = False
         self._last_client = 0
+        self._memory_pressure = False
+        self._cache_limit = self.MAX_CACHE_BYTES
 
     @property
     def busy(self) -> bool:
@@ -198,6 +200,12 @@ class AttachmentImageCoordinator(QObject):
         if self._closing or client not in self._clients:
             return
         previous = self._clients[client]
+        # Evicted states become eligible only on an explicit owner sync, never
+        # immediately from completion/paint (which would create a decode loop).
+        for state in previous.values():
+            if state.key is not None and state.key not in self._cache:
+                state.finished = False
+                state.key = None
         current: dict[int, ImageState] = {}
         for service, attachment, target in values[: self.MAX_VISIBLE_STATES]:
             width = min(1200 if expanded else 640, max(1, target.width()))
@@ -248,6 +256,11 @@ class AttachmentImageCoordinator(QObject):
                     break
                 if (
                     state.finished
+                    or (
+                        self._memory_pressure
+                        and not state.request.expanded
+                        and not state.request.force
+                    )
                     or (client, identity) in queued
                     or state.request.attachment.asset_id in blocked
                 ):
@@ -308,7 +321,7 @@ class AttachmentImageCoordinator(QObject):
                 self._cache[key] = result
                 self.cache_bytes += result.image.sizeInBytes()
                 while (
-                    self.cache_bytes > self.MAX_CACHE_BYTES
+                    self.cache_bytes > min(self.MAX_CACHE_BYTES, self._cache_limit)
                     or len(self._cache) > self.MAX_CACHE_ENTRIES
                 ):
                     _, evicted = self._cache.popitem(last=False)
@@ -374,6 +387,15 @@ class AttachmentImageCoordinator(QObject):
         if not self._clients:
             self._cache.clear()
             self.cache_bytes = 0
+
+    def set_memory_pressure(self, enabled: bool) -> None:
+        self._memory_pressure = enabled
+        self._cache_limit = 8 * 1024 * 1024 if enabled else self.MAX_CACHE_BYTES
+        if enabled:
+            self._queue = [r for r in self._queue if r.expanded or r.force]
+            while self._cache and self.cache_bytes > min(self.MAX_CACHE_BYTES, self._cache_limit):
+                _, evicted = self._cache.popitem(last=False)
+                self.cache_bytes -= evicted.image.sizeInBytes()
 
     def invalidate(self, client: int) -> None:
         states = self._clients.get(client, {})

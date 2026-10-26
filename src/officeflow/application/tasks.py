@@ -555,6 +555,9 @@ class TaskService:
             raise TaskNotFoundError(f"업무 {task_id}을(를) 찾을 수 없습니다.")
         return task
 
+    def validate_occurrence(self, task_id: int, occurrence_start: datetime) -> None:
+        self._validated_occurrence(self.get(task_id), occurrence_start)
+
     def get_including_deleted(self, task_id: int) -> Task:
         task = self._repository.get(task_id) or self._repository.get_deleted(task_id)
         if task is None:

@@ -235,7 +235,7 @@ def test_imported_v3_backup_and_pending_restore_preserve_all_data(
         assert list(connection.execute("PRAGMA foreign_key_check")) == []
         assert (
             connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0016_task_folder_links"
+            == "0017_completion_browse_index"
         )
 
 
