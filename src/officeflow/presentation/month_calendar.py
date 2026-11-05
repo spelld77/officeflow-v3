@@ -44,6 +44,7 @@ from officeflow.application.reminder_groups import (
 from officeflow.application.reminder_preview import ReminderPreviewItem, ReminderPreviewResult
 from officeflow.application.reminder_runtime import scope_label
 from officeflow.application.tasks import CalendarOverview, ScheduledTask
+from officeflow.presentation.background import request_shutdown
 from officeflow.presentation.calendar_style import priority_color
 from officeflow.presentation.dates import WEEKDAYS, format_date
 from officeflow.presentation.day_calendar import DayCalendarPanel
@@ -1472,12 +1473,12 @@ class CalendarPage(QFrame):
             self.taskActivated.emit(task)
 
     def shutdown(self) -> None:
-        self.day_view.shutdown()
+        request_shutdown(self.day_view)
         if self._reminder_details:
             self._reminder_details.reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self.shutdown()
+        request_shutdown(self)
         super().closeEvent(event)
 
     def _activate_selected(self) -> None:

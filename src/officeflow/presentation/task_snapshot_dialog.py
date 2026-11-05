@@ -29,6 +29,7 @@ from officeflow.application.task_mutations import MutationAttempt
 from officeflow.application.task_snapshots import SnapshotCommand, SnapshotSelection
 from officeflow.domain.task_history import HistoryEntry
 from officeflow.presentation.attachment_export import AttachmentExportController
+from officeflow.presentation.background import request_shutdown
 from officeflow.presentation.dates import format_datetime
 from officeflow.presentation.document_actions import file_actions, stop_file_actions
 from officeflow.presentation.file_list import checkable_file_list
@@ -231,9 +232,9 @@ class TaskSnapshotDialog(_ReadDialog):
             for widget in (self.name, self.kind, self.list, self.closed, self.capture):
                 widget.setEnabled(True)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._cancel_capture.set()
-        super().shutdown()
+        super().request_shutdown()
 
 
 class SnapshotDetailDialog(_ReadDialog):
@@ -397,7 +398,7 @@ class SnapshotDetailDialog(_ReadDialog):
         self._info_dialogs.append(dialog)
 
         def closed(_code: int) -> None:
-            dialog.shutdown()
+            request_shutdown(dialog)
             if dialog in self._info_dialogs:
                 self._info_dialogs.remove(dialog)
             dialog.deleteLater()
@@ -405,14 +406,15 @@ class SnapshotDetailDialog(_ReadDialog):
         dialog.finished.connect(closed)
         dialog.show()
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        self._closed = True
         stop_file_actions(self)
         if self.export:
-            self.export.shutdown()
+            request_shutdown(self.export)
         for dialog in tuple(self._info_dialogs):
-            dialog.shutdown()
+            request_shutdown(dialog)
             dialog.close()
-        super().shutdown()
+        super().request_shutdown()
 
 
 class PendingSnapshotDialog(_ReadDialog):
@@ -499,6 +501,6 @@ class PendingSnapshotDialog(_ReadDialog):
 
         self.run(resolve, lambda _result: self.refresh())
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._cancel.set()
-        super().shutdown()
+        super().request_shutdown()

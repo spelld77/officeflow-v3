@@ -12,10 +12,16 @@ if ((Get-Item -LiteralPath $resolvedInstaller).VersionInfo.ProductName.Trim() -n
 $testRoot = Join-Path $projectRoot "build\installer-verification"
 $installDir = Join-Path $testRoot "installed"
 $dataDir = Join-Path $testRoot "user-data"
+$evidenceDir = Join-Path $projectRoot "artifacts\installer-verification"
+New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
+$script:verificationProcessIndex = 0
 
 function Invoke-CheckedProcess {
     param([string]$FilePath, [string[]]$Arguments)
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
+    $script:verificationProcessIndex += 1
+    $prefix = Join-Path $evidenceDir ("process-{0}" -f $script:verificationProcessIndex)
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput "$prefix.stdout.log" -RedirectStandardError "$prefix.stderr.log"
     if ($process.ExitCode -ne 0) {
         throw "프로세스가 실패했습니다($($process.ExitCode)): $FilePath"
     }
@@ -37,7 +43,7 @@ try {
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/NOICONS",
         "/DIR=$installDir"
     )
-    Invoke-CheckedProcess $resolvedInstaller $installArguments
+    Invoke-CheckedProcess $resolvedInstaller ($installArguments + "/LOG=$(Join-Path $evidenceDir 'install.log')")
     $executable = Join-Path $installDir "OfficeFlow.exe"
     if (-not (Test-Path -LiteralPath $executable)) {
         throw "설치 후 OfficeFlow.exe를 찾지 못했습니다."
@@ -54,7 +60,7 @@ try {
     $sentinel = Join-Path $dataDir "preserve-through-upgrade.txt"
     Set-Content -LiteralPath $sentinel -Value "preserve" -Encoding UTF8
 
-    Invoke-CheckedProcess $resolvedInstaller $installArguments
+    Invoke-CheckedProcess $resolvedInstaller ($installArguments + "/LOG=$(Join-Path $evidenceDir 'reinstall.log')")
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     Invoke-CheckedProcess $executable @("--smoke-test")
     $env:PATH = $previousPath

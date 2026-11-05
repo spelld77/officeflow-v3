@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from shiboken6 import isValid
 
 from officeflow.application.reminder_groups import ReminderGroup, group_reminders
 from officeflow.application.reminder_preview import (
@@ -38,7 +37,12 @@ from officeflow.application.reminder_preview import (
     ReminderPreviewResult,
     ReminderPreviewService,
 )
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import (
+    OperationWorker,
+    ShutdownOwner,
+    ShutdownScope,
+    request_shutdown,
+)
 from officeflow.presentation.compact_labels import WrappingLabel
 from officeflow.presentation.dates import format_datetime
 from officeflow.presentation.lookup_style import SCROLLBAR_STYLE
@@ -142,13 +146,14 @@ class ReminderPreviewDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-class ReminderPreviewController(QObject):
+class ReminderPreviewController(ShutdownOwner, QObject):
     ready = Signal(object)
     rangeReady = Signal(object, object)
     failed = Signal(object)
 
     def __init__(self, service: ReminderPreviewService, parent: QObject) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._service = service
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
@@ -206,7 +211,7 @@ class ReminderPreviewController(QObject):
         worker.failed.connect(self._on_failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._on_finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._on_finished, worker.cancel)
         thread.start()
 
     @Slot(object)
@@ -228,7 +233,7 @@ class ReminderPreviewController(QObject):
         # finished is emitted before native-thread/deferred-delete cleanup has
         # fully returned. Keep the Python worker owner until the thread joins.
         if thread is not None:
-            thread.wait()
+            assert thread.wait(0)
         self._thread = None
         self._worker = None
         self._active_request = None
@@ -236,16 +241,10 @@ class ReminderPreviewController(QObject):
             thread.deleteLater()
         self._start()
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._closing = True
         self._request = None
-        if self._worker:
-            self._worker.cancel()
-        thread = self._thread
-        if thread:
-            finish_thread(thread)
-            if isValid(thread):
-                thread.wait()
+        self._shutdown_scope.request_stop()
 
 
 class ReminderPreviewWidget(QWidget):
@@ -419,7 +418,7 @@ class ReminderPreviewWidget(QWidget):
             self._details.reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self.shutdown()
+        request_shutdown(self)
         super().closeEvent(event)
 
     def _fill(self, widget: QListWidget, items: tuple[ReminderGroup, ...]) -> None:

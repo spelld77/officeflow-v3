@@ -195,7 +195,9 @@ def test_data_dialog_restores_detached_attachment(qtbot: QtBot, tmp_path: Path) 
     assert dialog._cleanup_tab_index is not None
     dialog.tabs.setCurrentIndex(dialog._cleanup_tab_index)
     qtbot.waitUntil(
-        lambda: dialog._cleanup_loaded and dialog.cleanup_list.count() > 0,
+        lambda: (
+            dialog._cleanup_loaded and dialog.cleanup_list.count() > 0 and dialog._thread is None
+        ),
         timeout=3_000,
     )
     assert "보고서.txt" in dialog.cleanup_list.item(0).text()

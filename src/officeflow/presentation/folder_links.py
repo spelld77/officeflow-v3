@@ -18,13 +18,13 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.folder_links import FolderLink, FolderLinkService
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.detail_widgets import CollapsibleText, show_text_details
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
-class FolderLinksPanel(QWidget):
+class FolderLinksPanel(ShutdownOwner, QWidget):
     changed = Signal()
 
     def __init__(
@@ -36,6 +36,7 @@ class FolderLinksPanel(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.setObjectName("folderLinksPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
@@ -236,9 +237,11 @@ class FolderLinksPanel(QWidget):
         self._job_thread.started.connect(self.worker.run)
         self.worker.succeeded.connect(self._succeeded, Qt.ConnectionType.QueuedConnection)
         self.worker.failed.connect(self._failed, Qt.ConnectionType.QueuedConnection)
-        self.worker.finished.connect(self._job_thread.quit)
+        self.worker.finished.connect(self._job_thread.quit, Qt.ConnectionType.DirectConnection)
         self.worker.finished.connect(self.worker.deleteLater)
-        self._job_thread.finished.connect(self._finished)
+        self._shutdown_scope.track(
+            self._job_thread, self.worker, self._finished, self.worker.cancel
+        )
         self._selection_changed()
         self.status.setText("폴더를 확인하고 있습니다…")
         self._job_thread.start()
@@ -266,16 +269,12 @@ class FolderLinksPanel(QWidget):
     def _finished(self) -> None:
         thread = self._job_thread
         if thread:
-            thread.wait()
+            assert thread.wait(0)
             thread.deleteLater()
         self._job_thread, self.worker = None, None
         if not self._shutting_down:
             self._selection_changed()
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._shutting_down = True
-        if self.worker:
-            self.worker.cancel()
-        if self._job_thread:
-            self._job_thread.quit()
-            finish_thread(self._job_thread, parent=self)
+        self._shutdown_scope.request_stop()

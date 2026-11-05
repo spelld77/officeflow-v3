@@ -107,7 +107,12 @@ from officeflow.presentation.app_icon import create_app_icon
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_search_page import AttachmentSearchPageWidget
 from officeflow.presentation.attachment_thumbnails import AttachmentImageCoordinator
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import (
+    OperationWorker,
+    ShutdownOwner,
+    ShutdownScope,
+    request_shutdown,
+)
 from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.completed_browse import CompletedBrowseWidget
 from officeflow.presentation.data_dialog import DataManagementDialog
@@ -168,7 +173,7 @@ class _ScheduleUndo:
     after_occurrence: TaskOccurrence | None
 
 
-class MainWindow(QMainWindow):
+class MainWindow(ShutdownOwner, QMainWindow):
     diagnosticError = Signal(str)
     DETAIL_BREAKPOINT = 1100
     COMPACT_BREAKPOINT = 850
@@ -226,6 +231,7 @@ class MainWindow(QMainWindow):
         internal_recovery_wake: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._settings = settings
         self._recent_tasks = recent_tasks
         self._recent_store = recent_store
@@ -2730,7 +2736,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._automatic_backup_failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._automatic_backup_finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._automatic_backup_finished, worker.cancel)
         self._automatic_backup_thread = thread
         self._automatic_backup_worker = worker
         thread.start()
@@ -2758,7 +2764,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _automatic_backup_finished(self) -> None:
         if self._automatic_backup_thread:
-            self._automatic_backup_thread.wait()
+            assert self._automatic_backup_thread.wait(0)
             self._automatic_backup_thread.deleteLater()
         self._automatic_backup_worker = None
         self._automatic_backup_thread = None
@@ -2776,6 +2782,8 @@ class MainWindow(QMainWindow):
         )
 
     def _resource_state_changed(self, state: ResourceState) -> None:
+        if self._shutdown_done:
+            return
         self._resource_state = state
         self._image_coordinator.set_memory_pressure(state is ResourceState.PRESSURE)
         if state is ResourceState.PRESSURE and self._resource_notice is None:
@@ -2828,9 +2836,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._internal_recovery_failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(
-            self._internal_recovery_finished, Qt.ConnectionType.QueuedConnection
-        )
+        self._shutdown_scope.track(thread, worker, self._internal_recovery_finished, worker.cancel)
         self._internal_recovery_thread = thread
         self._internal_recovery_worker = worker
         thread.start()
@@ -2867,7 +2873,7 @@ class MainWindow(QMainWindow):
     def _internal_recovery_finished(self) -> None:
         thread = self._internal_recovery_thread
         if thread is not None and isValid(thread):
-            thread.wait()
+            assert thread.wait(0)
         self._internal_recovery_thread = None
         self._internal_recovery_worker = None
         if not self._shutdown_done:
@@ -4070,86 +4076,63 @@ class MainWindow(QMainWindow):
             self._show_from_tray()
 
     def _quit_application(self) -> None:
+        self._quit_when_stopped = True
         self._force_quit = True
-        self.close()
-        application = QApplication.instance()
-        if application is not None:
-            application.quit()
+        self.request_shutdown()
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        self._force_quit = True
+        application = QApplication.instance()
+        if isinstance(application, QApplication):
+            application.setQuitOnLastWindowClosed(False)
         self._hide_schedule_result()
         self._return_timer.stop()
         self._return_location = None
         self._backup_health_timer.stop()
-        if self._shutdown_done:
-            return
-        from officeflow.presentation.document_actions import stop_file_actions
-
-        stop_file_actions(self)
-        self._shutdown_done = True
-        if self._completed_browser:
-            self._completed_browser.shutdown()
-        if self._recent_controller:
-            self._recent_controller.shutdown()
-        if self._resource_controller:
-            self._resource_controller.shutdown()
-        self._force_quit = True
-        self.statusBar().showMessage("작업을 취소하고 자료를 안전하게 마무리한 뒤 종료합니다…")
         self._automatic_backup_timer.stop()
         self._internal_recovery_timer.stop()
         self._view_timer.stop()
-        self._hourly_controller.shutdown()
-        if self._preview_controller:
-            self._preview_controller.shutdown()
-        if self._day_preview_controller:
-            self._day_preview_controller.shutdown()
-        self._day_overview_controller.shutdown()
-        self._today_reminders.shutdown()
-        self._calendar_page.shutdown()
-        if self._attachment_export_controller:
-            self._attachment_export_controller.shutdown()
         self._reminder_timer.stop()
+        self.statusBar().showMessage("작업을 안전하게 마무리한 뒤 종료합니다…")
+        from officeflow.presentation.document_actions import stop_file_actions
+
+        stop_file_actions(self)
+        for controller in (
+            self._completed_browser,
+            self._recent_controller,
+            self._resource_controller,
+            self._hourly_controller,
+            self._preview_controller,
+            self._day_preview_controller,
+            self._day_overview_controller,
+            self._today_reminders,
+            self._calendar_page,
+            self._attachment_export_controller,
+            self._file_page,
+        ):
+            if controller is not None:
+                request_shutdown(controller)
         if self._settings_dialog is not None:
             self._settings_dialog.close()
-        if self._file_page is not None:
-            self._file_page.shutdown()
         for dialog in tuple(self._file_dialogs):
             if isinstance(dialog, (TaskRecordsDialog, WorkLogBrowserDialog, DataManagementDialog)):
-                dialog.shutdown()
+                request_shutdown(dialog)
             else:
                 dialog.reject()
-        self._image_coordinator.shutdown()
+        self._image_coordinator.request_shutdown()
+        if self._reminder_dialog is not None:
+            self._reminder_dialog.dismiss_for_shutdown()
+            self._reminder_dialog = None
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
         try:
             self._persist_settings()
         except OSError:
             logger.exception("종료 시 설정을 저장하지 못했습니다.")
-        self._automatic_backup_timer.stop()
-        self._view_timer.stop()
-        if self._reminder_dialog is not None:
-            self._reminder_dialog.dismiss_for_shutdown()
-            self._reminder_dialog = None
-        if self._automatic_backup_worker is not None:
-            self._automatic_backup_worker.cancel()
-        if self._automatic_backup_thread is not None:
-            self._automatic_backup_thread.quit()
-            finish_thread(
-                self._automatic_backup_thread,
-                parent=self,
-                label="자동 백업을 안전하게 마무리하고 있습니다…",
-            )
-        self._automatic_backup_thread = None
-        self._automatic_backup_worker = None
-        if self._internal_recovery_worker is not None:
-            self._internal_recovery_worker.cancel()
-        if self._internal_recovery_thread is not None:
-            self._internal_recovery_thread.quit()
-            finish_thread(
-                self._internal_recovery_thread,
-                parent=self,
-                label="내부 파일 점검을 안전하게 마무리하고 있습니다…",
-            )
-        self._internal_recovery_thread = None
-        self._internal_recovery_worker = None
         if self._global_hotkey is not None:
             self._global_hotkey.stop()
             self._global_hotkey = None
@@ -4157,6 +4140,10 @@ class MainWindow(QMainWindow):
             self._tray_icon.hide()
         if self._on_shutdown is not None:
             self._on_shutdown()
+        self.close()
+        application = QApplication.instance()
+        if application is not None and getattr(self, "_quit_when_stopped", False):
+            application.quit()
 
     def _format_reminder_rule(self, rule: ReminderRuleInput) -> str:
         relation = {
@@ -4322,8 +4309,12 @@ class MainWindow(QMainWindow):
                 )
                 self._tray_hint_shown = True
             return
-        self.shutdown()
-        super().closeEvent(event)
+        if self._shutdown_scope.is_stopped:
+            super().closeEvent(event)
+        else:
+            self._quit_when_stopped = self._desktop_integration
+            self.request_shutdown()
+            event.ignore()
 
     def _persist_settings(self) -> None:
         if self._save_settings is None:

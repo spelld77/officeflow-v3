@@ -101,7 +101,9 @@ def test_internal_recovery_cancel_finishes_before_database_owner_disposal(qtbot,
     timer.setInterval(10)
     timer.timeout.connect(lambda: ticks.append(True))
     timer.start()
-    window.shutdown()
+    window.request_shutdown()
+    assert window.isVisible() and not closed
+    qtbot.waitUntil(lambda: window._shutdown_scope.is_stopped)
     timer.stop()
     assert closed == [True] and len(ticks) >= 3
     assert window._internal_recovery_worker is None and window._internal_recovery_thread is None

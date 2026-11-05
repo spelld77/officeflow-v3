@@ -14,7 +14,7 @@ def test_release_version_is_consistent() -> None:
     version_info = (ROOT / "packaging/windows/version_info.txt").read_text(encoding="utf-8")
     installer = (ROOT / "packaging/windows/OfficeFlow.iss").read_text(encoding="utf-8")
 
-    assert __version__ == "3.0.14"
+    assert __version__ == "3.0.15"
     assert project["project"]["version"] == __version__
     assert f"FileVersion', '{__version__}'" in version_info
     assert f"ProductVersion', '{__version__}'" in version_info
@@ -32,10 +32,12 @@ def test_installer_is_per_user_upgrade_safe_and_preserves_data() -> None:
     assert "[UninstallDelete]" not in installer
 
 
-def test_release_build_verifies_package_and_installer_lifecycle() -> None:
+def test_release_build_defaults_to_python_and_keeps_optional_installer_checks() -> None:
     build_script = (ROOT / "scripts/build-release.ps1").read_text(encoding="utf-8")
     verify_script = (ROOT / "scripts/verify-installer.ps1").read_text(encoding="utf-8")
 
+    assert "[switch]$IncludeWindowsExecutables" in build_script
+    assert "if ($IncludeWindowsExecutables)" in build_script
     assert "--smoke-test" in build_script
     assert "verify-installer.ps1" in build_script
     assert "SHA256SUMS.txt" in build_script

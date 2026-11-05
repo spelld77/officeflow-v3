@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from officeflow import __version__
 from officeflow.application.resource_policy import ResourcePolicy, ResourceSnapshot, ResourceState
 from officeflow.infrastructure.windows.resources import WindowsResourceProbe
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope, request_shutdown
 from officeflow.presentation.latest_job import LatestJob
 
 
@@ -89,11 +90,12 @@ class _Sampler:
             self.handler = None
 
 
-class ResourceController(QObject):
+class ResourceController(ShutdownOwner, QObject):
     stateChanged = Signal(object)
 
     def __init__(self, directory: Path, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.samples: deque[ResourceSnapshot] = deque(maxlen=16)
         self.state = ResourceState.UNKNOWN
         self._sampler = _Sampler(directory)
@@ -128,6 +130,9 @@ class ResourceController(QObject):
             self.state = state
             self.stateChanged.emit(state)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self._shutdown_scope.stopping:
+            return
         self._timer.stop()
-        self._jobs.shutdown(self._sampler.close)
+        request_shutdown(self._jobs, self._sampler.close)
+        self._shutdown_scope.request_stop()

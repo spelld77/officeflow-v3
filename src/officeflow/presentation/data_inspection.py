@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.data_inspection import DataInspectionService, InspectionReport
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 STATUS_LABELS = {
@@ -29,7 +29,7 @@ STATUS_LABELS = {
 }
 
 
-class DataInspectionPanel(QWidget):
+class DataInspectionPanel(ShutdownOwner, QWidget):
     def __init__(
         self,
         factory: Callable[[], DataInspectionService],
@@ -38,6 +38,7 @@ class DataInspectionPanel(QWidget):
         timezone: str = "Asia/Seoul",
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._factory = factory
         self._timezone = timezone
         self._thread: QThread | None = None
@@ -99,7 +100,7 @@ class DataInspectionPanel(QWidget):
         worker.failed.connect(self._failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         self._thread, self._worker = thread, worker
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
@@ -152,7 +153,7 @@ class DataInspectionPanel(QWidget):
     @Slot()
     def _finished(self) -> None:
         if self._thread:
-            self._thread.wait()
+            assert self._thread.wait(0)
             self._thread.deleteLater()
         self._thread = None
         self._worker = None
@@ -160,16 +161,7 @@ class DataInspectionPanel(QWidget):
             self.start_button.setEnabled(True)
             self.cancel_button.setEnabled(False)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._closing = True
         self.cancel()
-        thread = self._thread
-        if thread:
-            from shiboken6 import isValid
-
-            thread.quit()
-            finish_thread(thread, parent=self)
-            if isValid(thread):
-                thread.deleteLater()
-        self._thread = None
-        self._worker = None
+        self._shutdown_scope.request_stop()

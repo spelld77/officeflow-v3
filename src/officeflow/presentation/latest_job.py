@@ -7,7 +7,7 @@ from typing import cast
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 
-from officeflow.presentation.background import finish_thread
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope
 
 
 class _Reader(QObject):
@@ -32,13 +32,14 @@ class _Reader(QObject):
             self.finished.emit((revision, None, type(error).__name__))
 
 
-class LatestJob(QObject):
+class LatestJob(ShutdownOwner, QObject):
     requested = Signal(object)
     ready = Signal(object)
     failed = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._thread: QThread | None = None
         self._reader: _Reader | None = None
         self._revision = 0
@@ -65,6 +66,7 @@ class LatestJob(QObject):
             self._reader.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
             self._thread.finished.connect(self._reader.dispose, Qt.ConnectionType.DirectConnection)
             self._thread.finished.connect(self._reader.deleteLater)
+            self._shutdown_scope.track(self._thread, self._reader, persistent=True)
             self._thread.start()
         self._active = True
         self.requested.emit(value)
@@ -86,17 +88,20 @@ class LatestJob(QObject):
         self._revision += 1
         self._pending = None
 
-    def shutdown(self, finalizer: Callable[[], None] | None = None) -> None:
+    def request_shutdown(self, finalizer: Callable[[], None] | None = None) -> None:
         if self._closed:
             return
         self._closed = True
         self.invalidate()
-        if self._thread is not None:
-            if self._reader is not None:
-                self._reader.finalizer = finalizer
-            self._thread.quit()
-            finish_thread(self._thread)
-            self._thread.deleteLater()
+        if self._reader is not None:
+            self._reader.finalizer = finalizer
         elif finalizer:
             finalizer()
+        self._shutdown_scope.request_stop()
+
+    def shutdown(self, finalizer: Callable[[], None] | None = None) -> None:
+        self.request_shutdown(finalizer)
+        self._shutdown_scope.wait_for_stopped()
+
+    def _shutdown_completed(self) -> None:
         self._thread, self._reader = None, None

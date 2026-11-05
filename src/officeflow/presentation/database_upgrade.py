@@ -5,7 +5,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QProgressBar, QVBoxLayout
 
-from officeflow.presentation.background import finish_thread
+from officeflow.presentation.background import ShutdownScope
 
 
 class UpgradeWorker(QThread):
@@ -44,11 +44,14 @@ class DatabaseUpgradeDialog(QDialog):
         root.addWidget(bar)
         root.addWidget(QLabel("준비가 끝나면 OfficeFlow가 열립니다."))
         self.worker = UpgradeWorker(operation, self)
+        self._shutdown_scope = ShutdownScope(self, self.accept)
         self.worker.progress.connect(self.label.setText)
-        self.worker.finished.connect(self.accept)
+        self._shutdown_scope.track(
+            self.worker, self.worker, self._shutdown_scope.request_stop, delete_thread=False
+        )
 
     def reject(self) -> None:
-        if not self.worker.isRunning():
+        if self._shutdown_scope.is_stopped:
             super().reject()
 
     def run_upgrade(self) -> None:
@@ -61,7 +64,8 @@ class DatabaseUpgradeDialog(QDialog):
         try:
             self.worker.start()
             self.exec()
-            finish_thread(self.worker, parent=self, label="데이터 준비를 마무리하고 있습니다…")
+            if not self._shutdown_scope.is_stopped:
+                self._shutdown_scope.wait_for_stopped()
         finally:
             if isinstance(application, QApplication) and previous is not None:
                 application.setQuitOnLastWindowClosed(previous)

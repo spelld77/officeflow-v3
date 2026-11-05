@@ -8,7 +8,7 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 from officeflow.infrastructure.database.document_catalog import AttachmentSourceSummary
-from officeflow.presentation.background import finish_thread
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope
 
 
 class AttachmentDetailLabel(QLabel):
@@ -72,7 +72,7 @@ class _SourceWorker(QObject):
         self.completed.emit((token, result))
 
 
-class AttachmentSourceController(QObject):
+class AttachmentSourceController(ShutdownOwner, QObject):
     updated = Signal()
     informationReady = Signal(object)
 
@@ -80,6 +80,7 @@ class AttachmentSourceController(QObject):
         self, lookup: Callable[[int, int], AttachmentSourceSummary], parent: QWidget
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.owner = parent
         self.lookup = lookup
         self._thread: QThread | None = None
@@ -126,6 +127,7 @@ class AttachmentSourceController(QObject):
             self._worker.moveToThread(self._thread)
             self._worker.completed.connect(self._completed, Qt.ConnectionType.QueuedConnection)
             self._thread.finished.connect(self._worker.deleteLater)
+            self._shutdown_scope.track(self._thread, self._worker, persistent=True)
             self._thread.start()
         self._running = token
         assert self._worker is not None
@@ -150,17 +152,15 @@ class AttachmentSourceController(QObject):
             if pending is not None and pending == self._current and pending != token:
                 self._start(pending)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         if self._closed:
             return
         self._closed = True
         self.invalidate()
         self._information = None
-        if self._thread is not None:
-            self._thread.quit()
-            finish_thread(
-                self._thread, parent=self.owner, label="첨부 출처 조회를 마무리하고 있습니다…"
-            )
-            self._thread.deleteLater()
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
         self._thread = None
         self._worker = None
+        self._running = None

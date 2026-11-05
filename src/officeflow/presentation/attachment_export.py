@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import QObject, QStandardPaths, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QObject, QStandardPaths, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from officeflow.application.attachment_export import (
     AttachmentExportService,
@@ -29,7 +30,7 @@ from officeflow.application.attachment_export import (
     FileReference,
     OverwritePrompt,
 )
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
@@ -44,7 +45,7 @@ class _ExportWorker(OperationWorker):
     consentRequested = Signal(object)
 
 
-class AttachmentExportController(QObject):
+class AttachmentExportController(ShutdownOwner, QObject):
     savedDirectory = Signal(str)
     busyChanged = Signal(bool)
 
@@ -56,6 +57,7 @@ class AttachmentExportController(QObject):
         initial_directory: str | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._service = service
         self._parent = parent
         self.directory = initial_directory
@@ -177,11 +179,10 @@ class AttachmentExportController(QObject):
         worker.progress.connect(self._update_progress)
         worker.consentRequested.connect(self._confirm)
         worker.succeeded.connect(self._succeeded)
-        worker.failed.connect(lambda error: self._error(str(error)))
+        worker.failed.connect(self._failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._finished)
-        thread.finished.connect(thread.deleteLater)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         thread.started.connect(worker.run)
         self._thread, self._worker, self._progress = thread, worker, progress
         self.busyChanged.emit(True)
@@ -327,13 +328,20 @@ class AttachmentExportController(QObject):
         self._thread = self._worker = self._progress = None
         self.busyChanged.emit(False)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self._closed:
+            return
         self._closed = True
         if self._worker:
             self._worker.cancel()
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
         for dialog in tuple(self._dialogs):
-            dialog.reject()
-        if self._thread:
-            finish_thread(
-                self._thread, parent=self._parent, label="사본 저장을 안전하게 마무리하고 있습니다…"
-            )
+            if isValid(dialog):
+                dialog.reject()
+
+    @Slot(object)
+    def _failed(self, error: object) -> None:
+        if not self._closed:
+            self._error(str(error))

@@ -205,3 +205,55 @@ EXE/설치본/Windows ZIP/Python ZIP 생성·검증·커밋/태그·GitHub 릴�
 0016→0017 자료/파일/설정/보호 사본/전체 백업·시험 Python 진단 8/8과 추출 실행을 검증했다.
 소스 `a9f4bc59c9c5566e3e9f4d660e9d09ec12294b83`/v3.0.14를 공개하고 release ID424397261의 자산 6개 서버 digest·공개 Python 다운로드를 대조했다.
 최신 정식 공개/한계는 84번을 따른다. 소유 fixture 9개 정리, 검사 기록/최종 dist/이전 배포물 보존, 실제 자료/실행 폴더는 교체하지 않았다.
+
+2026-11-05 사용자 최신 Git 확보·해결방법 설계 요청으로 main `218908ef55f39193792298391a87f40a9417e025`를 clone했다.
+U39 창 닫기/스레드 종료의 Qt mutex·Python GIL 교착은 `docs/85-thread-shutdown-deadlock-design.md`를 따른다.
+이번 요청은 설계이며 실행 코드 구현·새 동작 검증 전이다. 정상 UI 비동기 종료·native join·상위 소유자와
+DB 최종 정리 순서를 함께 이전하도록 계획했다. 이전 진단용 대조 성공을 제품 수정 검증으로 사용하지 않는다.
+실사용 자료/실행 폴더·DB·버전·배포물·커밋·업로드는 변경하지 않는다.
+
+사용자는 `run-officeflow-python.cmd`로 Python형 3.0.14를 계속 사용 중이다.
+개발/테스트에서 운영 DB·설정·첨부·백업·실행 환경을 사용하거나 변경하지 않는다.
+이 배포용 cmd는 OFFICEFLOW_DATA_DIR을 비워 운영 데이터 경로를 사용하므로 개발 폴더에서도 실행하지 않는다.
+테스트 앱은 소유한 별도 프로필의 OFFICEFLOW_DATA_DIR을 자식 프로세스 환경에 명시하고
+AppPaths.root가 해당 격리 경로임을 확인한 뒤 초기화한다. 단위/통합 테스트는 tmp_path DB를 사용한다.
+개발 실행은 격리 경로를 지정한 Python 직접 실행 또는 scripts/run-dev.ps1을 사용한다.
+사용 중인 프로세스 종료/재시작·운영 폴더 교체는 이번 개발/테스트에 포함하지 않는다.
+
+2026-11-05 후속 `구현과 테스트를 진행해`로 U39 소스 구현·격리 검증을 승인받았다.
+85번의 최초 coordinator/scope 구분은 owner별 ShutdownScope와 QObject 소유 계층으로 합쳤다.
+정상 UI는 request_shutdown, 동기 shutdown은 명시적 teardown/aboutToQuit fallback으로 구분한다.
+테스트량은 사용자 합의에 따라 합성 3,000회 1번·관련 회귀·전체 검사 1번으로 줄였다.
+실패/마지막 국소 보완 시 해당 검사만 추가하며 결과·중단/실패·미검증은 86번에 기록한다.
+DB0017·백업 v3·버전·배포/Git·실사용 환경은 유지한다.
+
+U39 마감: 종료 관찰의 sender() 대기를 발견해 작업별 신호 연결 없이 native join 후 GUI turn을
+거치는 타이머 방식으로 교체했다. 최종 합성 3,000회 42.515초 통과, 고유 회귀 1,693개 통과·1개 환경 제외다.
+전체 중단/기존 가정 보완 후 미실행 범위만 이어 확인했으며 단일 전체 완주로 표기하지 않는다.
+Ruff·format check·mypy 164개 통과, native 캡처 6개와 최종 2조건 재확인을 기록했다.
+상세 증거/실패·중단/한계는 86번과 artifacts/u39-shutdown/validation-summary.json을 따른다.
+실사용 DB/실행 폴더·버전·배포·커밋·업로드는 변경하지 않았다.
+로컬 브랜치는 codex/fix-thread-shutdown이며 소유 fixture 디렉터리 18개를 정리하고 검사 증거를 보존했다.
+
+2026-11-05 후속 `변경 설치본 exe, zip 등 마무리하고, 커밋까지 해줘` 요청으로
+U39의 3.0.15 버전·문서·EXE/설치본/Windows ZIP/Python ZIP 생성·격리 검증·로컬 커밋을 승인받았다.
+최신 마감 결과는 87번 체크리스트를 따른다. 기존 검사의 전체 재실행 대신 패키지 관련 검사를 추가한다.
+GitHub 푸시/태그/릴리스 공개와 실사용 폴더 교체·실행은 포함하지 않는다.
+사용 중인 Python 3.0.14·운영 DB/첨부/설정은 유지하며 실제 전환 직전에만 사용자에게 완전 종료를 안내한다.
+DB0017·전체 백업 v3·생산 데이터 경로를 유지하고 개발/패키지 실행에는 별도 프로필을 명시한다.
+
+최신 후속 지시: 사용자는 앞으로 EXE를 만들지 않고 ZIP을 풀어 쓰는 방식을 유지하기로 했다.
+3.0.15부터 현재/기본 배포물은 OfficeFlow-Python-버전.zip과 체크섬/manifest다.
+setup-officeflow-python.cmd → run-officeflow-python.cmd 흐름을 유지한다.
+EXE·설치본·EXE가 포함된 Windows ZIP 생성/검증·개인 PC 빌드 이관은 중단한다.
+나중에 사용자가 명시적으로 다시 요청할 때만 해당 버전부터 Windows 배포물을 포함한다.
+scripts/build-release.ps1도 기본은 Python 전용이며 -IncludeWindowsExecutables는 별도 요청 때만 사용한다.
+보안프로그램의 OfficeFlow.exe 등 삭제 제보로 Windows 설치 검증은 미완료이며 성공으로 표시하지 않는다.
+보안 설정·예외 등록은 변경하지 않는다. 최신 결과/실패·한계·범위 변경은 87번에 기록한다.
+
+3.0.15 Python 마감: 최종 ZIP payload 196개 소스/CRC 대조·추출 환경 진단 8/8·빈 DB0017·
+합성 기존 업무/첨부/일지/이력·파일 5개/설정 보존·정상 종료·전체 백업 v3 검사 통과.
+버전/패키지/종료 관련 20개, Python 전용 빌드 전환 후 관련 4개·PS 구문 통과.
+최종 dist는 Python ZIP·개별 체크섬·SHA256SUMS·manifest 4개이며 Windows 배포물은 제거했다.
+이번 소유 임시/빌드 도구 폴더 9개를 정리하고 증거는 artifacts/release-3.0.15에 남겼다.
+실사용 전환/사용 확인·GitHub 공개는 진행하지 않았다. 상세 결과와 Windows 검사 실패는 87번을 따른다.

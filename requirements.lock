@@ -6,6 +6,7 @@ colorama==0.4.6
 coverage==7.16.0
 et_xmlfile==2.0.0
 greenlet==3.5.5
+icalendar==7.3.0
 iniconfig==2.3.0
 librt==0.15.0
 Mako==1.4.1

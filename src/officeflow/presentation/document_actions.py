@@ -37,7 +37,12 @@ from officeflow.application.file_operations import FileInUseError
 from officeflow.infrastructure.attachments.view_cache import ViewCopy
 from officeflow.infrastructure.database.document_catalog import DocumentEntry
 from officeflow.presentation.attachment_export import AttachmentExportController
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import (
+    OperationWorker,
+    ShutdownOwner,
+    ShutdownScope,
+    request_shutdown,
+)
 from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.dates import format_datetime
 from officeflow.presentation.file_list import compact_file_list, set_file_row
@@ -53,11 +58,12 @@ def after_change(changed: Callable[[], None], dialog: QDialog) -> Callable[[Any]
     return finish
 
 
-class FileActionController(QObject):
+class FileActionController(ShutdownOwner, QObject):
     busyChanged = Signal(bool)
 
     def __init__(self, parent: QWidget, lifecycle: DocumentLifecycle) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.owner, self.lifecycle = parent, lifecycle
         self._job_thread: QThread | None = None
         self.worker: OperationWorker | None = None
@@ -130,7 +136,7 @@ class FileActionController(QObject):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
 
-        thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         thread.started.connect(worker.run)
         self._job_thread, self.worker = thread, worker
         self.busyChanged.emit(True)
@@ -172,7 +178,7 @@ class FileActionController(QObject):
         if thread is not None and isValid(thread):
             # finished is emitted before native thread-local destructors finish.
             # Join this completed worker before dropping Python/Qt ownership.
-            thread.wait()
+            assert thread.wait(0)
         self._job_thread, self.worker = None, None
         if (
             not self.closed
@@ -412,22 +418,19 @@ class FileActionController(QObject):
         button.clicked.connect(submit)
         self.keep(dialog)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self.closed:
+            return
         self.closed = True
-        if self.worker and isValid(self.worker):
-            self.worker.cancel()
-        if self._job_thread and isValid(self._job_thread):
-            finish_thread(
-                self._job_thread,
-                parent=self.owner,
-                label="문서 작업을 안전하게 마무리하고 있습니다…",
-            )
         for dialog in tuple(self.dialogs):
-            if not isValid(dialog):
-                continue
-            if hasattr(dialog, "shutdown"):
-                dialog.shutdown()
-            dialog.close()
+            if isValid(dialog) and isinstance(dialog, ShutdownOwner):
+                dialog.request_shutdown()
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
+        for dialog in tuple(self.dialogs):
+            if isValid(dialog):
+                dialog.close()
 
 
 def file_actions(parent: QWidget, lifecycle: DocumentLifecycle) -> FileActionController:
@@ -441,7 +444,7 @@ def file_actions(parent: QWidget, lifecycle: DocumentLifecycle) -> FileActionCon
 def stop_file_actions(parent: QWidget) -> None:
     result = parent.property("documentActionsController")
     if isinstance(result, FileActionController):
-        result.shutdown()
+        request_shutdown(result)
 
 
 class DocumentInformationDialog(_ReadDialog):
@@ -880,17 +883,16 @@ class DocumentBrowser(_ReadDialog):
         )
         self.exporter.choose(references)
 
-    def shutdown(self) -> None:
-        super().shutdown()
+    def request_shutdown(self) -> None:
+        super().request_shutdown()
         stop_file_actions(self)
-        self.exporter.shutdown()
+        request_shutdown(self.exporter)
 
     def done(self, result: int) -> None:
-        self.shutdown()
         super().done(result)
 
 
-class ViewCacheDialog(QDialog):
+class ViewCacheDialog(ShutdownOwner, QDialog):
     def __init__(
         self,
         lifecycle: DocumentLifecycle,
@@ -900,6 +902,7 @@ class ViewCacheDialog(QDialog):
         asset_id: str | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.lifecycle = lifecycle
         self.asset_id = asset_id
         self.setStyleSheet(LIGHT_STYLESHEET)
@@ -1305,11 +1308,13 @@ class ViewCacheDialog(QDialog):
         button.clicked.connect(submit)
         file_actions(self, self.lifecycle).keep(dialog)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self._shutdown_scope.stopping:
+            return
         stop_file_actions(self)
         if self.exporter:
-            self.exporter.shutdown()
+            self.exporter.request_shutdown()
+        self._shutdown_scope.request_stop()
 
     def done(self, result: int) -> None:
-        self.shutdown()
         super().done(result)

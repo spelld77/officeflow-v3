@@ -301,7 +301,8 @@ def test_source_reads_coalesce_and_shutdown_discards_late_results(qtbot, tmp_pat
     closing.request(1, 1, 0, 0)
     qtbot.waitUntil(started.is_set)
     QTimer.singleShot(20, release.set)
-    closing.shutdown()
+    closing.request_shutdown()
+    qtbot.waitUntil(lambda: closing._shutdown_scope.is_stopped)
     qtbot.wait(30)
     assert updates == []
 

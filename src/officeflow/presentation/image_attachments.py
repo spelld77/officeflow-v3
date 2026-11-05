@@ -22,7 +22,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QImage, QImageReader, QPixmap, QResizeEvent
+from PySide6.QtGui import QImage, QImageReader, QPixmap, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -54,7 +54,12 @@ from officeflow.application.image_attachments import (
     suggested_image_name,
 )
 from officeflow.domain.attachment import Attachment
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import (
+    OperationWorker,
+    ShutdownOwner,
+    ShutdownScope,
+    request_shutdown,
+)
 from officeflow.presentation.image_failures import image_error_label
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
@@ -165,7 +170,7 @@ def read_preview(service: AttachmentService, identity: int, canceled: Callable[[
     return read_bounded_image(service, identity, canceled, target=QSize(1200, 900)).image
 
 
-class ImagePreviewDialog(QDialog):
+class ImagePreviewDialog(ShutdownOwner, QDialog):
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -173,6 +178,7 @@ class ImagePreviewDialog(QDialog):
         coordinator: AttachmentImageCoordinator | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.setWindowTitle("이미지 미리보기")
         self.setModal(False)
         self.setStyleSheet(LIGHT_STYLESHEET)
@@ -207,6 +213,7 @@ class ImagePreviewDialog(QDialog):
         layout.addWidget(close)
 
     def show_image(self, image: QImage, name: str) -> None:
+        self._reopen()
         self.clear()
         self.caption.setText(name)
         self._image = image.scaled(
@@ -232,6 +239,7 @@ class ImagePreviewDialog(QDialog):
         self.picture.setText(message)
 
     def load(self, service: AttachmentService, identity: int, name: str) -> None:
+        self._reopen()
         self.clear("이미지를 읽고 있습니다…")
         self.caption.setText(name)
         if self._coordinator and self._client is None:
@@ -288,7 +296,7 @@ class ImagePreviewDialog(QDialog):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.started.connect(worker.run)
-        thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         self._thread, self._worker = thread, worker
         thread.start()
 
@@ -315,7 +323,7 @@ class ImagePreviewDialog(QDialog):
     def _finished(self) -> None:
         thread = self._thread
         if thread:
-            thread.wait()
+            assert thread.wait(0)
             thread.deleteLater()
         # Keep the Python worker wrapper alive through native thread-local cleanup.
         self._thread, self._worker = None, None
@@ -336,16 +344,31 @@ class ImagePreviewDialog(QDialog):
         self._render()
 
     def done(self, result: int) -> None:
+        self._shutdown_result = result
+        self.request_shutdown()
+
+    def request_shutdown(self) -> None:
+        if self._closing:
+            return
         self._closing = True
         self.clear()
         if self._coordinator and self._client is not None:
             self._coordinator.unregister(self._client)
             self._client = None
-        if self._thread:
-            self._thread.quit()
-            finish_thread(self._thread, parent=self)
-        super().done(result)
-        self._closing = False
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
+        super()._shutdown_completed()
+
+    def _reopen(self) -> None:
+        if self._shutdown_scope.is_stopped:
+            self._closing = False
+            self._shutdown_scope.reopen()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        # This window is deliberately reusable after the old worker has joined.
+        self._reopen()
+        super().showEvent(event)
 
 
 @dataclass(frozen=True)
@@ -405,12 +428,13 @@ def import_images(
     return ImageImportResult(tuple(completed), tuple(errors), duplicates)
 
 
-class ImageImportController(QObject):
+class ImageImportController(ShutdownOwner, QObject):
     completed = Signal(object)
     busyChanged = Signal(bool)
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._parent = parent
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
@@ -437,7 +461,7 @@ class ImageImportController(QObject):
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.started.connect(worker.run)
-        thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         self._thread, self._worker = thread, worker
         self.busyChanged.emit(True)
         thread.start()
@@ -455,21 +479,17 @@ class ImageImportController(QObject):
     def _finished(self) -> None:
         thread = self._thread
         if thread:
-            thread.wait()
+            assert thread.wait(0)
             thread.deleteLater()
         # A finished signal can arrive before the worker's native cleanup completes.
         self._thread, self._worker = None, None
-        self.busyChanged.emit(False)
         if not self._closing:
+            self.busyChanged.emit(False)
             self.completed.emit(self._result)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._closing = True
-        if self._worker:
-            self._worker.cancel()
-        if self._thread:
-            self._thread.quit()
-            finish_thread(self._thread, parent=self._parent)
+        self._shutdown_scope.request_stop()
 
 
 class ClipboardImagePanel(QWidget):
@@ -610,12 +630,13 @@ class ClipboardImagePanel(QWidget):
         self._entries.clear()
 
 
-class ClipboardAttachmentDialog(QDialog):
+class ClipboardAttachmentDialog(ShutdownOwner, QDialog):
     changed = Signal()
     notice = Signal(str)
 
     def __init__(self, service: AttachmentService, task_id: int, parent: QWidget) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._service, self._task_id = service, task_id
         self.setWindowTitle("클립보드 이미지 첨부")
         self.setStyleSheet(LIGHT_STYLESHEET)
@@ -663,6 +684,13 @@ class ClipboardAttachmentDialog(QDialog):
             self.accept()
 
     def done(self, result: int) -> None:
-        self.controller.shutdown()
-        self.panel.shutdown()
         super().done(result)
+
+    def request_shutdown(self) -> None:
+        if self._shutdown_scope.stopping:
+            return
+        self.panel.setEnabled(False)
+        self.buttons.setEnabled(False)
+        self.controller.request_shutdown()
+        request_shutdown(self.panel)
+        self._shutdown_scope.request_stop()

@@ -18,12 +18,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from shiboken6 import isValid
 
 from officeflow.application.attachment_export import ExportBatchResult, ExportStatus
 from officeflow.infrastructure.backup import BackupCanceledError, BackupManager
 from officeflow.infrastructure.backup_files import BackupFileHit, BackupFilePage, BackupFileSession
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 from officeflow.presentation.compact_labels import CompactLabel, WrappingLabel
 from officeflow.presentation.detail_widgets import show_text_details
 from officeflow.presentation.lookup_style import SCROLLBAR_STYLE
@@ -37,13 +36,14 @@ KINDS = {
 }
 
 
-class BackupFilesDialog(QDialog):
+class BackupFilesDialog(ShutdownOwner, QDialog):
     savedDirectory = Signal(str)
 
     def __init__(
         self, manager: BackupManager, parent: QWidget | None = None, *, directory: str | None = None
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.manager = manager
         self.directory = directory
         self.session: BackupFileSession | None = None
@@ -371,7 +371,7 @@ class BackupFilesDialog(QDialog):
         worker.progress.connect(self._progress_received, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         self._buttons(True)
         thread.start()
 
@@ -396,7 +396,7 @@ class BackupFilesDialog(QDialog):
     def _finished(self) -> None:
         thread = self._thread
         if thread is not None:
-            thread.wait()
+            assert thread.wait(0)
             thread.deleteLater()
         self._thread, self._worker = None, None
         if not self._closing:
@@ -409,19 +409,18 @@ class BackupFilesDialog(QDialog):
             self._worker.cancel()
             self.status.setText("취소 중… 이미 저장한 파일은 유지합니다.")
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self._closing:
+            return
         self._closing = True
         self.cancel()
-        thread = self._thread
-        if thread is not None:
-            finish_thread(thread, parent=self, label="백업 파일 작업을 마무리합니다…")
-            if isValid(thread):
-                thread.deleteLater()
-            self._thread, self._worker = None, None
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
         if self.session:
             self.session.close()
             self.session = None
+        super()._shutdown_completed()
 
     def reject(self) -> None:
-        self.shutdown()
-        super().reject()
+        self.request_shutdown()

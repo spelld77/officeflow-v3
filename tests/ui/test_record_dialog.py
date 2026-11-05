@@ -635,7 +635,8 @@ def test_task_records_dialog_waits_for_attachment_cancel_before_closing(
     dialog.reject()
 
     assert dialog.isVisible()
-    assert dialog._close_when_attachment_finishes
+    assert dialog._shutdown_scope.stopping
+    assert "마무리" in dialog.attachment_detail.text()
     qtbot.waitUntil(lambda: dialog._attachment_thread is None, timeout=3_000)
     qtbot.waitUntil(lambda: not dialog.isVisible(), timeout=1_000)
 

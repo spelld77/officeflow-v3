@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from officeflow.application.hourly_notifications import HourlyNotificationService, HourlyState
 from officeflow.domain.hourly_notification import HourlySettings
+from officeflow.presentation.background import request_shutdown
 from officeflow.presentation.hourly_notification_dialog import HourlyNotificationDialog, format_next
 from officeflow.presentation.hourly_notification_settings import HourlyNotificationSettingsDialog
 from officeflow.presentation.notification_coordinator import NotificationCoordinator
@@ -260,7 +261,7 @@ class HourlyNotificationController(QObject):
         self.timer.stop()
         self.service.shutdown()
         if self.dialog is not None:
-            self.dialog.shutdown()
+            request_shutdown(self.dialog)
             self.dialog.deleteLater()
             self.dialog = None
         if self.settings_dialog is not None:

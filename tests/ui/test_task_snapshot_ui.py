@@ -101,6 +101,8 @@ def test_one_hundred_history_open_close_cycles_release_workers_and_subscriptions
         child = dialog._children[0]
         settled(qtbot, child)
         dialog.reject()
+        qtbot.waitUntil(lambda current=dialog: current._shutdown_scope.is_stopped)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         assert not dialog.findChildren(QThread)
         dialog.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

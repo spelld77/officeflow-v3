@@ -303,7 +303,8 @@ def test_nested_record_import_is_canceled_before_owner_closes(
         browser.close()
     else:
         browser.reject()
-    assert finished.is_set() and not thread.isRunning()
+    qtbot.waitUntil(lambda: browser._shutdown_scope.is_stopped)
+    assert finished.is_set() and (not isValid(thread) or not thread.isRunning())
     assert not browser._record_dialogs and not window._file_dialogs
     qtbot.waitUntil(lambda: not isValid(record) and not isValid(browser))
 

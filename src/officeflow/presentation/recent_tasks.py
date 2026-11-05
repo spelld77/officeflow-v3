@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from officeflow.application.recent_tasks import RecentTaskRef, RecentTasks, RecentTaskSummary
 from officeflow.infrastructure.recent_tasks import RecentTaskStore
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope, request_shutdown
 from officeflow.presentation.dates import format_datetime
 from officeflow.presentation.latest_job import LatestJob
 from officeflow.presentation.theme import LIGHT_STYLESHEET
@@ -25,7 +26,7 @@ from officeflow.presentation.theme import LIGHT_STYLESHEET
 Resolved = tuple[tuple[RecentTaskSummary, RecentTaskRef], ...]
 
 
-class RecentTaskController(QObject):
+class RecentTaskController(ShutdownOwner, QObject):
     openRequested = Signal(object)
     pinnedRequested = Signal()
     warning = Signal(str)
@@ -39,6 +40,7 @@ class RecentTaskController(QObject):
         store: RecentTaskStore | None = None,
     ) -> None:
         super().__init__(button)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.service, self.store, self.button, self.timezone = service, store, button, timezone
         self.menu = QMenu(button)
         self.menu.setStyleSheet(LIGHT_STYLESHEET)
@@ -276,12 +278,14 @@ class RecentTaskController(QObject):
             item.setData(Qt.ItemDataRole.UserRole, ref)
             item.setToolTip(item.text())
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self._shutdown_scope.stopping:
+            return
         self._timer.stop()
         self.menu.close()
         if self.more:
             self.more.reject()
-        self._reader.shutdown()
+        request_shutdown(self._reader)
         store, refs = self.store, self.service.entries
         revision = store.reserve() if store else 0
 
@@ -293,4 +297,5 @@ class RecentTaskController(QObject):
             except (OSError, ValueError):
                 self._write_failed("save")
 
-        self._writer.shutdown(final_save)
+        request_shutdown(self._writer, final_save)
+        self._shutdown_scope.request_stop()

@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from officeflow.application.attachment_export import AttachmentExportService, FileReference
 from officeflow.application.attachments import (
@@ -95,7 +96,12 @@ from officeflow.presentation.attachment_thumbnails import (
     ThumbnailFileDelegate,
     visible_items,
 )
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import (
+    OperationWorker,
+    ShutdownOwner,
+    ShutdownScope,
+    request_shutdown,
+)
 from officeflow.presentation.compact_labels import CompactLabel, WrappingLabel
 from officeflow.presentation.dates import date_with_weekday, format_date, format_datetime
 from officeflow.presentation.file_list import compact_file_list, set_file_row
@@ -320,7 +326,7 @@ class CompleteTaskDialog(QDialog):
         return self.result_edit.toPlainText().strip()
 
 
-class TaskRecordsDialog(QDialog):
+class TaskRecordsDialog(ShutdownOwner, QDialog):
     changed = Signal()
     tabChanged = Signal(str)
     attachmentMetadataChanged = Signal(int)
@@ -349,6 +355,7 @@ class TaskRecordsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.setStyleSheet(LIGHT_STYLESHEET)
         if task.id is None:
             raise ValueError("저장된 업무만 기록을 작성할 수 있습니다.")
@@ -607,7 +614,7 @@ class TaskRecordsDialog(QDialog):
 
     def _finish_browser_state(self) -> None:
         if self._source_controller:
-            self._source_controller.shutdown()
+            request_shutdown(self._source_controller)
         if self._size_saved:
             return
         self._size_saved = True
@@ -814,7 +821,7 @@ class TaskRecordsDialog(QDialog):
             parent=self,
         )
         self._history_dialog = dialog
-        self.finished.connect(lambda _code: dialog.shutdown())
+        self.finished.connect(lambda _code: request_shutdown(dialog))
         dialog.show()
 
     def _snapshot_draft_guard(self) -> bool:
@@ -1900,6 +1907,9 @@ class TaskRecordsDialog(QDialog):
             worker.finished.connect(self._file_samples_finished, Qt.ConnectionType.QueuedConnection)
             thread.finished.connect(worker.deleteLater)
             self._sample_thread, self._sample_worker = thread, worker
+            self._shutdown_scope.track(
+                thread, worker, self._samples_stopped, worker.cancel, persistent=True
+            )
             thread.start()
         self._sample_busy = True
         self._sample_worker.request((generation, samples))
@@ -2117,9 +2127,8 @@ class TaskRecordsDialog(QDialog):
         self._thumbnail_closed = True
         self._thumbnail_timer.stop()
         self._image_coordinator.unregister(self._thumbnail_client)
-        self._image_coordinator.updated.disconnect(self._thumbnail_updated)
         if self._owns_image_coordinator:
-            self._image_coordinator.shutdown()
+            request_shutdown(self._image_coordinator)
 
     def _defer_image_action(self, action: Callable[[], None]) -> bool:
         if self._image_action_resuming:
@@ -2168,15 +2177,6 @@ class TaskRecordsDialog(QDialog):
             self._sample_worker.cancel()
         if self._sample_thread:
             self._sample_thread.quit()
-            finish_thread(
-                self._sample_thread,
-                parent=self,
-                label="첨부 정보 확인을 안전하게 마무리하고 있습니다…",
-            )
-            self._sample_thread.deleteLater()
-        self._sample_thread = None
-        self._sample_worker = None
-        self._sample_busy = False
 
     def _attachment_move_enabled(self, movement: AttachmentMove) -> bool:
         if (
@@ -2504,8 +2504,8 @@ class TaskRecordsDialog(QDialog):
         worker.failed.connect(self._attachment_import_failed)
         worker.canceled.connect(self._attachment_import_was_canceled)
         worker.finished.connect(worker.deleteLater)
-        worker.finished.connect(thread.quit)
-        thread.finished.connect(self._attachment_import_finished)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        self._shutdown_scope.track(thread, worker, self._attachment_import_finished, worker.cancel)
         self._attachment_thread = thread
         self._attachment_worker = worker
         self._attachment_progress = progress
@@ -2519,84 +2519,57 @@ class TaskRecordsDialog(QDialog):
         thread.start()
 
     def reject(self) -> None:
-        if self.folder_panel:
-            self.folder_panel.shutdown()
-        if self._defer_close_for_verification() or self._defer_close_for_attachment_import():
+        self.done(int(QDialog.DialogCode.Rejected))
+
+    def request_shutdown(self) -> None:
+        if self._owner_shutting_down:
             return
-        if self._export_controller:
-            self._export_controller.shutdown()
-        from officeflow.presentation.document_actions import stop_file_actions
-
-        stop_file_actions(self)
-        self._stop_file_samples()
-        if self._source_controller:
-            self._source_controller.shutdown()
-        super().reject()
-
-    def shutdown(self) -> None:
-        """Finish a modeless dialog's import before its owner disposes the DB."""
+        self._owner_shutting_down = True
+        if hasattr(self, "attachment_detail"):
+            self.attachment_detail.setText("작업을 안전하게 마무리한 뒤 닫습니다…")
         if hasattr(self, "_attachment_drop_router"):
             self._attachment_drop_router.shutdown()
+        self._attachment_refresh_timer.stop()
         self._close_image_dialogs()
         self._stop_thumbnails()
         if self.folder_panel:
-            self.folder_panel.shutdown()
+            self.folder_panel.request_shutdown()
         from officeflow.presentation.document_actions import stop_file_actions
 
         stop_file_actions(self)
-        self._owner_shutting_down = True
         if self._source_controller:
-            self._source_controller.shutdown()
+            self._source_controller.request_shutdown()
         self._stop_file_samples()
         if self._export_controller:
-            self._export_controller.shutdown()
-        if hasattr(self, "_unsubscribe_attachments"):
-            self._unsubscribe_attachments()
-        self._attachment_refresh_timer.stop()
-        if self._verification_worker is not None:
-            self._verification_worker.cancel()
-        if self._verification_thread is not None:
-            self._verification_thread.quit()
-            finish_thread(
-                self._verification_thread,
-                parent=self,
-                label="파일 검사를 취소하고 마무리하고 있습니다…",
-            )
-        self._close_when_attachment_finishes = False
-        if self._attachment_worker is not None:
-            self._attachment_worker.cancel()
-        if self._attachment_thread is not None:
-            self._attachment_thread.quit()
-            finish_thread(
-                self._attachment_thread,
-                parent=self,
-                label="첨부 복사를 취소하고 마무리하고 있습니다…",
-            )
+            self._export_controller.request_shutdown()
+        self._shutdown_scope.request_stop()
+
+    def _samples_stopped(self) -> None:
+        self._sample_thread = None
+        self._sample_worker = None
+        self._sample_busy = False
+
+    def _shutdown_completed(self) -> None:
+        self._verification_thread = None
+        self._verification_worker = None
         self._attachment_thread = None
         self._attachment_worker = None
-        progress = self._attachment_progress
+        for progress in (self._attachment_progress, self._verification_progress):
+            if progress is not None and isValid(progress):
+                progress.blockSignals(True)
+                progress.close()
+                progress.deleteLater()
         self._attachment_progress = None
-        if progress is not None:
-            progress.blockSignals(True)
-            progress.close()
-            progress.deleteLater()
-        self._attachment_progress = None
-        self.reject()
+        self._verification_progress = None
+        self._finish_browser_state()
+        super()._shutdown_completed()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._close_image_dialogs()
-        if self.folder_panel:
-            self.folder_panel.shutdown()
-        if self._defer_close_for_verification() or self._defer_close_for_attachment_import():
+        if self._shutdown_scope.is_stopped:
+            event.accept()
+        else:
+            self.reject()
             event.ignore()
-            return
-        from officeflow.presentation.document_actions import stop_file_actions
-
-        stop_file_actions(self)
-        if self._export_controller:
-            self._export_controller.shutdown()
-        self._stop_file_samples()
-        super().closeEvent(event)
 
     def _defer_close_for_attachment_import(self) -> bool:
         thread = self._attachment_thread
@@ -2661,7 +2634,7 @@ class TaskRecordsDialog(QDialog):
             self.attachment_list.setAcceptDrops(not self._read_only)
         thread = self._attachment_thread
         if thread is not None:
-            thread.wait()
+            assert thread.wait(0)
         self._attachment_thread = None
         self._attachment_worker = None
         self._attachment_progress = None
@@ -2832,10 +2805,9 @@ class TaskRecordsDialog(QDialog):
         thread.started.connect(worker.run)
         worker.succeeded.connect(self._verification_succeeded)
         worker.failed.connect(self._verification_failed)
-        worker.finished.connect(thread.quit)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._verification_finished)
-        thread.finished.connect(thread.deleteLater)
+        self._shutdown_scope.track(thread, worker, self._verification_finished, worker.cancel)
         self._verification_thread = thread
         self._verification_worker = worker
         self._verification_progress = progress
@@ -2878,6 +2850,8 @@ class TaskRecordsDialog(QDialog):
                 self._display_attachment_information(f"내용 확인 실패: {error}\n\n{information}")
 
     def _verification_finished(self) -> None:
+        if self._owner_shutting_down:
+            return
         if self._verification_progress is not None:
             self._verification_progress.close()
             self._verification_progress.deleteLater()
@@ -3093,17 +3067,8 @@ class TaskRecordsDialog(QDialog):
             self._image_preview.reject()
 
     def done(self, result: int) -> None:
-        if self._defer_close_for_verification() or self._defer_close_for_attachment_import():
-            return
-        self._owner_shutting_down = True
-        if hasattr(self, "_attachment_drop_router"):
-            self._attachment_drop_router.shutdown()
-        self._attachment_refresh_timer.stop()
-        self._close_image_dialogs()
-        self._stop_thumbnails()
-        self._stop_file_samples()
-        self._finish_browser_state()
-        super().done(result)
+        self._shutdown_result = result
+        self.request_shutdown()
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -3116,7 +3081,7 @@ class TaskRecordsDialog(QDialog):
         return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
 
-class WorkLogBrowserDialog(QDialog):
+class WorkLogBrowserDialog(ShutdownOwner, QDialog):
     changed = Signal()
     taskViewed = Signal(object, object)
     exportDirectoryChanged = Signal(str)
@@ -3141,6 +3106,7 @@ class WorkLogBrowserDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._task_service = task_service
         self._attachment_import_directory = attachment_import_directory
         self._clock = clock
@@ -3650,13 +3616,14 @@ class WorkLogBrowserDialog(QDialog):
         self.taskViewed.emit(task, occurrence_start)
 
     def done(self, result: int) -> None:
-        self._search_timer.stop()
-        for dialog in tuple(self._record_dialogs):
-            dialog.shutdown()
-        if self._owns_image_coordinator:
-            self._image_coordinator.shutdown()
         super().done(result)
 
-    def shutdown(self) -> None:
-        """Stop nested file imports before the main window releases its database."""
-        self.reject()
+    def request_shutdown(self) -> None:
+        if self._shutdown_scope.stopping:
+            return
+        self._search_timer.stop()
+        for dialog in tuple(self._record_dialogs):
+            dialog.request_shutdown()
+        if self._owns_image_coordinator:
+            self._image_coordinator.request_shutdown()
+        self._shutdown_scope.request_stop()

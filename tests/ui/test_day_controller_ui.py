@@ -74,6 +74,7 @@ def test_shutdown_handles_finished_slot_running_during_wait(qtbot):
     controller.request(date(2027, 10, 15), "UTC", "")
     qtbot.waitUntil(started.is_set)
     QTimer.singleShot(0, release.set)
-    controller.shutdown()
+    controller.request_shutdown()
+    qtbot.waitUntil(lambda: controller._shutdown_scope.is_stopped)
     assert controller._thread is None and controller._worker is None
     controller.shutdown()

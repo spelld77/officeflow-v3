@@ -90,6 +90,7 @@ def test_close_during_worker_keeps_ui_responsive_and_joins(qtbot, tmp_path, monk
     assert beats
     thread = dialog._thread
     dialog.reject()
+    qtbot.waitUntil(lambda: dialog._shutdown_scope.is_stopped)
     assert dialog._thread is None and dialog.session is None
     from shiboken6 import isValid
 

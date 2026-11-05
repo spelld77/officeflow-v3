@@ -55,7 +55,7 @@ from officeflow.infrastructure.backup import (
 )
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_recovery import AttachmentRecoveryDialog
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 from officeflow.presentation.backup_files_dialog import BackupFilesDialog
 from officeflow.presentation.calendar_export_dialog import CalendarExportDialog
 from officeflow.presentation.compact_labels import WrappingLabel
@@ -72,7 +72,7 @@ class AttachmentCleanupInventory:
     orphaned: tuple[OrphanAttachmentFile, ...]
 
 
-class DataManagementDialog(QDialog):
+class DataManagementDialog(ShutdownOwner, QDialog):
     quitRequested = Signal()
     exportDirectoryChanged = Signal(str)
     backupHealthChanged = Signal()
@@ -97,6 +97,7 @@ class DataManagementDialog(QDialog):
         automatic_backup_waiting: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.setStyleSheet(LIGHT_STYLESHEET)
         self._export_service = export_service
         self._task_archive_service = task_archive_service
@@ -1261,7 +1262,7 @@ class DataManagementDialog(QDialog):
         worker.failed.connect(self._operation_failed)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._operation_finished)
+        self._shutdown_scope.track(thread, worker, self._operation_finished, worker.cancel)
         self._thread = thread
         self._worker = worker
         self._progress = progress
@@ -1308,7 +1309,7 @@ class DataManagementDialog(QDialog):
         if self._owner_shutting_down:
             return
         if self._thread is not None:
-            self._thread.wait()
+            assert self._thread.wait(0)
             self._thread.deleteLater()
         self._refresh_backup_health()
         self.backupHealthChanged.emit()
@@ -1367,59 +1368,34 @@ class DataManagementDialog(QDialog):
         return message
 
     def reject(self) -> None:
-        self._close_backup_files()
-        from officeflow.presentation.document_actions import stop_file_actions
+        self._shutdown_result = int(QDialog.DialogCode.Rejected)
+        self.request_shutdown()
 
-        stop_file_actions(self)
-        if self._worker is not None:
-            self._worker.cancel()
+    def request_shutdown(self) -> None:
+        if self._owner_shutting_down:
             return
         self._owner_shutting_down = True
-        self.inspection_panel.shutdown()
         self._health_timer.stop()
-        if self._export_controller:
-            self._export_controller.shutdown()
-        for dialog in self.findChildren(AttachmentRecoveryDialog):
-            dialog.shutdown()
-        super().reject()
-
-    def shutdown(self) -> None:
         self._close_backup_files()
         from officeflow.presentation.document_actions import stop_file_actions
 
         stop_file_actions(self)
-        """Wait for a modeless cleanup operation before its owner closes."""
-        self._owner_shutting_down = True
-        self._health_timer.stop()
-        self.inspection_panel.shutdown()
+        self.inspection_panel.request_shutdown()
         for dialog in self.findChildren(AttachmentRecoveryDialog):
-            dialog.shutdown()
+            dialog.request_shutdown()
         if self._export_controller:
-            self._export_controller.shutdown()
-        if self._worker is not None:
-            self._worker.cancel()
-        if self._thread is not None:
-            self._thread.quit()
-            finish_thread(self._thread, parent=self)
+            self._export_controller.request_shutdown()
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
         self._thread = None
         self._worker = None
         if self._progress is not None:
             self._progress.close()
             self._progress.deleteLater()
         self._progress = None
-        super().reject()
+        super()._shutdown_completed()
 
     def accept(self) -> None:
-        self._close_backup_files()
-        from officeflow.presentation.document_actions import stop_file_actions
-
-        stop_file_actions(self)
-        if self._worker is not None:
-            self._worker.cancel()
-            return
-        self._owner_shutting_down = True
-        self.inspection_panel.shutdown()
-        self._health_timer.stop()
-        if self._export_controller:
-            self._export_controller.shutdown()
-        super().accept()
+        self._shutdown_result = int(QDialog.DialogCode.Accepted)
+        self.request_shutdown()

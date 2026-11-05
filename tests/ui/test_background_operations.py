@@ -68,7 +68,9 @@ def test_data_owner_shutdown_keeps_ui_responsive_until_worker_finishes(tmp_path,
     timer.setInterval(10)
     timer.timeout.connect(lambda: ticks.append(True))
     timer.start()
-    dialog.shutdown()
+    dialog.request_shutdown()
+    assert not finished.is_set() and dialog.isVisible()
+    qtbot.waitUntil(lambda: dialog._shutdown_scope.is_stopped)
     timer.stop()
     assert finished.is_set() and len(ticks) >= 3
     assert dialog._thread is None and not dialog.isVisible()

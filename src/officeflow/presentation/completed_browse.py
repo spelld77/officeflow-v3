@@ -27,12 +27,13 @@ from officeflow.application.completed_browse import (
     Month,
 )
 from officeflow.application.tasks import TaskQuery
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope, request_shutdown
 from officeflow.presentation.dates import format_datetime
 from officeflow.presentation.latest_job import LatestJob
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
-class CompletedBrowseWidget(QWidget):
+class CompletedBrowseWidget(ShutdownOwner, QWidget):
     openRequested = Signal(object)
     selected = Signal(object)
     menuRequested = Signal(object, object)
@@ -43,6 +44,7 @@ class CompletedBrowseWidget(QWidget):
         self, repository: CompletedBrowseRepository, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.repository = repository
         self.setStyleSheet(LIGHT_STYLESHEET)
         self._jobs = LatestJob(self)
@@ -361,5 +363,6 @@ class CompletedBrowseWidget(QWidget):
         self._rendering = False
         self.result = None
 
-    def shutdown(self) -> None:
-        self._jobs.shutdown()
+    def request_shutdown(self) -> None:
+        request_shutdown(self._jobs)
+        self._shutdown_scope.request_stop()

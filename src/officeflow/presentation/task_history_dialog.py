@@ -38,7 +38,12 @@ from officeflow.domain.task_history import (
     HistorySummary,
     scope_key,
 )
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import (
+    OperationWorker,
+    ShutdownOwner,
+    ShutdownScope,
+    request_shutdown,
+)
 from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.dates import date_with_weekday, format_datetime
 from officeflow.presentation.file_list import checkable_file_list
@@ -117,11 +122,12 @@ def render_saved_info(info: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-class _ReadDialog(QDialog):
+class _ReadDialog(ShutdownOwner, QDialog):
     """At most one worker. Reject waits responsively before destroying Qt owners."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.setModal(False)
         palette = self.palette()
         for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Button):
@@ -171,7 +177,7 @@ class _ReadDialog(QDialog):
         worker.failed.connect(self._failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         thread.started.connect(worker.run)
         thread.start()
 
@@ -193,7 +199,7 @@ class _ReadDialog(QDialog):
     def _finished(self) -> None:
         thread = self._thread
         if thread is not None:
-            thread.wait()
+            assert thread.wait(0)
             thread.deleteLater()
         self._thread, self._worker = None, None
         if self._pending is not None and not self._closed:
@@ -201,21 +207,23 @@ class _ReadDialog(QDialog):
             self._pending = None
             self.run(operation, success)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._closed = True
         self._pending = None
-        if self._worker is not None:
-            self._worker.cancel()
-        if self._thread is not None:
-            finish_thread(self._thread, parent=self)
+        self._shutdown_scope.request_stop()
 
     def reject(self) -> None:
-        self.shutdown()
-        super().reject()
+        self.request_shutdown()
+
+    def _shutdown_completed(self) -> None:
+        super()._shutdown_completed()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self.shutdown()
-        super().closeEvent(event)
+        self.request_shutdown()
+        if self._shutdown_scope.is_stopped:
+            super().closeEvent(event)
+        else:
+            event.ignore()
 
 
 class HistoryCompareDialog(_ReadDialog):
@@ -650,7 +658,7 @@ class TaskHistoryDialog(_ReadDialog):
         self._children.append(dialog)
 
         def closed(_code: int) -> None:
-            dialog.shutdown()
+            request_shutdown(dialog)
             if dialog in self._children:
                 self._children.remove(dialog)
             dialog.deleteLater()
@@ -820,9 +828,10 @@ class TaskHistoryDialog(_ReadDialog):
             else:
                 self.feedback.setText("새 이력 있음 · 새로고침으로 확인하세요.")
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        self._closed = True
         self._unsubscribe()
         for dialog in tuple(self._children):
-            dialog.shutdown()
+            request_shutdown(dialog)
             dialog.close()
-        super().shutdown()
+        super().request_shutdown()

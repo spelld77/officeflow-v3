@@ -42,6 +42,7 @@ from officeflow.domain.recurrence import (
 )
 from officeflow.domain.reminder import Reminder, ReminderDelivery, ReminderRuleInput
 from officeflow.domain.task import Task, TaskValidationError
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope, request_shutdown
 from officeflow.presentation.compact_labels import CompactLabel, WrappingLabel
 from officeflow.presentation.dates import date_with_weekday
 from officeflow.presentation.image_attachments import (
@@ -64,7 +65,7 @@ from officeflow.presentation.reminder_settings import (
 )
 
 
-class TaskEditorDialog(QDialog):
+class TaskEditorDialog(ShutdownOwner, QDialog):
     imageImportNotice = Signal(str)
 
     def __init__(
@@ -82,6 +83,7 @@ class TaskEditorDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._timezone = timezone
         self._task = task
         self.mutation_attempt = MutationAttempt()
@@ -733,14 +735,6 @@ class TaskEditorDialog(QDialog):
         dialog.show()
 
     def done(self, result: int) -> None:
-        self._date_scroll_timer.stop()
-        self._date_scroll_target = None
-        self._date_review.close()
-        if self._reminder_settings:
-            self._reminder_settings.reject()
-        self._image_controller.shutdown()
-        if self.image_panel:
-            self.image_panel.shutdown()
         super().done(result)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
@@ -1203,3 +1197,16 @@ class TaskEditorDialog(QDialog):
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def request_shutdown(self) -> None:
+        if self._shutdown_scope.stopping:
+            return
+        self._date_scroll_timer.stop()
+        self._date_scroll_target = None
+        self._date_review.close()
+        if self._reminder_settings:
+            self._reminder_settings.reject()
+        self._image_controller.request_shutdown()
+        if self.image_panel:
+            request_shutdown(self.image_panel)
+        self._shutdown_scope.request_stop()

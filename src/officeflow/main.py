@@ -184,13 +184,11 @@ def build_application(
     app.setOrganizationName("OfficeFlow")
 
     def shutdown() -> None:
-        try:
-            view_cache.close()
-            maintenance.close()
-            engine.dispose()
-        finally:
-            if on_clean_shutdown is not None:
-                on_clean_shutdown()
+        view_cache.close()
+        maintenance.close()
+        engine.dispose()
+        if on_clean_shutdown is not None:
+            on_clean_shutdown()
 
     external_storage = ExternalExportStorage(paths.root)
     attachment_exports = AttachmentExportService(attachment_service, external_storage)

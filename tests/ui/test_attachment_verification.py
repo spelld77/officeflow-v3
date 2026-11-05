@@ -138,7 +138,8 @@ def test_owner_shutdown_waits_responsively_for_verification(tmp_path, qtbot, mon
     timer.setInterval(10)
     timer.timeout.connect(lambda: ticks.append(datetime.now(UTC)))
     timer.start()
-    dialog.shutdown()
+    dialog.request_shutdown()
+    qtbot.waitUntil(lambda: dialog._shutdown_scope.is_stopped)
     timer.stop()
     assert len(ticks) >= 3
     assert dialog._verification_thread is None and not dialog.isVisible()

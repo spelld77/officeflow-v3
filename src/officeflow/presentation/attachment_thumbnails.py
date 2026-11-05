@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from officeflow.application.attachments import AttachmentCanceledError, AttachmentService
 from officeflow.application.file_operations import FileJobCanceledError
 from officeflow.domain.attachment import Attachment
-from officeflow.presentation.background import finish_thread
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope
 from officeflow.presentation.file_list import FILE_ROW_ROLE, FileRow
 from officeflow.presentation.image_attachments import (
     ImageReadResult,
@@ -135,7 +135,7 @@ class _ImageWorker(QObject):
         self.completed.emit((job, result))
 
 
-class AttachmentImageCoordinator(QObject):
+class AttachmentImageCoordinator(ShutdownOwner, QObject):
     """One reader for all stored-image views; QImages live only in a bounded LRU."""
 
     updated = Signal(int)
@@ -149,6 +149,7 @@ class AttachmentImageCoordinator(QObject):
 
     def __init__(self, parent: QObject | None = None, *, default_view: str = "list") -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.default_view = default_view if default_view in ("list", "thumbnails") else "list"
         self._clients: dict[int, dict[int, ImageState]] = {}
         self._sequence = 0
@@ -298,6 +299,7 @@ class AttachmentImageCoordinator(QObject):
             self.requested.connect(self._worker.read, Qt.ConnectionType.QueuedConnection)
             self._worker.completed.connect(self._completed, Qt.ConnectionType.QueuedConnection)
             self._thread.finished.connect(self._worker.deleteLater)
+            self._shutdown_scope.track(self._thread, self._worker, persistent=True)
             self._thread.start()
         self.read_count += 1
         self.requested.emit(job)
@@ -407,7 +409,7 @@ class AttachmentImageCoordinator(QObject):
             state.key = None
         self.sync(client, ())
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         if self._closing:
             return
         self._closing = True
@@ -418,11 +420,9 @@ class AttachmentImageCoordinator(QObject):
         self.cache_bytes = 0
         if self._active:
             self._active.canceled.set()
-        if self._thread:
-            self._thread.quit()
-            finish_thread(self._thread)
-            self._thread.deleteLater()
-        # Retain the worker wrapper until native thread-local cleanup has completed.
+        self._shutdown_scope.request_stop()
+
+    def _shutdown_completed(self) -> None:
         self._thread, self._worker, self._active = None, None, None
 
 

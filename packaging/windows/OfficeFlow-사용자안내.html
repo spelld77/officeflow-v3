@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OfficeFlow 3.0.14 사용자 안내</title>
+  <title>OfficeFlow 3.0.15 사용자 안내</title>
   <style>
     :root { color-scheme: light; --blue:#2f6fed; --ink:#172033; --muted:#64748b; --line:#dbe3ef; --bg:#f5f7fb; }
     * { box-sizing: border-box; }
@@ -22,12 +22,13 @@
 </head>
 <body><main>
   <header>
-    <h1>OfficeFlow 3.0.14 사용자 안내</h1>
+    <h1>OfficeFlow 3.0.15 사용자 안내</h1>
+    <p class="note">3.0.15부터는 Python ZIP을 풀어서 사용하는 방식으로 배포합니다. 새 EXE·설치본·Windows ZIP은 만들지 않습니다. 아래 설치형 설명은 기존 버전에 해당하며 새 버전은 Python 실행 안내를 따르세요.</p>
     <p class="lead">업무가 많아도 빠르게 찾고, 하루 일정부터 여러 날·반복 일정까지 한곳에서 관리합니다.</p>
     <nav>
       <a href="#start">시작하기</a><a href="#tasks">업무와 일정</a><a href="#records">기록과 첨부</a>
       <a href="#history">이력·중요 보관</a><a href="#reminders">알림</a><a href="#find">검색과 캘린더</a>
-      <a href="#source-additions">3.0.14 새 기능</a><a href="#backup">백업</a><a href="#python">Python 실행</a><a href="#trouble">문제 해결</a>
+      <a href="#source-additions">3.0.15 개선</a><a href="#backup">백업</a><a href="#python">Python 실행</a><a href="#trouble">문제 해결</a>
     </nav>
   </header>
 
@@ -204,7 +205,7 @@
   </section>
 
   <section id="python"><h2>7. Python 실행 모드</h2>
-    <p>회사 보안 정책이 서명되지 않은 실행 파일을 제한하지만 Python 실행은 허용하는 경우 <code>OfficeFlow-Python-3.0.14.zip</code>을 별도 폴더에 압축 해제해 사용할 수 있습니다.</p>
+    <p>회사 보안 정책이 서명되지 않은 실행 파일을 제한하지만 Python 실행은 허용하는 경우 <code>OfficeFlow-Python-3.0.15.zip</code>을 별도 폴더에 압축 해제해 사용할 수 있습니다.</p>
     <ol><li>Python 3.12 64비트를 설치합니다. 다른 Python 버전이 함께 있어도 괜찮습니다.</li>
       <li>최초 한 번 <code>setup-officeflow-python.cmd</code>를 실행해 전용 <code>.venv</code>와 라이브러리를 준비합니다.</li>
       <li>이후에는 <code>run-officeflow-python.cmd</code>로 실행합니다.</li>
@@ -234,7 +235,10 @@
     <h3>안전한 재설치</h3><p>먼저 데이터 화면에서 수동 백업을 만든 뒤 재설치하십시오. 같은 PC의 업그레이드는 기존 데이터 폴더를 그대로 사용합니다.</p>
     <p class="note">오래 실행하지 않은 반복 알림은 복구 범위 이전 건을 건너뛰며, 처리량이 많으면 나누어 이어서 확인합니다. 운영체제·보안 프로그램이 프로세스를 직접 종료하는 상황까지 방지하거나 종료 전에 알림을 보장하지는 않습니다.</p>
   </section>
-  <section id="source-additions"><h2>3.0.14 새 기능 (2026-10-26)</h2>
+  <section id="source-additions"><h2>3.0.15 개선 (2026-11-05)</h2>
+    <p>창을 닫을 때 백그라운드 작업의 종료를 기다린 뒤 창과 DB를 정리하도록 개선했습니다. 종료 중 새 진행창 생성으로 발생하던 교착 경로를 제거했습니다. 기존 DB0017·전체 백업 v3·데이터 위치는 유지하며 3.0.14에서 새 DB 이행은 없습니다.</p>
+    <p>새 ZIP을 별도 폴더에 준비하는 동안 기존 버전을 사용할 수 있습니다. 새 버전으로 전환하기 직전에 전체 백업을 만들고 트레이 메뉴에서 완전히 종료하세요. Python 배포 폴더를 바꿨다면 setup 스크립트를 한 번 실행합니다.</p>
+    <h3>3.0.14의 기존 개선</h3>
     <p class="note">설치형·Windows ZIP·Python ZIP에 아래 개선을 포함합니다. 보호 사본 후 DB0017 색인만 추가하며 전체 백업 v3를 유지합니다. 0017 DB/백업에는 3.0.14 이상의 실행기가 필요합니다.</p>
     <p>검색 옆 <b>최근</b>에서 고정 3개·최근 본 업무 5개를 확인합니다. 작은 화면에서는 표시 수를 줄이며 <b>최근 더 보기</b>에 최대 20개가 있습니다. 실제 업무 보기를 열 때만 기록합니다. 항목을 열어도 현재 검색/필터는 유지하고 <b>고정 전체 보기</b>만 고정 필터로 이동합니다. <b>최근 기록 비우기</b>는 업무/첨부/일지를 삭제하지 않습니다. 최근 기록은 이 PC의 식별자·시각 정보이며 업무 백업에는 포함하지 않고 복원 때 비웁니다.</p>
     <p><b>완료</b>는 실제 완료일의 월별 묶음이 기본입니다. 완료 회차·업무 전체 완료·완료일 미상을 구분하며 한 번에 6개월, 두 그룹, 그룹당 50건을 조회합니다. <b>더 과거 / 최근 기간</b>, 월 안의 이전/다음 50건을 사용합니다. 전체 목록도 같은 완료 기록을 완료일순으로 보여줍니다. 더블클릭/Enter는 해당 업무/회차를 열고 재개한 일반 업무는 현재 완료 목록에서 빠집니다. 새 업무는 상단 <b>+ 업무</b>를 사용합니다. Excel/ICS는 업무 단위이며 펼친 월/완료 회차별 내보내기가 아닙니다.</p>

@@ -42,7 +42,7 @@ from officeflow.application.attachment_search import (
     AttachmentSearchService,
 )
 from officeflow.domain.enums import TaskStatus
-from officeflow.presentation.background import finish_thread
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope
 from officeflow.presentation.dates import date_with_weekday, format_date
 from officeflow.presentation.lookup_style import CHECKBOX_STYLE, SCROLLBAR_STYLE
 
@@ -181,7 +181,7 @@ class AttachmentSearchDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-class AttachmentSearchPageWidget(QFrame):
+class AttachmentSearchPageWidget(ShutdownOwner, QFrame):
     openRequested = Signal(object)
     saveRequested = Signal(object)
     taskRequested = Signal(object)
@@ -194,6 +194,7 @@ class AttachmentSearchPageWidget(QFrame):
         self, service: AttachmentSearchService, timezone: str, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.setObjectName("contentCard")
         self._service = service
         self._timezone = timezone
@@ -484,7 +485,7 @@ class AttachmentSearchPageWidget(QFrame):
         self._worker = worker
         worker.completed.connect(self._receive)
         worker.failed.connect(self._failed)
-        worker.finished.connect(self._finished)
+        self._shutdown_scope.track(worker, worker, self._finished, worker.cancelled.set)
         worker.start()
 
     def _finished(self) -> None:
@@ -544,8 +545,6 @@ class AttachmentSearchPageWidget(QFrame):
         self.model.set_items([])
         self._request(self._block_cursors[-1], False)
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self.deactivate()
-        if self._worker is not None:
-            self._worker.cancelled.set()
-            finish_thread(self._worker, parent=self, label="첨부 검색을 마무리하고 있습니다…")
+        self._shutdown_scope.request_stop()

@@ -1,4 +1,5 @@
 param(
+    [switch]$IncludeWindowsExecutables,
     [switch]$SkipInstaller,
     [switch]$SkipInstallerVerification,
     [string]$IsccPath = ""
@@ -19,14 +20,6 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "가상환경이 없습니다. scripts\bootstrap.ps1을 먼저 실행하세요."
 }
 
-# Keep editable-install distribution metadata aligned with pyproject.toml before
-# PyInstaller collects package metadata into the Windows bundle.
-& $python -m pip install --disable-pip-version-check --no-deps --no-build-isolation `
-    -e $projectRoot
-if ($LASTEXITCODE -ne 0) {
-    throw "OfficeFlow 로컬 패키지 메타데이터 갱신에 실패했습니다."
-}
-
 function Reset-GeneratedDirectory {
     param([string]$Path)
     $fullPath = [IO.Path]::GetFullPath($Path)
@@ -44,111 +37,129 @@ if ($LASTEXITCODE -ne 0 -or -not $version) {
     throw "OfficeFlow 버전을 읽지 못했습니다."
 }
 
-Reset-GeneratedDirectory $buildRoot
-Reset-GeneratedDirectory $distRoot
-New-Item -ItemType Directory -Path $workRoot | Out-Null
-New-Item -ItemType Directory -Path $installerDir | Out-Null
+# Python ZIP is the default release. Windows binaries require a later explicit request.
+if ($IncludeWindowsExecutables) {
+    # Keep editable-install distribution metadata aligned with pyproject.toml before
+    # PyInstaller collects package metadata into the Windows bundle.
+    & $python -m pip install --disable-pip-version-check --no-deps --no-build-isolation `
+        -e $projectRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "OfficeFlow 로컬 패키지 메타데이터 갱신에 실패했습니다."
+    }
 
-& $python (Join-Path $projectRoot "packaging\windows\generate_icon.py") $icon
-if ($LASTEXITCODE -ne 0) { throw "아이콘 생성에 실패했습니다." }
+    Reset-GeneratedDirectory $buildRoot
+    Reset-GeneratedDirectory $distRoot
+    New-Item -ItemType Directory -Path $workRoot | Out-Null
+    New-Item -ItemType Directory -Path $installerDir | Out-Null
 
-$pyinstallerArguments = @(
-    "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed",
-    "--name", "OfficeFlow",
-    "--paths", (Join-Path $projectRoot "src"),
-    "--distpath", $distRoot,
-    "--workpath", $workRoot,
-    "--specpath", $buildRoot,
-    "--icon", $icon,
-    "--version-file", (Join-Path $projectRoot "packaging\windows\version_info.txt"),
-    "--collect-data", "officeflow",
-    "--collect-data", "tzdata",
-    "--add-data", "${migrationSource}:officeflow/infrastructure/database/migrations",
-    (Join-Path $projectRoot "src\officeflow\main.py")
-)
-& $python @pyinstallerArguments
-if ($LASTEXITCODE -ne 0) { throw "Windows 실행 파일 빌드에 실패했습니다." }
+    & $python (Join-Path $projectRoot "packaging\windows\generate_icon.py") $icon
+    if ($LASTEXITCODE -ne 0) { throw "아이콘 생성에 실패했습니다." }
 
-# --add-data copies the migration source tree, including developer bytecode.
-# Keep migration .py files but remove only caches inside the generated bundle.
-$resolvedAppDir = [IO.Path]::GetFullPath($appDir)
-Get-ChildItem -LiteralPath $resolvedAppDir -Directory -Recurse -Filter "__pycache__" |
-    Sort-Object { $_.FullName.Length } -Descending |
-    ForEach-Object {
-        $bundleCachePath = [IO.Path]::GetFullPath($_.FullName)
-        if (-not $bundleCachePath.StartsWith($resolvedAppDir + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "캐시 정리 경로가 EXE 배포 폴더 밖입니다: $bundleCachePath"
+    $pyinstallerArguments = @(
+        "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed",
+        "--name", "OfficeFlow",
+        "--paths", (Join-Path $projectRoot "src"),
+        "--distpath", $distRoot,
+        "--workpath", $workRoot,
+        "--specpath", $buildRoot,
+        "--icon", $icon,
+        "--version-file", (Join-Path $projectRoot "packaging\windows\version_info.txt"),
+        "--collect-data", "officeflow",
+        "--collect-data", "tzdata",
+        "--add-data", "${migrationSource}:officeflow/infrastructure/database/migrations",
+        (Join-Path $projectRoot "src\officeflow\main.py")
+    )
+    & $python @pyinstallerArguments
+    if ($LASTEXITCODE -ne 0) { throw "Windows 실행 파일 빌드에 실패했습니다." }
+
+    # --add-data copies the migration source tree, including developer bytecode.
+    # Keep migration .py files but remove only caches inside the generated bundle.
+    $resolvedAppDir = [IO.Path]::GetFullPath($appDir)
+    Get-ChildItem -LiteralPath $resolvedAppDir -Directory -Recurse -Filter "__pycache__" |
+        Sort-Object { $_.FullName.Length } -Descending |
+        ForEach-Object {
+            $bundleCachePath = [IO.Path]::GetFullPath($_.FullName)
+            if (-not $bundleCachePath.StartsWith($resolvedAppDir + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "캐시 정리 경로가 EXE 배포 폴더 밖입니다: $bundleCachePath"
+            }
+            Remove-Item -LiteralPath $bundleCachePath -Recurse -Force
         }
-        Remove-Item -LiteralPath $bundleCachePath -Recurse -Force
+
+    # Qt 6 uses the Windows 10+ system ICU. A developer PATH may contain an unrelated ICU DLL;
+    # PyInstaller can accidentally collect it and create an incompatible bundle.
+    Get-ChildItem -LiteralPath (Join-Path $appDir "_internal") -Filter "icu*.dll" -File |
+        Remove-Item -Force
+
+    # PySide6 6.11 ships a newer compatible VC runtime than the base Python runtime. Keep one
+    # runtime version at the bundle root so Windows does not load the older copy first.
+    $pysideRoot = (& $python -c "import PySide6; from pathlib import Path; print(Path(PySide6.__file__).parent)").Trim()
+    foreach ($runtime in @("VCRUNTIME140.dll", "VCRUNTIME140_1.dll")) {
+        Copy-Item -LiteralPath (Join-Path $pysideRoot $runtime) `
+            -Destination (Join-Path $appDir "_internal\$runtime") -Force
     }
 
-# Qt 6 uses the Windows 10+ system ICU. A developer PATH may contain an unrelated ICU DLL;
-# PyInstaller can accidentally collect it and create an incompatible bundle.
-Get-ChildItem -LiteralPath (Join-Path $appDir "_internal") -Filter "icu*.dll" -File |
-    Remove-Item -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot "packaging\windows\OfficeFlow-사용자안내.html") `
+        -Destination (Join-Path $appDir "OfficeFlow-사용자안내.html")
 
-# PySide6 6.11 ships a newer compatible VC runtime than the base Python runtime. Keep one
-# runtime version at the bundle root so Windows does not load the older copy first.
-$pysideRoot = (& $python -c "import PySide6; from pathlib import Path; print(Path(PySide6.__file__).parent)").Trim()
-foreach ($runtime in @("VCRUNTIME140.dll", "VCRUNTIME140_1.dll")) {
-    Copy-Item -LiteralPath (Join-Path $pysideRoot $runtime) `
-        -Destination (Join-Path $appDir "_internal\$runtime") -Force
-}
-
-Copy-Item -LiteralPath (Join-Path $projectRoot "packaging\windows\OfficeFlow-사용자안내.html") `
-    -Destination (Join-Path $appDir "OfficeFlow-사용자안내.html")
-
-$previousDataDir = $env:OFFICEFLOW_DATA_DIR
-$smokeData = Join-Path $buildRoot "smoke-data"
-try {
-    $env:OFFICEFLOW_DATA_DIR = $smokeData
-    $smoke = Start-Process -FilePath (Join-Path $appDir "OfficeFlow.exe") `
-        -ArgumentList "--smoke-test" -Wait -PassThru -WindowStyle Hidden
-    if ($smoke.ExitCode -ne 0) { throw "패키지 실행 점검에 실패했습니다." }
-}
-finally {
-    $env:OFFICEFLOW_DATA_DIR = $previousDataDir
-}
-
-if (-not $SkipInstaller) {
-    if (-not $IsccPath) {
-        $knownCompilers = @(
-            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
-            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"),
-            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
-        )
-        $IsccPath = $knownCompilers | Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
-            Select-Object -First 1
+    $previousDataDir = $env:OFFICEFLOW_DATA_DIR
+    $smokeData = Join-Path $buildRoot "smoke-data"
+    try {
+        $env:OFFICEFLOW_DATA_DIR = $smokeData
+        $smoke = Start-Process -FilePath (Join-Path $appDir "OfficeFlow.exe") `
+            -ArgumentList "--smoke-test" -Wait -PassThru -WindowStyle Hidden
+        if ($smoke.ExitCode -ne 0) { throw "패키지 실행 점검에 실패했습니다." }
     }
-    if (-not $IsccPath -or -not (Test-Path -LiteralPath $IsccPath)) {
-        throw "Inno Setup 6 컴파일러를 찾지 못했습니다. 설치하거나 -SkipInstaller를 사용하세요."
+    finally {
+        $env:OFFICEFLOW_DATA_DIR = $previousDataDir
     }
-    & $IsccPath "/DAppVersion=$version" "/DSourceDir=$appDir" `
-        "/DOutputDir=$installerDir" "/DSetupIcon=$icon" `
-        (Join-Path $projectRoot "packaging\windows\OfficeFlow.iss")
-    if ($LASTEXITCODE -ne 0) { throw "설치 프로그램 빌드에 실패했습니다." }
 
-    $installer = Join-Path $installerDir "OfficeFlow-$version-Setup.exe"
-    if (-not $SkipInstallerVerification) {
-        # An isolated installer identity must not alter the user's real uninstall
-        # registration or Windows startup setting during lifecycle verification.
-        $verificationDir = Join-Path $buildRoot "verification-installer"
-        New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
+    if (-not $SkipInstaller) {
+        if (-not $IsccPath) {
+            $knownCompilers = @(
+                (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+                (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"),
+                (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+            )
+            $IsccPath = $knownCompilers | Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+                Select-Object -First 1
+        }
+        if (-not $IsccPath -or -not (Test-Path -LiteralPath $IsccPath)) {
+            throw "Inno Setup 6 컴파일러를 찾지 못했습니다. 설치하거나 -SkipInstaller를 사용하세요."
+        }
         & $IsccPath "/DAppVersion=$version" "/DSourceDir=$appDir" `
-            "/DOutputDir=$verificationDir" "/DSetupIcon=$icon" "/DVerificationBuild=1" `
+            "/DOutputDir=$installerDir" "/DSetupIcon=$icon" `
             (Join-Path $projectRoot "packaging\windows\OfficeFlow.iss")
-        if ($LASTEXITCODE -ne 0) { throw "격리 검증용 설치 프로그램 빌드에 실패했습니다." }
-        $verificationInstaller = Join-Path $verificationDir "OfficeFlow-$version-Setup.exe"
-        & (Join-Path $projectRoot "scripts\verify-installer.ps1") -InstallerPath $verificationInstaller
-        if ($LASTEXITCODE -ne 0) { throw "설치 프로그램 검증에 실패했습니다." }
+        if ($LASTEXITCODE -ne 0) { throw "설치 프로그램 빌드에 실패했습니다." }
+
+        $installer = Join-Path $installerDir "OfficeFlow-$version-Setup.exe"
+        if (-not $SkipInstallerVerification) {
+            # An isolated installer identity must not alter the user's real uninstall
+            # registration or Windows startup setting during lifecycle verification.
+            $verificationDir = Join-Path $buildRoot "verification-installer"
+            New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
+            & $IsccPath "/DAppVersion=$version" "/DSourceDir=$appDir" `
+                "/DOutputDir=$verificationDir" "/DSetupIcon=$icon" "/DVerificationBuild=1" `
+                (Join-Path $projectRoot "packaging\windows\OfficeFlow.iss")
+            if ($LASTEXITCODE -ne 0) { throw "격리 검증용 설치 프로그램 빌드에 실패했습니다." }
+            $verificationInstaller = Join-Path $verificationDir "OfficeFlow-$version-Setup.exe"
+            & (Join-Path $projectRoot "scripts\verify-installer.ps1") -InstallerPath $verificationInstaller
+            if ($LASTEXITCODE -ne 0) { throw "설치 프로그램 검증에 실패했습니다." }
+        }
     }
+
+    & (Join-Path $projectRoot "scripts\build-python-package.ps1")
+
+    # Include the entire onedir bundle: the EXE alone cannot run without _internal.
+    $portableArchive = Join-Path $distRoot "OfficeFlow-$version-Windows.zip"
+    Compress-Archive -LiteralPath $appDir -DestinationPath $portableArchive -CompressionLevel Optimal
+
+} else {
+    if ($SkipInstaller -or $SkipInstallerVerification -or $IsccPath) {
+        throw "Windows 빌드 옵션은 -IncludeWindowsExecutables와 함께 사용하세요."
+    }
+    Reset-GeneratedDirectory $distRoot
+    & (Join-Path $projectRoot "scripts\build-python-package.ps1")
 }
-
-& (Join-Path $projectRoot "scripts\build-python-package.ps1")
-
-# Include the entire onedir bundle: the EXE alone cannot run without _internal.
-$portableArchive = Join-Path $distRoot "OfficeFlow-$version-Windows.zip"
-Compress-Archive -LiteralPath $appDir -DestinationPath $portableArchive -CompressionLevel Optimal
 
 $releaseFiles = Get-ChildItem -LiteralPath $distRoot -File -Recurse |
     Where-Object { $_.Name -notin @("SHA256SUMS.txt", "release-manifest.json") }

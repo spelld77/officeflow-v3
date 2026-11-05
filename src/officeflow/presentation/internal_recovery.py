@@ -17,13 +17,15 @@ from officeflow.application.attachment_documents import InternalRecoveryItem
 from officeflow.application.document_lifecycle import DocumentLifecycle
 from officeflow.infrastructure.attachments.deletion_storage import DeletionFileStorage
 from officeflow.infrastructure.attachments.internal_storage import InternalFileStorage
+from officeflow.presentation.background import ShutdownOwner, ShutdownScope
 from officeflow.presentation.document_actions import file_actions, stop_file_actions
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
-class InternalRecoveryDialog(QDialog):
+class InternalRecoveryDialog(ShutdownOwner, QDialog):
     def __init__(self, lifecycle: DocumentLifecycle, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.lifecycle = lifecycle
         self.setStyleSheet(LIGHT_STYLESHEET)
         self.setWindowTitle("중단된 내부 작업 확인")
@@ -87,9 +89,11 @@ class InternalRecoveryDialog(QDialog):
                 feedback=self.feedback,
             )
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
+        if self._shutdown_scope.stopping:
+            return
         stop_file_actions(self)
+        self._shutdown_scope.request_stop()
 
     def done(self, result: int) -> None:
-        self.shutdown()
         super().done(result)

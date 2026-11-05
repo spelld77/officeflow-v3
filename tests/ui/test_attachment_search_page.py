@@ -6,7 +6,7 @@ from pathlib import Path
 from time import monotonic
 
 import pytest
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from pytestqt.qtbot import QtBot
 
@@ -113,6 +113,9 @@ def test_layout_short_query_and_clear_additional_conditions(
         qtbot.mouseClick(page.more_conditions, Qt.MouseButton.LeftButton)
         page.trash_check.setChecked(True)
         page.detached_check.setChecked(True)
+        fixture_date = QDate(NOW.year, NOW.month, NOW.day)
+        page.date_from.setDate(fixture_date)
+        page.date_to.setDate(fixture_date)
         page.range_check.setChecked(True)
         wait_page(window, qtbot, 1)
         for widget in (

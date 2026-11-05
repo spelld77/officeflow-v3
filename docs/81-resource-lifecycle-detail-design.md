@@ -1,5 +1,10 @@
 # U36 메모리·창 자원 정리 상세설계
 
+2026-11-05 별도 원인이 확인된 응답 없음은 [85번 U39 설계](85-thread-shutdown-deadlock-design.md)를 따른다.
+종료 중 새 진행창/연결을 만들던 공통 함수를 비동기 종료/native join 계약으로 이전했다.
+최초에는 설계만 완료했으며, U36의 과거 누적 개선 검증을 오늘 교착 수정 완료로 해석하지 않는다.
+후속 구현·격리 검증을 완료했다. U39 최신 결과/분할 검증·미검증 환경은 [86번](86-thread-shutdown-deadlock-results.md)을 따른다.
+
 작성일: 2026-10-26. [80번 공통설계](80-resource-and-task-finding-common-design.md)의 1차 상세설계.
 상태: **설계 완료, 실행 코드 수정/회귀 검증 전**. 관측 사실·실패한 시험·측정 한계는 [79번](79-memory-and-resource-review.md)을 따른다.
 

@@ -3,18 +3,18 @@ from __future__ import annotations
 from datetime import date
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
-from shiboken6 import isValid
 
 from officeflow.application.day_overview import DayCursor, DayOverviewResult, DayOverviewService
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 
 
-class DayOverviewController(QObject):
+class DayOverviewController(ShutdownOwner, QObject):
     ready = Signal(object)
     failed = Signal(object)
 
     def __init__(self, service: DayOverviewService, parent: QObject) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self.service = service
         self._generation = 0
         self._active = 0
@@ -60,7 +60,7 @@ class DayOverviewController(QObject):
         worker.failed.connect(self._failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
+        self._shutdown_scope.track(thread, worker, self._finished, worker.cancel)
         thread.start()
 
     @Slot(object)
@@ -76,19 +76,13 @@ class DayOverviewController(QObject):
     @Slot()
     def _finished(self) -> None:
         if self._thread:
-            self._thread.wait()
+            assert self._thread.wait(0)
             self._thread.deleteLater()
         self._thread = None
         self._worker = None
         self._start()
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         self._closed = True
         self.cancel()
-        thread = self._thread
-        if thread is not None:
-            finish_thread(thread)
-            if isValid(thread):
-                thread.deleteLater()
-        self._thread = None
-        self._worker = None
+        self._shutdown_scope.request_stop()

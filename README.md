@@ -6,19 +6,30 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 ## 현재 상태
 
+3.0.15는 U39 창 닫기/작업 종료 교착을 개선한다.
+설계는 [85번](docs/85-thread-shutdown-deadlock-design.md), 결과/한계는
+[86번](docs/86-thread-shutdown-deadlock-results.md)을 따른다. 로컬 배포물·커밋 마감은
+[87번](docs/87-release-checklist.md)에 기록한다. GitHub 공개와 실사용 실행 폴더 교체는 별도다.
+
 - 단계: Phase 8 완료
-- 버전: OfficeFlow 3.0.14
+- 버전: OfficeFlow 3.0.15
 - 구현 상태: 설치·업그레이드·제거 검증을 마친 Windows 데스크톱 앱
 - 주요 개선: 첨부 종류 필터·작업본 출처·창 크기 기억·외부 폴더 연결·HTML/Excel 업무 보관·간편 시간 입력·캡처 이미지·썸네일
 - 대상 플랫폼: Windows 10/11
 - UI 기술: PySide6
 - 데이터 저장소: SQLite
-- 배포 형태: 단일 사용자용 설치 프로그램, 전체 EXE 폴더 ZIP 또는 Python 3.12 실행 모드
+- 배포 형태: Python 3.12 실행용 ZIP (3.0.15부터 기본/현재 배포)
 
 3.0.14는 자원 정리·최근 업무 바로 찾기·완료 월별 보기를 추가한다.
 DB0017 색인만 추가하며 전체 백업 v3와 기존 업무·첨부 내용을 유지한다.
 기존 DB는 첫 실행에서 보호 사본을 만든 뒤 필요한 이행을 순서대로 적용한다.
 0017 DB와 이 DB가 포함된 백업은 **3.0.14 이상**에서 사용한다. 구버전 복귀에는 업데이트 전 자료가 필요하다.
+
+## 3.0.15 주요 개선
+
+창을 닫을 때 작업 종료를 비동기로 기다리고, 작업이 모두 끝난 뒤 창과 DB를 정리한다.
+종료 도중 새 진행창을 만드는 경로를 제거했다. DB0017·전체 백업 v3와 기존 데이터 경로는 유지한다.
+[3.0.15 릴리스 노트](docs/release-notes-3.0.15.md)에 업데이트 방법과 검증 한계를 안내한다.
 
 ## 3.0.14 주요 개선
 
@@ -173,7 +184,7 @@ PNG/JPEG/BMP를 지원하며 추가 DB 이행이나 의존성은 없다.
 
 ## 설치
 
-3.0.14는 자원 정리·최근/고정 바로 찾기·완료 월별 탐색과 기존 기능을 포함한다.
+3.0.15는 종료 교착 개선과 3.0.14의 자원 정리·최근/고정 바로 찾기·완료 월별 탐색을 포함한다.
 업데이트 전 전체 백업을 만들고 OfficeFlow를 트레이까지 종료한다. 기존 업무·첨부를 자동 삭제하지 않는다.
 
 3.0.9는 백업 실패의 지속 안내, 수동 자료 검사와 종료 진단, 보관 자료·메모 검색,
@@ -203,8 +214,10 @@ PNG/JPEG/BMP를 지원하며 추가 DB 이행이나 의존성은 없다.
 `매시 알림` 또는 `설정 → 매시 알림 설정...`에서 조정한다. 인사랑 기록은 직접 해야 하며
 이 기능은 기록·출근 인증을 하지 않는다. 이번 실행에서 끄더라도 다음 실행에는 다시 켜진다.
 
-[최신 릴리스](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.14)의
-`OfficeFlow-3.0.14-Setup.exe`를 실행한다. 관리자 권한은 필요하지 않으며,
+3.0.15부터는 **Python ZIP만 생성**한다. 압축 해제 후 아래 Python 실행 모드를 따른다.
+EXE·설치본·EXE가 들어 있는 Windows ZIP은 별도 요청 전에는 생성하지 않는다.
+
+기존 설치형 설명은 GitHub에 공개된 [3.0.14](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.14)에 해당한다. 관리자 권한은 필요하지 않으며,
 기본적으로 현재 사용자에게 설치된다. 기존 버전 위에 설치하면 업무 DB와 첨부파일을
 유지한 채 프로그램 파일만 갱신한다.
 
@@ -217,7 +230,8 @@ PNG/JPEG/BMP를 지원하며 추가 DB 이행이나 의존성은 없다.
 ## Python 실행 모드
 
 서명되지 않은 PyInstaller 실행 파일을 제한하지만 Python 실행은 허용된 PC에서는 별도의
-Python 모드를 사용할 수 있다. Python 3.12 64비트가 설치된 상태에서 최초 한 번
+Python 모드를 사용할 수 있다. `dist/python/OfficeFlow-Python-3.0.15.zip`을 별도 폴더에 풀고
+Python 3.12 64비트가 설치된 상태에서 최초 한 번
 `setup-officeflow-python.cmd`를 실행하고, 이후 `run-officeflow-python.cmd`를 더블클릭한다.
 
 실사용 Python 모드는 설치형과 동일한 `%LOCALAPPDATA%\OfficeFlow` 데이터를 사용한다.
@@ -262,10 +276,12 @@ PC를 옮길 때는 현재 v3의 `.ofbackup` 백업과 복원을 사용한다.
 .\scripts\quality.ps1
 ```
 
-Windows 실행 파일과 설치 프로그램을 만들고 설치 수명주기를 검증하려면 다음을 실행한다.
+Python ZIP과 체크섬/manifest를 만들려면 다음을 실행한다.
 
 ```powershell
 .\scripts\build-release.ps1
 ```
 
-빌드 결과는 `dist`에 생성되며 `SHA256SUMS.txt`와 `release-manifest.json`을 함께 제공한다.
+기본 빌드는 Python ZIP만 `dist/python`에 생성하며 `dist/SHA256SUMS.txt`와 `release-manifest.json`을 함께 제공한다.
+EXE·설치본·Windows ZIP을 다시 요청한 경우에만 `-IncludeWindowsExecutables`로 기존 Windows 빌드를 실행한다.
+일반 Python ZIP 빌드에는 PyInstaller/Inno Setup이 필요하지 않다.

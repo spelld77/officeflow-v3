@@ -81,7 +81,8 @@ def test_inspection_cancel_and_shutdown_keeps_timer_responsive(qtbot):
     timer.start()
     panel.start()
     qtbot.waitUntil(lambda: began.is_set() and len(ticks) >= 3)
-    panel.shutdown()
+    panel.request_shutdown()
+    qtbot.waitUntil(lambda: panel._shutdown_scope.is_stopped)
     assert finished.is_set() and panel._thread is None
     timer.stop()
 

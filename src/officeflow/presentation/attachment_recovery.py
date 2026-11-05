@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QThread, QUrl
+from PySide6.QtCore import Qt, QThread, QUrl, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
@@ -17,11 +17,11 @@ from PySide6.QtWidgets import (
 )
 
 from officeflow.application.attachment_export import AttachmentExportService, ExportRecoveryItem
-from officeflow.presentation.background import OperationWorker, finish_thread
+from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 from officeflow.presentation.theme import LIGHT_STYLESHEET
 
 
-class AttachmentRecoveryDialog(QDialog):
+class AttachmentRecoveryDialog(ShutdownOwner, QDialog):
     def __init__(
         self,
         service: AttachmentExportService,
@@ -29,6 +29,7 @@ class AttachmentRecoveryDialog(QDialog):
         parent: QWidget,
     ) -> None:
         super().__init__(parent)
+        self._shutdown_scope = ShutdownScope(self, self._shutdown_completed)
         self._service, self._items = service, items
         self._thread: QThread | None = None
         self._worker: OperationWorker | None = None
@@ -119,12 +120,8 @@ class AttachmentRecoveryDialog(QDialog):
         thread = QThread(self)
         worker = OperationWorker(operation)
         worker.moveToThread(thread)
-        worker.succeeded.connect(
-            lambda value: self.detail.setPlainText(
-                str(value) + "\n닫고 다시 확인하면 최신 상태를 볼 수 있습니다."
-            )
-        )
-        worker.failed.connect(lambda error: self.detail.setPlainText(str(error)))
+        worker.succeeded.connect(self._succeeded, Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(self._failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.finished.connect(worker.deleteLater)
         thread.started.connect(worker.run)
@@ -135,27 +132,38 @@ class AttachmentRecoveryDialog(QDialog):
             self.restore.setEnabled(False)
             self.cleanup.setEnabled(False)
 
-        thread.finished.connect(finished)
-        thread.finished.connect(thread.deleteLater)
+        self._shutdown_scope.track(thread, worker, finished, worker.cancel)
         self._thread, self._worker = thread, worker
         self.restore.setEnabled(False)
         self.cleanup.setEnabled(False)
         thread.start()
 
-    def shutdown(self) -> None:
+    def request_shutdown(self) -> None:
         if self._consent:
             self._consent.reject()
-        if self._worker:
-            self._worker.cancel()
-        if self._thread:
-            finish_thread(
-                self._thread, parent=self, label="파일 복구를 안전하게 마무리하고 있습니다…"
+        self._shutdown_scope.request_stop()
+
+    @Slot(object)
+    def _succeeded(self, value: object) -> None:
+        if not self._shutdown_scope.stopping:
+            self.detail.setPlainText(
+                str(value) + "\n닫고 다시 확인하면 최신 상태를 볼 수 있습니다."
             )
 
+    @Slot(object)
+    def _failed(self, error: object) -> None:
+        if not self._shutdown_scope.stopping:
+            self.detail.setPlainText(str(error))
+
     def reject(self) -> None:
-        self.shutdown()
-        super().reject()
+        self.request_shutdown()
+
+    def _shutdown_completed(self) -> None:
+        super()._shutdown_completed()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self.shutdown()
-        super().closeEvent(event)
+        self.request_shutdown()
+        if self._shutdown_scope.is_stopped:
+            super().closeEvent(event)
+        else:
+            event.ignore()
