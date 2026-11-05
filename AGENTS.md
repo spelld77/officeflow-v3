@@ -257,3 +257,10 @@ scripts/build-release.ps1도 기본은 Python 전용이며 -IncludeWindowsExecut
 최종 dist는 Python ZIP·개별 체크섬·SHA256SUMS·manifest 4개이며 Windows 배포물은 제거했다.
 이번 소유 임시/빌드 도구 폴더 9개를 정리하고 증거는 artifacts/release-3.0.15에 남겼다.
 실사용 전환/사용 확인·GitHub 공개는 진행하지 않았다. 상세 결과와 Windows 검사 실패는 87번을 따른다.
+
+후속 사용자 GitHub 푸시·main 병합·릴리스 ZIP 업로드 요청으로 3.0.15 공개까지 승인받아 완료했다.
+검증 소스 42b36f0을 main에 fast-forward 반영하고 v3.0.15 annotated tag와 atomic push했다.
+2026-11-05 15:51:54 KST에 release ID434867546을 최신 정식으로 공개했다.
+Python ZIP/개별 체크섬/SHA256SUMS/manifest 4개 서버 digest와 공개 무인증 다운로드 해시를 대조했다.
+기존 3.0.14 릴리스/자산은 보존했고 실제 사용자 자료/실행 폴더는 교체하지 않았다.
+최신 공개 결과는 87번을 따른다. 태그/ZIP은 검증 소스에 유지하고 공개 결과만 문서 후속 커밋으로 main에 기록한다.

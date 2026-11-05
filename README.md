@@ -8,8 +8,12 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 3.0.15는 U39 창 닫기/작업 종료 교착을 개선한다.
 설계는 [85번](docs/85-thread-shutdown-deadlock-design.md), 결과/한계는
-[86번](docs/86-thread-shutdown-deadlock-results.md)을 따른다. 로컬 배포물·커밋 마감은
-[87번](docs/87-release-checklist.md)에 기록한다. GitHub 공개와 실사용 실행 폴더 교체는 별도다.
+[86번](docs/86-thread-shutdown-deadlock-results.md)을 따른다. 배포물·커밋/태그·공개 결과는
+[87번](docs/87-release-checklist.md)에 기록한다. 실사용 실행 폴더는 교체하지 않았다.
+
+최신 정식 버전은 [OfficeFlow 3.0.15](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.15)다.
+[Python ZIP 다운로드](https://github.com/spelld77/officeflow-v3/releases/download/v3.0.15/OfficeFlow-Python-3.0.15.zip)를
+별도 폴더에 풀고 `setup-officeflow-python.cmd` → `run-officeflow-python.cmd` 순서로 사용한다.
 
 - 단계: Phase 8 완료
 - 버전: OfficeFlow 3.0.15

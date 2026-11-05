@@ -1,6 +1,6 @@
-# OfficeFlow 3.0.15 로컬 Python 릴리스 체크리스트
+# OfficeFlow 3.0.15 Python 릴리스 체크리스트
 
-작성일: 2026-11-05 (Asia/Seoul). 상태: **Python ZIP 생성·격리 검증 완료. 이 문서를 포함한 소스 커밋으로 마감한다.**
+작성일: 2026-11-05 (Asia/Seoul). 상태: **Python ZIP 생성·격리 검증·main 반영·태그·정식 릴리스 공개·다운로드 검증 완료.**
 
 ## 최종 범위와 보호
 
@@ -88,3 +88,26 @@ manifest payload는 Python ZIP/개별 체크섬 2개이며 최종 dist에는 위
 XML/로그/작은 PNG·검증기·audit JSON은 보존했다. GitHub 공개·회사 PC 장시간 사용·별도 native 자원 plateau·
 실제 사용자 자료 확인은 미수행이다. 현재 3.0.14를 종료할 필요는 없으며 새 Python 버전으로 전환하기
 직전에만 전체 백업을 만들고 트레이에서 완전히 종료한다.
+
+## GitHub 공개 마감 (후속 요청)
+
+로컬 커밋 후 사용자 요청으로 브랜치 푸시를 완료했고, 이어진 main 병합·릴리스 ZIP 업로드 요청에 따라
+아래 공개 작업을 완료했다. 앞선 GitHub 제외 범위/미수행 표현은 로컬 마감 당시 상태다.
+
+- 원격 main `218908ef55f39193792298391a87f40a9417e025`에서 검증한 소스
+  `42b36f0adf0952aae3c05c6cf1509a95ae31c108`로 fast-forward 반영했다.
+  main과 annotated tag v3.0.15를 atomic push했으며 태그 객체는 `b22b4e88d57a3eb52d8418528828dd6a2f4808aa`다.
+- [OfficeFlow 3.0.15](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.15)를
+  2026-11-05 15:51:54 KST(06:51:54 UTC)에 최신 정식 릴리스로 공개했다.
+  release ID `434867546`, draft/prerelease=false, 업로드 자산은 최종 표의 Python 관련 4개다.
+- 초안에서 이름·개수·uploaded 상태·크기·GitHub SHA-256 digest를 대조한 뒤 공개했다.
+  자산 4개를 인증 없이 공개 URL로 다시 다운로드해 로컬 해시와 모두 일치함을 확인했다.
+  비인증 API는 공유 IP 요청 제한이 있어 최신 릴리스 메타데이터는 기존 Git 인증으로 확인했다.
+- 기존 v3.0.14 release ID `424397261`와 자산 6개를 보존했다. 실사용 실행 폴더/자료는 변경하지 않았다.
+- 기록: artifacts/release-3.0.15의 remote-prepublication.json, github-assets-verified.json,
+  github-published.json, publication-verification.json, public-verification.json.
+  공개 다운로드용 소유 임시 폴더 1개를 안전 경로 확인 후 제거했다.
+
+태그/배포 ZIP은 검증한 소스 커밋 `42b36f0`에 유지한다. 온라인 안내와 공개 결과는 문서 전용 후속
+커밋으로 main에 기록하며 배포물을 다시 생성하지 않는다. GitHub가 자동 제공하는 source code ZIP과
+실사용용 `OfficeFlow-Python-3.0.15.zip`을 구분해 릴리스 본문에 안내했다.

@@ -29,5 +29,6 @@ Python ZIP에는 Python/실행 라이브러리를 포함하지 않으므로 최�
 모든 Qt/native 오류나 강제 종료를 방지한다고 보장하지 않습니다.
 
 3.0.15부터 Python ZIP만 만듭니다. EXE·설치본·Windows ZIP은 다시 요청하실 때까지 만들지 않습니다.
-이번 마감은 로컬 Python ZIP과 소스 커밋입니다. GitHub 공개·실사용 폴더 교체는 별도입니다.
+소스의 main 반영·v3.0.15 태그·[GitHub 정식 릴리스 공개](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.15)를 완료했습니다.
+공개 Python ZIP과 체크섬/manifest 4개의 다운로드·해시를 대조했습니다. 실사용 폴더 교체는 별도입니다.
 상세 결과: [구현 검사](86-thread-shutdown-deadlock-results.md), [배포 체크리스트](87-release-checklist.md).
