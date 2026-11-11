@@ -5,7 +5,17 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSignalBlocker, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSignalBlocker,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -765,6 +775,17 @@ class CalendarPage(QFrame):
         self._alarm_focus_date: date | None = None
         self._reminder_details: ReminderGroupDetailsDialog | None = None
         self._selected_task: ScheduledTask | None = None
+        self._selection_intent: tuple[int | None, datetime | None] | None = None
+        self._requested_selection: tuple[int | None, datetime | None] | None = None
+        self._loading_day = False
+        self._render_context: tuple[object, ...] | None = None
+        self._last_refresh: tuple[object, ...] | None = None
+        self._refreshing = False
+        self._refresh_pending = False
+        self._stopping = False
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._refresh_day_list)
         self._snoozed_until: dict[tuple[int, datetime | None], datetime] = {}
         self._compact = False
         self.mode = "month"
@@ -957,6 +978,10 @@ class CalendarPage(QFrame):
         if mode == "alarms":
             self._return_mode = self.mode
         self.mode = mode
+        self._selection_intent = self._requested_selection = None
+        self._loading_day = False
+        self._last_refresh = None
+        self._render_context = None
         self.calendar_splitter.setVisible(mode == "month")
         self.summary_label.hide()
         self.day_view.set_day(self.selected_date)
@@ -1003,12 +1028,19 @@ class CalendarPage(QFrame):
         return self.calendar.selected_date
 
     def set_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
+        self._loading_day = False
         self._tasks = tasks
         self._day_tasks = tasks_for_date(tasks, self.selected_date, self._timezone)
         self.calendar.set_tasks(tasks)
         self._refresh_day_list()
 
     def set_overview(self, overview: CalendarOverview) -> None:
+        current = self.day_list.currentItem()
+        if not self._loading_day:
+            self._selection_intent = (
+                self._row_key(current.data(Qt.ItemDataRole.UserRole)) if current else None
+            )
+        self._loading_day = True
         self._tasks = overview.preview_tasks
         self._day_tasks = ()
         self.calendar.set_overview(overview)
@@ -1018,6 +1050,7 @@ class CalendarPage(QFrame):
         self._refresh_day_list(preserve_selection=True)
 
     def set_day_tasks(self, tasks: tuple[ScheduledTask, ...]) -> None:
+        self._loading_day = False
         self._day_tasks = tasks
         self._refresh_day_list()
 
@@ -1205,6 +1238,8 @@ class CalendarPage(QFrame):
                 return
 
     def _select_date(self, selected: date, *, focus_alarm: bool = False) -> None:
+        self._selection_intent = self._requested_selection = None
+        self._loading_day = False
         self._alarm_focus_date = selected if focus_alarm else None
         if (selected.year, selected.month) != self.calendar.displayed_month:
             self._set_month_and_date(selected)
@@ -1218,6 +1253,8 @@ class CalendarPage(QFrame):
         self.dateSelected.emit(selected)
 
     def _set_month_and_date(self, selected: date) -> None:
+        self._selection_intent = self._requested_selection = None
+        self._loading_day = False
         self.calendar.set_month(selected.year, selected.month)
         self.calendar.set_selected_date(selected)
         self.day_view.set_day(selected)
@@ -1237,20 +1274,49 @@ class CalendarPage(QFrame):
         )
         self._fit_toolbar_controls()
 
+    @staticmethod
+    def _row_key(value: object) -> tuple[int | None, datetime | None] | None:
+        if isinstance(value, ReminderGroup):
+            return value.key
+        if isinstance(value, ScheduledTask):
+            return (value.id, value.occurrence_start if value.task.recurrence_rule else None)
+        return None
+
     def _refresh_day_list(self, *, preserve_selection: bool = False) -> None:
+        if self._stopping:
+            return
+        if self._refreshing:
+            self._refresh_pending = True
+            return
+        self._refreshing = True
+        self._refresh_pending = False
+        requested = self._requested_selection
+        try:
+            self._apply_day_list(preserve_selection=preserve_selection)
+        except Exception:
+            self._last_refresh = None
+            self._refresh_pending = False
+            self._refresh_timer.stop()
+            if self._requested_selection is None:
+                self._requested_selection = requested
+            raise
+        finally:
+            self._refreshing = False
+            if self._refresh_pending and not self._stopping:
+                self._refresh_timer.start(0)
+
+    def _apply_day_list(self, *, preserve_selection: bool) -> None:
         if self.mode != "month":
+            self._last_refresh = None
             self._update_month_label()
             return
-        selected_key = (
-            (
-                self._selected_task.id,
-                self._selected_task.occurrence_start
-                if self._selected_task.task.recurrence_rule
-                else None,
-            )
-            if self._selected_task is not None
-            else None
+        current = self.day_list.currentItem()
+        selected_key = self._requested_selection or (
+            self._row_key(current.data(Qt.ItemDataRole.UserRole))
+            if current
+            else self._selection_intent
         )
+        previous_task = self._selected_task
         result = (
             self._day_alarm_override[1]
             if self._day_alarm_override and self._day_alarm_override[0] == self.selected_date
@@ -1258,54 +1324,100 @@ class CalendarPage(QFrame):
         )
         alarms = result.for_date(self.selected_date, self._timezone)
         items = tuple(sorted(merge_day_reminders(self._day_tasks, alarms), key=calendar_row_key))
-        scroll = self.day_list.verticalScrollBar().value()
-        anchor = self.day_list.itemAt(QPoint(2, 2)) if preserve_selection else None
-        anchor_data = anchor.data(Qt.ItemDataRole.UserRole) if anchor else None
-        anchor_key = (
-            (anchor_data.id, anchor_data.occurrence_start) if anchor_data is not None else None
+        context = (self.selected_date, self._timezone, self.mode)
+        height = self._day_row_height()
+        rows = tuple(
+            (
+                task,
+                self._group_row_text(task)
+                if isinstance(task, ReminderGroup)
+                else self._day_item_text(task),
+                group_tooltip(task, self._timezone)
+                if isinstance(task, ReminderGroup)
+                else self._day_item_text(task),
+                "#7D899E"
+                if calendar_state(task) in {CalendarState.COMPLETED, CalendarState.INACTIVE}
+                else "#172033",
+            )
+            for task in items
         )
+        signature = (
+            context,
+            rows,
+            result.complete,
+            height,
+            self._compact,
+            self.day_list.font().toString(),
+            self.day_list.devicePixelRatioF(),
+            datetime.now(ZoneInfo(self._timezone)).date(),
+            self._loading_day,
+        )
+        if signature == self._last_refresh and self._requested_selection is None:
+            self._focus_pending_alarm()
+            return
+        requested = self._requested_selection
+        self._requested_selection = None
+        scroll = self.day_list.verticalScrollBar().value()
+        anchor = self.day_list.itemAt(QPoint(2, 2))
+        anchor_key = self._row_key(anchor.data(Qt.ItemDataRole.UserRole)) if anchor else None
         anchor_offset = self.day_list.visualItemRect(anchor).top() if anchor else 0
+        keys = tuple(self._row_key(task) for task in items)
+        old_keys = tuple(
+            self._row_key(self.day_list.item(i).data(Qt.ItemDataRole.UserRole))
+            for i in range(self.day_list.count())
+        )
+        reusable = (
+            context == self._render_context
+            and keys == old_keys
+            and all(key is not None and key[0] is not None for key in keys)
+            and len(set(keys)) == len(keys)
+        )
+        layout_changed = (
+            not reusable or self._last_refresh is None or self._last_refresh[3:7] != signature[3:7]
+        )
         with QSignalBlocker(self.day_list):
-            self.day_list.clear()
-            for task in items:
-                text = (
-                    self._group_row_text(task)
-                    if isinstance(task, ReminderGroup)
-                    else self._day_item_text(task)
-                )
-                item = QListWidgetItem(text)
-                item.setToolTip(
-                    group_tooltip(task, self._timezone) if isinstance(task, ReminderGroup) else text
-                )
-                item.setSizeHint(QSize(0, self._day_row_height()))
-                item.setData(Qt.ItemDataRole.UserRole, task)
-                closed = calendar_state(task) in {CalendarState.COMPLETED, CalendarState.INACTIVE}
-                item.setForeground(QColor("#7D899E" if closed else "#172033"))
-                self.day_list.addItem(item)
-                key = (
-                    task.key
-                    if isinstance(task, ReminderGroup)
-                    else (task.id, task.occurrence_start if task.task.recurrence_rule else None)
-                )
-                matched = key == selected_key and selected_key is not None
-                if matched:
-                    self.day_list.setCurrentItem(item)
+            if not reusable:
+                self.day_list.clear()
+            for index, (task, text, tooltip, color) in enumerate(rows):
+                item = self.day_list.item(index) if reusable else QListWidgetItem()
+                if item.text() != text:
+                    item.setText(text)
+                if item.toolTip() != tooltip:
+                    item.setToolTip(tooltip)
+                if item.sizeHint() != QSize(0, height):
+                    item.setSizeHint(QSize(0, height))
+                    layout_changed = True
+                if item.data(Qt.ItemDataRole.UserRole) != task:
+                    item.setData(Qt.ItemDataRole.UserRole, task)
+                if item.foreground().color() != QColor(color):
+                    item.setForeground(QColor(color))
+                if not reusable:
+                    self.day_list.addItem(item)
+            # Explicit clicks may select a new row even when every payload is unchanged.
+            if (
+                context == self._render_context or requested is not None
+            ) and selected_key is not None:
+                for index, key in enumerate(keys):
+                    if key == selected_key:
+                        target = self.day_list.item(index)
+                        if self.day_list.currentItem() is not target:
+                            self.day_list.setCurrentItem(target)
+                        break
         current = self.day_list.currentItem()
-        if current is not None or not preserve_selection:
-            self._on_day_item_changed(current, None)
-        self.day_list.verticalScrollBar().setValue(scroll)
-        if anchor_key is not None:
-            for row in range(self.day_list.count()):
-                candidate = self.day_list.item(row)
-                data = candidate.data(Qt.ItemDataRole.UserRole)
-                if (data.id, data.occurrence_start) == anchor_key:
-                    self.day_list.doItemsLayout()
-                    self.day_list.scrollToItem(
-                        candidate, QAbstractItemView.ScrollHint.PositionAtTop
-                    )
-                    bar = self.day_list.verticalScrollBar()
-                    bar.setValue(bar.value() - anchor_offset)
-                    break
+        action_task = self._action_task(current.data(Qt.ItemDataRole.UserRole)) if current else None
+        if current is not None:
+            self._selection_intent = self._row_key(current.data(Qt.ItemDataRole.UserRole))
+        elif not self._loading_day and not preserve_selection:
+            self._selection_intent = None
+        # Preserve the logical target through the overview -> day query gap.
+        retain_intent = current is None and (self._loading_day or preserve_selection)
+        if not retain_intent:
+            self._selected_task = action_task
+            if requested is not None or action_task != previous_task:
+                if action_task is not None:
+                    self.taskSelected.emit(action_task)
+                else:
+                    self.taskSelectionCleared.emit()
         self.day_label.setText(
             f"{self.selected_date.month}월 {self.selected_date.day}일({WEEKDAYS[self.selected_date.weekday()]})"
         )
@@ -1352,6 +1464,25 @@ class CalendarPage(QFrame):
         )
         self._update_action_buttons()
         self._update_day_list_minimum_height()
+        if layout_changed:
+            self.day_list.doItemsLayout()
+            anchor_target = (
+                next(
+                    (self.day_list.item(i) for i, key in enumerate(keys) if key == anchor_key), None
+                )
+                if anchor_key is not None
+                else None
+            )
+            if anchor_target is not None:
+                self.day_list.scrollToItem(
+                    anchor_target, QAbstractItemView.ScrollHint.PositionAtTop
+                )
+                bar = self.day_list.verticalScrollBar()
+                bar.setValue(bar.value() - anchor_offset)
+            else:
+                self.day_list.verticalScrollBar().setValue(scroll)
+        self._render_context = context
+        self._last_refresh = signature
         self._focus_pending_alarm()
 
     def _update_more_hint(self, item_count: int) -> None:
@@ -1367,14 +1498,14 @@ class CalendarPage(QFrame):
         span = task_date_span(task, self._timezone)
         if span is not None and not (span[0] <= self.selected_date <= span[1]):
             self.calendar.set_selected_date(span[0])
-        self._selected_task = task
+        self._requested_selection = self._row_key(task)
         self._refresh_day_list()
-        self.taskSelected.emit(task)
 
     def _on_day_item_changed(
         self, current: QListWidgetItem | None, _previous: QListWidgetItem | None
     ) -> None:
         task = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+        self._selection_intent = self._row_key(task)
         self._selected_task = self._action_task(task)
         self.reminder_details_button.setEnabled(isinstance(task, ReminderGroup))
         self._update_action_buttons()
@@ -1473,6 +1604,9 @@ class CalendarPage(QFrame):
             self.taskActivated.emit(task)
 
     def shutdown(self) -> None:
+        self._stopping = True
+        self._refresh_pending = False
+        self._refresh_timer.stop()
         request_shutdown(self.day_view)
         if self._reminder_details:
             self._reminder_details.reject()
