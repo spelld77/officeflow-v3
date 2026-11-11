@@ -87,6 +87,7 @@ from officeflow.presentation.attachment_browser import (
     AttachmentDetailLabel,
     AttachmentSourceController,
 )
+from officeflow.presentation.attachment_drag import AttachmentDragController
 from officeflow.presentation.attachment_drop import AttachmentDropRouter
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.attachment_import import import_start_directory
@@ -187,6 +188,13 @@ class AttachmentListWidget(QListWidget):
         super().__init__(parent)
         self.setAcceptDrops(False)
         self.drop_router: AttachmentDropRouter | None = None
+        self.drag_controller: AttachmentDragController | None = None
+        self.setDragEnabled(True)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+
+    def startDrag(self, supportedActions: Qt.DropAction) -> None:
+        if self.drag_controller:
+            self.drag_controller.start_drag()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if self.drop_router:
@@ -373,6 +381,7 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
         self._record_service = record_service
         self._attachment_service = attachment_service
         self._attachment_export_service = attachment_export_service
+        self._drag_controller: AttachmentDragController | None = None
         self._export_controller = (
             AttachmentExportController(
                 attachment_export_service, self, initial_directory=attachment_export_directory
@@ -1235,6 +1244,7 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
         self.tabs.currentChanged.connect(
             lambda _index: self._attachment_drop_router.clear_highlight()
         )
+        self.tabs.currentChanged.connect(lambda _index: self._sync_drag_selection())
         self.attachment_warning = WrappingLabel()
         self.attachment_warning.setStyleSheet("color:#9A3412; background:#FFF7ED;")
         self.attachment_warning.hide()
@@ -1405,7 +1415,32 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
         focus_widgets.append(self.more_attachment_button)
         for first, second in pairwise(focus_widgets):
             QWidget.setTabOrder(first, second)
+        self.attachment_drag_status = QLabel(body)
+        self.attachment_drag_status.setObjectName("attachmentDragStatus")
+        self.attachment_drag_status.setWordWrap(True)
+        self.attachment_drag_status.setStyleSheet("color:#5273A1; background:#FFFFFF;")
+        self.attachment_drag_status.hide()
+        layout.insertWidget(layout.indexOf(self.attachment_stack), self.attachment_drag_status)
+        if self._attachment_export_service:
+            self._drag_controller = AttachmentDragController(
+                self._attachment_export_service,
+                self,
+                self.attachment_list,
+                self.attachment_drag_status,
+                lambda: tuple(self._attachments_by_id[i] for i in self._selected_attachment_ids()),
+                lambda: tuple(FileReference.attachment(i) for i in self._selected_attachment_ids()),
+                lambda: (
+                    not self._owner_shutting_down
+                    and self.current_tab_key == "attachments"
+                    and not self._attachment_filter_busy()
+                ),
+            )
+            self.attachment_list.drag_controller = self._drag_controller
         return tab
+
+    def _sync_drag_selection(self) -> None:
+        if self._drag_controller:
+            self._drag_controller.select()
 
     def _refresh_checklist(self) -> None:
         items = self._record_service.checklist_for_task(self._task_id)
@@ -1627,6 +1662,8 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
                 self.tabs.setCurrentIndex(index)
 
     def _refresh_attachments(self, *, metadata_only: bool = False) -> None:
+        if self._drag_controller:
+            self._drag_controller.invalidate()
         if self._attachment_service is None:
             return
         attachments = self._attachment_service.attachment_metadata_for_task(self._task_id)
@@ -2052,7 +2089,7 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
         listing.setMovement(QListView.Movement.Static)
         listing.setWordWrap(False)
         listing.setUniformItemSizes(True)
-        listing.setDragEnabled(False)
+        listing.setDragEnabled(self._drag_controller is not None)
         listing.setAcceptDrops(True)
         listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         listing.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
@@ -2525,6 +2562,8 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
         if self._owner_shutting_down:
             return
         self._owner_shutting_down = True
+        if self._drag_controller:
+            self._drag_controller.request_shutdown()
         if hasattr(self, "attachment_detail"):
             self.attachment_detail.setText("작업을 안전하게 마무리한 뒤 닫습니다…")
         if hasattr(self, "_attachment_drop_router"):
@@ -2684,6 +2723,7 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
     ) -> None:
         selected = self._selected_attachment_items()
         self._update_image_preview()
+        self._sync_drag_selection()
         count = len(selected)
         self.preserve_view_button.hide()
         self.attachment_warning.hide()

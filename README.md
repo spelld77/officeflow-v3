@@ -6,17 +6,18 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 ## 현재 상태
 
-3.0.16은 달력 자동 갱신에서 불필요한 목록 재생성과 선택 복원을 줄인다.
-설계는 [88번](docs/88-calendar-refresh-stability-design.md), 결과/한계는
-[89번](docs/89-calendar-refresh-stability-results.md), 배포 결과는
-[90번](docs/90-release-checklist.md)을 따른다. native 잠금 원인은 미확정이다.
+3.0.17은 선택한 첨부를 탐색기·바탕화면으로 끌어 복사하는 기능을 추가한다.
+선택 시 미리 준비한 독립 사본만 전달하며 내부 첨부를 유지한다.
+설계는 [91번](docs/91-attachment-drag-copy-design.md), 결과/한계는
+[92번](docs/92-attachment-drag-copy-results.md), 배포 결과는
+[93번](docs/93-release-checklist.md)을 따른다. 실제 회사 환경의 드롭은 별도 확인이다.
 
-최신 정식 버전은 [OfficeFlow 3.0.16](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.16)다.
-[Python ZIP 다운로드](https://github.com/spelld77/officeflow-v3/releases/download/v3.0.16/OfficeFlow-Python-3.0.16.zip)를
+최신 정식 버전은 [OfficeFlow 3.0.17](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.17)다.
+[Python ZIP 다운로드](https://github.com/spelld77/officeflow-v3/releases/download/v3.0.17/OfficeFlow-Python-3.0.17.zip)를
 별도 폴더에 풀고 `setup-officeflow-python.cmd` → `run-officeflow-python.cmd` 순서로 사용한다.
 
 - 단계: Phase 8 완료
-- 버전: OfficeFlow 3.0.16
+- 버전: OfficeFlow 3.0.17
 - 구현 상태: Python ZIP 실행·합성 자료 보존 검증을 마친 Windows 데스크톱 앱
 - 주요 개선: 첨부 종류 필터·작업본 출처·창 크기 기억·외부 폴더 연결·HTML/Excel 업무 보관·간편 시간 입력·캡처 이미지·썸네일
 - 대상 플랫폼: Windows 10/11
@@ -28,6 +29,12 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 DB0017 색인만 추가하며 전체 백업 v3와 기존 업무·첨부 내용을 유지한다.
 기존 DB는 첫 실행에서 보호 사본을 만든 뒤 필요한 이행을 순서대로 적용한다.
 0017 DB와 이 DB가 포함된 백업은 **3.0.14 이상**에서 사용한다. 구버전 복귀에는 업데이트 전 자료가 필요하다.
+
+## 3.0.17 주요 개선
+
+첨부 목록·썸네일에서 여러 파일을 선택하면 사본을 미리 준비한다. 준비 완료 뒤 탐색기·바탕화면으로
+끌어 복사하며, 준비 전 끌었다면 완료 뒤 다시 끈다. 준비 시점 내용이므로 외부 편집 후에는 재선택한다.
+[3.0.17 릴리스 노트](docs/release-notes-3.0.17.md)에 사용 방법과 한계를 안내한다.
 
 ## 3.0.16 주요 개선
 
@@ -240,7 +247,7 @@ EXE·설치본·EXE가 들어 있는 Windows ZIP은 별도 요청 전에는 생�
 ## Python 실행 모드
 
 서명되지 않은 PyInstaller 실행 파일을 제한하지만 Python 실행은 허용된 PC에서는 별도의
-Python 모드를 사용할 수 있다. `dist/python/OfficeFlow-Python-3.0.16.zip`을 별도 폴더에 풀고
+Python 모드를 사용할 수 있다. `dist/python/OfficeFlow-Python-3.0.17.zip`을 별도 폴더에 풀고
 Python 3.12 64비트가 설치된 상태에서 최초 한 번
 `setup-officeflow-python.cmd`를 실행하고, 이후 `run-officeflow-python.cmd`를 더블클릭한다.
 

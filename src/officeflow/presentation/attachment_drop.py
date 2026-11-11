@@ -64,6 +64,10 @@ class AttachmentDropRouter(QObject):
             return True
         if not isinstance(event, (QDragEnterEvent, QDragMoveEvent, QDropEvent)):
             return False
+        source = event.source()
+        if isinstance(source, QWidget) and source.property("outgoingAttachmentDrag"):
+            event.ignore()
+            return True
         sources = tuple(
             Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()
         )
