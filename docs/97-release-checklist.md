@@ -14,7 +14,7 @@
 
 ## 검증·공개 결과
 
-로컬 패키지 검증 완료. 원격 결과는 공개 완료 후 기록한다.
+로컬 패키지 검증·커밋/main·태그·GitHub 정식 공개 완료. 실사용 전환/사용 확인은 별도다.
 
 - 이전 기능 검사 근거: U43 고유 66개, 정렬 3개, 안내 제거 3개. 단일 전체 회귀로 합산하지 않는다.
 - 버전/패키지 관련 9개 통과, Ruff·변경 Python 15개 format check·mypy 소스 167개 통과.
@@ -47,3 +47,18 @@ python-verification.log, python-verification.json, final-assets.json. 운영 프
 | SHA256SUMS.txt | 217 | `e6bfc0474b40f0230d954433d9cec5ca7f4ff42e8178316418eb1eb9d9987ed9` |
 
 Python ZIP·개별 체크섬·SHA256SUMS·manifest 4개만 배포한다.
+
+## GitHub 공개 마감
+
+- 검증 소스 `88b823ca67f128931b9c9fc270142b3acbd1d1b4`을 main에 fast-forward 반영했다.
+  main·codex/folder-rename-and-sort-release·annotated v3.0.18 태그를 atomic push했다.
+- [OfficeFlow 3.0.18](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.18)을
+  2026-11-11 17:51:30 KST에 최신 정식으로 공개했다. release ID `441430484`, draft/prerelease=false.
+- 자산 4개의 이름/크기/uploaded 상태/서버 SHA-256 digest를 초안에서 대조하고,
+  공개 후 인증 없는 실제 다운로드 해시도 모두 일치함을 확인했다.
+- 기존 3.0.17 release ID `441340360`과 자산 4개를 보존했다. 실사용 폴더/DB/자료는 교체하지 않았다.
+- 증거: github-assets-verified.json, github-published.json, publication-verification.json,
+  public-verification.json. 태그/ZIP은 검증 소스에 유지하고 공개 결과만 문서 후속 커밋으로 main에 기록한다.
+
+이번 소유 추출/렌더링/공개 다운로드 fixture를 경로 확인 후 정리하고, 최종 dist·이전 배포물 사본·
+검사 XML/JSON/로그·작은 캡처는 보존한다. 새 버전 실행 직전에 전체 백업·구버전 완전 종료가 필요하다.
