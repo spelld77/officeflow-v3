@@ -15,7 +15,7 @@ main 반영·태그·GitHub 릴리스 업로드를 진행한다. 기존 사용�
 
 ## 진행 상태
 
-로컬 패키지 검증 완료. 원격 공개 결과는 후속 기록한다.
+로컬 패키지 검증·커밋/main 반영·태그·GitHub 정식 공개 완료. 실제 사용 확인은 별도다.
 
 - 버전/패키지 고유 9개 통과: 최초 8개 통과/도움말 버전 검사 1개 실패 후 안내를 3.0.16으로 수정해 해당 1개 통과.
 - Ruff·format check, mypy 소스 164개, diff 공백 검사 통과.
@@ -42,3 +42,18 @@ python-verification-final.log, python-verification.json, final-assets.json에 �
 
 Python ZIP·개별 체크섬·SHA256SUMS·manifest 4개만 배포한다. Windows 버전 메타데이터는
 정합성만 갱신했으며 EXE/설치본/Windows ZIP은 생성하지 않았다.
+
+## GitHub 공개 마감
+
+- 검증 소스 `e37a679af22ac71d1ec27af4c6378fbdc2c1ab77`을 main에 fast-forward 반영했다.
+  main·codex/calendar-refresh-stability·annotated v3.0.16 태그를 atomic push했다.
+- [OfficeFlow 3.0.16](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.16)을
+  2026-11-11 15:24:03 KST에 최신 정식으로 공개했다. release ID `441307650`, draft/prerelease=false.
+- 초안 업로드 후 자산 4개의 이름/개수/크기/uploaded 상태/서버 SHA-256 digest를 대조했다.
+  공개 후 인증 없는 다운로드 4개의 실제 바이트 해시도 모두 일치했다.
+- 기존 3.0.15 release ID `434867546`과 자산 4개를 보존했다. 사용자 실행 폴더/자료는 변경하지 않았다.
+- 증거: github-assets-verified.json, github-published.json, publication-verification.json,
+  public-verification.json. 태그/ZIP은 검증 소스에 유지하며 공개 결과만 문서 후속 커밋으로 main에 기록한다.
+
+합성 자료/추출 환경/공개 다운로드의 이번 소유 임시 폴더를 경로 확인 후 정리하고,
+최종 dist·이전 배포물 사본·검사 XML/JSON/로그는 보존한다.

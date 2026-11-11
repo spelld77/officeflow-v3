@@ -1457,3 +1457,6 @@ EXE/설치/ZIP·커밋·GitHub·실사용 폴더 교체는 별도 요청 때 진
 최신 결과는 [89번](89-calendar-refresh-stability-results.md)을 따른다. 고유 관련 91개 통과,
 Windows 100/150/200% 각 24/10/10개 통과이며 중복 실행은 합산하지 않는다.
 native 원인 확정·실사용 확인은 별도다. 운영 환경·버전·배포/Git는 변경하지 않았다.
+
+후속 GitHub 반영 요청으로 3.0.16 Python ZIP·커밋/main·태그·정식 릴리스를 공개했다.
+최신 결과/해시·미검증은 [90번](90-release-checklist.md)을 따른다. 실사용 전환은 별도다.
