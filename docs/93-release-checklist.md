@@ -14,7 +14,7 @@
 
 ## 검증·공개 결과
 
-로컬 패키지 검증 완료. 원격 공개 결과는 완료 후 별도 기록한다.
+로컬 패키지 검증·커밋/main 반영·태그·GitHub 정식 공개 완료. 사용자 실제 사용 확인은 별도다.
 
 - 버전/패키지 관련 9개 통과(packaging.xml), Ruff·변경 Python 7개 format check·mypy 소스 166개 통과.
 - 최종 ZIP payload 198개 소스 바이트/CRC 대조, 추출 패키지/메타데이터 버전 3.0.17 확인.
@@ -42,3 +42,18 @@ python-verification.log, python-verification.json, final-assets.json. 운영 프
 | SHA256SUMS.txt | 217 | `161c131bd9617a6adc9d411497fa616247571222f191c0d1cff8b07bb24b0572` |
 
 최종 dist에는 Python ZIP·개별 체크섬·SHA256SUMS·manifest 4개만 있다.
+
+## GitHub 공개 마감
+
+- 검증 소스 `f1fe1b73baa6f3cfe8b91490a226e95fa1223bc5`을 main에 fast-forward 반영했다.
+  main·codex/attachment-drag-copy·annotated v3.0.17 태그를 atomic push했다.
+- [OfficeFlow 3.0.17](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.17)을
+  2026-11-11 16:13:22 KST에 최신 정식으로 공개했다. release ID `441340360`, draft/prerelease=false.
+- 초안 업로드에서 자산 4개의 이름/개수/크기/uploaded 상태/서버 SHA-256 digest를 대조했다.
+  공개 후 인증 없이 다운로드한 파일 4개의 실제 해시도 모두 일치했다.
+- 기존 3.0.16 release ID `441307650`과 자산 4개를 보존했다. 실사용 실행 폴더/자료는 변경하지 않았다.
+- 증거: github-assets-verified.json, github-published.json, publication-verification.json,
+  public-verification.json. 태그/ZIP은 검증 소스에 유지하고 공개 결과만 문서 후속 커밋으로 main에 기록한다.
+
+이번 소유 추출/렌더링/공개 다운로드 fixture는 경로 확인 후 정리한다.
+최종 dist·기존 배포물 사본·검사 XML/JSON/로그·작은 캡처는 보존한다.
