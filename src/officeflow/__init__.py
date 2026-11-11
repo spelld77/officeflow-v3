@@ -1,3 +1,3 @@
 """OfficeFlow application package."""
 
-__version__ = "3.0.17"
+__version__ = "3.0.18"

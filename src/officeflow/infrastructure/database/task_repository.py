@@ -248,7 +248,11 @@ class SqlAlchemyTaskRepository:
         statement: Select[tuple[TaskRecord, bool]] = (
             select(TaskRecord, attachment_exists)
             .where(*predicates)
-            .order_by(*self._order_by(query.sort))
+            .order_by(
+                *self._order_by(
+                    query.sort, latest_first=query.view in {TaskView.ALL, TaskView.UPCOMING}
+                )
+            )
         )
         if query.offset:
             statement = statement.offset(query.offset)
@@ -1005,7 +1009,7 @@ class SqlAlchemyTaskRepository:
         ]
 
     @staticmethod
-    def _order_by(sort: TaskSort) -> tuple[Any, ...]:
+    def _order_by(sort: TaskSort, *, latest_first: bool = False) -> tuple[Any, ...]:
         pinned_first = TaskRecord.is_pinned.desc()
         priority_rank = case(
             {
@@ -1024,6 +1028,8 @@ class SqlAlchemyTaskRepository:
             return (pinned_first, TaskRecord.updated_at.desc(), TaskRecord.id.desc())
         if sort is TaskSort.TITLE:
             return (pinned_first, TaskRecord.title.collate("NOCASE"), TaskRecord.id)
+        if latest_first:
+            schedule = (TaskRecord.starts_at.is_(None), TaskRecord.starts_at.desc())
         return (pinned_first, *schedule, priority_rank, TaskRecord.title, TaskRecord.id)
 
     @staticmethod

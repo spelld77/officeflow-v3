@@ -66,3 +66,7 @@ controller는 ShutdownOwner/ShutdownScope로 worker를 소유하고 연결은 �
 가능하면 별도 작은 native 대상 창으로 URL/Copy 전달을 확인하며 탐색기 실사용·회사 DRM/보안 정책은 별도 상태로 기록한다.
 밝은 스타일의 준비 상태/좁은 창/목록·썸네일 캡처와 관련 UI 검사를 수행한다.
 모든 앱/DB 검증은 명시적인 별도 OFFICEFLOW_DATA_DIR/tmp_path로 제한한다.
+
+
+사용 확인 후 안내 줄 때문에 버튼이 밀린다는 요청으로 상시 준비/완료 줄을 제거한다.
+준비 전 드래그/시작 실패에만 레이아웃 공간을 쓰지 않는 짧은 tooltip을 표시한다.

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from officeflow.application.folder_links import FolderLink, FolderLinkService
+from officeflow.application.folder_links import FolderLink, FolderLinkService, FolderRelinkCandidate
 from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 from officeflow.presentation.compact_labels import CompactLabel
 from officeflow.presentation.detail_widgets import CollapsibleText, show_text_details
@@ -48,6 +48,9 @@ class FolderLinksPanel(ShutdownOwner, QWidget):
         self._opening = False
         self._shutting_down = False
         self._links: dict[int, FolderLink] = {}
+        self._candidate: FolderRelinkCandidate | None = None
+        self._choice_dialog: QMessageBox | None = None
+        self._updating_link = False
         layout = QVBoxLayout(self)
         description = QLabel("외부 폴더의 파일은 OfficeFlow 백업에 포함되지 않습니다.")
         description.setWordWrap(True)
@@ -94,7 +97,7 @@ class FolderLinksPanel(ShutdownOwner, QWidget):
         layout.addWidget(
             CollapsibleText(
                 "폴더 연결 안내",
-                "목록의 이름만 바꾸며 실제 폴더는 바꾸지 않습니다. OfficeFlow는 폴더의 파일을 복사·삭제하거나 관리하지 않습니다. 위치가 바뀌면 폴더 다시 지정을 사용하세요.",
+                "목록의 이름만 바꾸며 실제 폴더는 바꾸지 않습니다. OfficeFlow는 폴더의 파일을 복사·삭제하거나 관리하지 않습니다. 새로 연결하거나 다시 지정한 로컬 NTFS 폴더는 같은 상위 폴더에서 이름이 바뀌면 후보를 확인할 수 있습니다. 기존 연결이나 확인할 수 없는 폴더는 폴더 다시 지정을 사용하세요.",
             )
         )
         self.status = QLabel("")
@@ -223,14 +226,19 @@ class FolderLinksPanel(ShutdownOwner, QWidget):
     def open_selected(self) -> None:
         link = self.selected
         if link:
-            self._run(lambda _canceled: self.service.open_path(link), opening=True)
+            self._run(lambda canceled: self.service.inspect_open(link, canceled), opening=True)
 
     def _run(
-        self, operation: Callable[[Callable[[], bool]], object], *, opening: bool = False
+        self,
+        operation: Callable[[Callable[[], bool]], object],
+        *,
+        opening: bool = False,
+        updating_link: bool = False,
     ) -> None:
-        if self._job_thread:
+        if self._job_thread or self._shutting_down:
             return
         self._opening = opening
+        self._updating_link = updating_link
         self._job_thread = QThread(self)
         self.worker = OperationWorker(operation)
         self.worker.moveToThread(self._job_thread)
@@ -250,7 +258,13 @@ class FolderLinksPanel(ShutdownOwner, QWidget):
     def _succeeded(self, result: object) -> None:
         if self._shutting_down:
             return
+        if isinstance(result, FolderRelinkCandidate):
+            self._candidate = result
+            return
         if self._opening and isinstance(result, Path):
+            if self._updating_link:
+                self.refresh()
+                self.changed.emit()
             opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(result)))
             self.status.setText(
                 "폴더를 열었습니다." if opened else "탐색기를 열지 못했습니다. 연결은 유지됩니다."
@@ -274,7 +288,54 @@ class FolderLinksPanel(ShutdownOwner, QWidget):
         self._job_thread, self.worker = None, None
         if not self._shutting_down:
             self._selection_changed()
+            candidate, self._candidate = self._candidate, None
+            if candidate:
+                self._confirm_candidate(candidate)
+
+    def _confirm_candidate(self, candidate: FolderRelinkCandidate) -> None:
+        if self.selected != candidate.link:
+            return
+        if self.read_only:
+            self.status.setText(
+                "폴더 위치가 바뀌었습니다. 업무를 복원한 뒤 폴더를 다시 지정하세요. 연결은 유지했습니다."
+            )
+            return
+        dialog = QMessageBox(self)
+        self._choice_dialog = dialog
+        dialog.setStyleSheet(LIGHT_STYLESHEET)
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setWindowTitle("폴더 위치 변경")
+        dialog.setText("연결한 폴더를 찾을 수 없습니다.\n아래 폴더를 사용할까요?")
+        dialog.setInformativeText(f"이전: {candidate.link.path}\n찾은 폴더: {candidate.path}")
+        use = dialog.addButton("이 폴더 사용", QMessageBox.ButtonRole.AcceptRole)
+        other = dialog.addButton("다른 폴더 선택", QMessageBox.ButtonRole.ActionRole)
+        cancel = dialog.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.setEscapeButton(cancel)
+
+        def finished(_result: int) -> None:
+            clicked = dialog.clickedButton()
+            self._choice_dialog = None
+            dialog.deleteLater()
+            if self._shutting_down or self.selected != candidate.link:
+                return
+            if clicked is use:
+                self._run(
+                    lambda canceled: self.service.confirm_candidate(candidate, canceled),
+                    opening=True,
+                    updating_link=True,
+                )
+            elif clicked is other:
+                self.relink()
+            else:
+                self.status.setText("폴더 연결은 유지했습니다.")
+
+        dialog.finished.connect(finished)
+        dialog.open()
 
     def request_shutdown(self) -> None:
         self._shutting_down = True
+        self._candidate = None
+        if self._choice_dialog:
+            self._choice_dialog.reject()
         self._shutdown_scope.request_stop()

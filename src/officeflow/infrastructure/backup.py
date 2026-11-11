@@ -1412,8 +1412,14 @@ def _check_restore_schema(path: Path, cancel_requested: Callable[[], bool] | Non
             raise BackupError(
                 "이 프로그램이 지원하지 않는 DB 버전입니다. 더 새로운 OfficeFlow에서 복원하세요."
             )
-        if revisions <= {"0016_task_folder_links", "0017_completion_browse_index"}:
+        if revisions <= {
+            "0016_task_folder_links",
+            "0017_completion_browse_index",
+            "0018_folder_identity",
+        }:
             required_links = {"id", "task_id", "name", "path", "position", "created_at"}
+            if revisions == {"0018_folder_identity"}:
+                required_links.add("folder_identity")
             columns = {
                 row[1] for row in connection.execute('PRAGMA table_info("task_folder_links")')
             }

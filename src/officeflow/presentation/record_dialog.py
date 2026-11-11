@@ -1420,7 +1420,6 @@ class TaskRecordsDialog(ShutdownOwner, QDialog):
         self.attachment_drag_status.setWordWrap(True)
         self.attachment_drag_status.setStyleSheet("color:#5273A1; background:#FFFFFF;")
         self.attachment_drag_status.hide()
-        layout.insertWidget(layout.indexOf(self.attachment_stack), self.attachment_drag_status)
         if self._attachment_export_service:
             self._drag_controller = AttachmentDragController(
                 self._attachment_export_service,

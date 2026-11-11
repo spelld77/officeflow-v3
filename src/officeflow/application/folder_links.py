@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from officeflow.infrastructure.folder_identity import probe
+
 
 @dataclass(frozen=True, slots=True)
 class FolderLink:
@@ -15,6 +17,13 @@ class FolderLink:
     path: str
     position: int
     created_at: datetime
+    folder_identity: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FolderRelinkCandidate:
+    link: FolderLink
+    path: Path
 
 
 class FolderLinkRepository(Protocol):
@@ -26,6 +35,7 @@ class FolderLinkRepository(Protocol):
         path: str,
         identity: int | None,
         expected: FolderLink | None = None,
+        folder_identity: str | None = None,
     ) -> FolderLink: ...
     def delete(self, task_id: int, identity: int) -> None: ...
 
@@ -62,21 +72,64 @@ class FolderLinkService:
         name = name.strip()
         if not 1 <= len(name) <= 200 or any(ord(char) < 32 for char in name):
             raise ValueError("폴더 이름을 1~200자로 입력하세요.")
-        actual = self.validate(path)
+        result = probe(path, self._roots, capture=True, canceled=canceled)
+        actual = Path(result["path"])
         if canceled():
             raise RuntimeError("폴더 연결을 취소했습니다.")
         # Canonicalize aliases so the same actual directory cannot be added twice.
-        return self.repository.save(task_id, name, str(actual), identity, expected)
+        return self.repository.save(
+            task_id, name, str(actual), identity, expected, folder_identity=result["identity"]
+        )
 
     def rename(self, task_id: int, link: FolderLink, name: str) -> FolderLink:
         name = name.strip()
         if not 1 <= len(name) <= 200 or any(ord(char) < 32 for char in name):
             raise ValueError("폴더 이름을 1~200자로 입력하세요.")
-        return self.repository.save(task_id, name, link.path, link.id, link)
+        return self.repository.save(
+            task_id, name, link.path, link.id, link, folder_identity=link.folder_identity
+        )
+
+    def inspect_open(
+        self,
+        link: FolderLink,
+        canceled: Callable[[], bool] = lambda: False,
+    ) -> Path | FolderRelinkCandidate:
+        result = probe(
+            Path(link.path),
+            self._roots,
+            expected=link.folder_identity,
+            search=link.folder_identity is not None,
+            canceled=canceled,
+        )
+        path = Path(result["path"])
+        return FolderRelinkCandidate(link, path) if result["candidate"] else path
+
+    def confirm_candidate(
+        self,
+        candidate: FolderRelinkCandidate,
+        canceled: Callable[[], bool] = lambda: False,
+    ) -> Path:
+        link = candidate.link
+        if not link.folder_identity or candidate.path.parent != Path(link.path).parent:
+            raise ValueError("폴더 후보를 다시 확인하세요. 연결은 유지했습니다.")
+        result = probe(
+            candidate.path, self._roots, expected=link.folder_identity, canceled=canceled
+        )
+        if canceled():
+            raise ValueError("폴더 연결을 취소했습니다.")
+        actual = Path(result["path"])
+        name = actual.name[:200] if link.name == Path(link.path).name else link.name
+        self.repository.save(
+            link.task_id, name, str(actual), link.id, link, folder_identity=link.folder_identity
+        )
+        return actual
 
     def open_path(self, link: FolderLink) -> Path:
         try:
-            return self.validate(Path(link.path))
+            result = self.inspect_open(link)
+            if isinstance(result, FolderRelinkCandidate):
+                raise ValueError("폴더 위치 변경을 확인하세요. 연결은 유지했습니다.")
+            return result
         except (OSError, ValueError) as error:
             raise ValueError(
                 "폴더를 열 수 없습니다. 폴더 이동·이름 변경, 접근 권한, 공유 드라이브 연결을 "

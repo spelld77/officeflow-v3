@@ -48,7 +48,7 @@ def test_folder_worker_delivers_open_on_gui_thread_and_failure_keeps_link(
 ):
     *_, folder = files
     service = link_service(files)
-    link = service.save(files[1].id, "업무", folder)
+    link = service.repository.save(files[1].id, "업무", str(folder.resolve()), None)
     panel = FolderLinksPanel(service, files[1].id)
     qtbot.addWidget(panel)
     panel.show()

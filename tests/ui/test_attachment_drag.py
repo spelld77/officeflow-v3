@@ -185,8 +185,8 @@ def test_drag_status_narrow_render(dialog, qtbot, qapp, dark, view):
         qtbot.waitUntil(lambda: dialog._drag_controller._ready is not None, timeout=5000)
         qtbot.wait(20)
         status = dialog.attachment_drag_status
-        assert status.isVisible() and "2개" in status.text()
-        assert status.height() >= status.heightForWidth(status.width())
+        assert not status.isVisible() and "2개" in status.text()
+        assert dialog.attachment_list.isVisible()
         directory = Path("artifacts/u41-drag/captures")
         directory.mkdir(parents=True, exist_ok=True)
         assert dialog.grab().save(str(directory / f"{view}-dark-{dark}.png"))

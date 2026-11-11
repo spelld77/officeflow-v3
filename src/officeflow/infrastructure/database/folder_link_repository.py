@@ -13,7 +13,15 @@ class SqlAlchemyFolderLinkRepository:
 
     @staticmethod
     def _value(row: TaskFolderLinkRecord) -> FolderLink:
-        return FolderLink(row.id, row.task_id, row.name, row.path, row.position, row.created_at)
+        return FolderLink(
+            row.id,
+            row.task_id,
+            row.name,
+            row.path,
+            row.position,
+            row.created_at,
+            row.folder_identity,
+        )
 
     def list(self, task_id: int) -> tuple[FolderLink, ...]:
         with self.sessions.transaction() as session:
@@ -33,6 +41,7 @@ class SqlAlchemyFolderLinkRepository:
         path: str,
         identity: int | None,
         expected: FolderLink | None = None,
+        folder_identity: str | None = None,
     ) -> FolderLink:
         with self.sessions.write_unit_of_work() as unit, unit.transaction() as session:
             task = session.get(TaskRecord, task_id)
@@ -54,6 +63,7 @@ class SqlAlchemyFolderLinkRepository:
                     path=path,
                     position=max((row.position for row in rows), default=-1) + 1,
                     created_at=datetime.now(UTC),
+                    folder_identity=folder_identity,
                 )
                 session.add(row)
             else:
@@ -66,6 +76,7 @@ class SqlAlchemyFolderLinkRepository:
                     )
                 row = found
                 row.name, row.path = name, path
+                row.folder_identity = folder_identity
             session.flush()
             return self._value(row)
 

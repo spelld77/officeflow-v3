@@ -82,6 +82,7 @@ class TaskFolderLinkRecord(Base):
     path: Mapped[str] = mapped_column(Text)
     position: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    folder_identity: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TaskHistoryRecord(Base):

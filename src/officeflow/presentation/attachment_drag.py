@@ -6,8 +6,8 @@ from collections.abc import Callable
 from typing import cast
 
 from PySide6.QtCore import QMimeData, QObject, Qt, QThread, QTimer, QUrl, Slot
-from PySide6.QtGui import QDrag
-from PySide6.QtWidgets import QLabel, QListWidget, QWidget
+from PySide6.QtGui import QCursor, QDrag
+from PySide6.QtWidgets import QLabel, QListWidget, QToolTip, QWidget
 from shiboken6 import isValid
 
 from officeflow.application.attachment_export import AttachmentExportService, FileReference
@@ -59,7 +59,6 @@ class AttachmentDragController(ShutdownOwner, QObject):
             self._worker.cancel()
         if token and not self._closed:
             self.status.setText("끌어 복사 준비 중… 준비되면 탐색기·바탕화면으로 끄세요.")
-            self.status.show()
             self._timer.start()
         else:
             self.status.hide()
@@ -123,7 +122,7 @@ class AttachmentDragController(ShutdownOwner, QObject):
             self.status.setText(
                 "사본 준비가 끝나면 다시 끌어 주세요. 실패한 경우 파일을 다시 선택하세요."
             )
-            self.status.show()
+            QToolTip.showText(QCursor.pos(), self.status.text(), self.listing, msecShowTime=4000)
             return
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(str(path)) for path in batch.paths])
@@ -134,6 +133,7 @@ class AttachmentDragController(ShutdownOwner, QObject):
             self.store.offer(batch)
         except Exception as error:
             self.status.setText(f"끌어 복사를 시작하지 못했습니다 · {error}")
+            QToolTip.showText(QCursor.pos(), self.status.text(), self.listing, msecShowTime=4000)
             drag.deleteLater()
             return
         self._dragging = True
