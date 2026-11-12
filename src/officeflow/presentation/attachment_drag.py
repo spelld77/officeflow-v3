@@ -15,6 +15,21 @@ from officeflow.infrastructure.attachments.drag_copies import DragCopyBatch, Dra
 from officeflow.presentation.background import OperationWorker, ShutdownOwner, ShutdownScope
 
 
+class AttachmentDragListWidget(QListWidget):
+    """Copy-only outgoing drag; no internal item movement or drop imports."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.drag_controller: AttachmentDragController | None = None
+        self.setDragEnabled(True)
+        self.setAcceptDrops(False)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+
+    def startDrag(self, supportedActions: Qt.DropAction) -> None:
+        if self.drag_controller:
+            self.drag_controller.start_drag()
+
+
 class AttachmentDragController(ShutdownOwner, QObject):
     def __init__(
         self,

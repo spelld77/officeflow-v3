@@ -36,6 +36,10 @@ from officeflow.application.document_lifecycle import DocumentLifecycle
 from officeflow.application.file_operations import FileInUseError
 from officeflow.infrastructure.attachments.view_cache import ViewCopy
 from officeflow.infrastructure.database.document_catalog import DocumentEntry
+from officeflow.presentation.attachment_drag import (
+    AttachmentDragController,
+    AttachmentDragListWidget,
+)
 from officeflow.presentation.attachment_export import AttachmentExportController
 from officeflow.presentation.background import (
     OperationWorker,
@@ -511,6 +515,7 @@ class DocumentBrowser(_ReadDialog):
         super().__init__(parent)
         self.lifecycle, self.task_id, self.family_id = lifecycle, task_id, family_id
         self.read_only = read_only
+        self._drag_controller: AttachmentDragController | None = None
         self.timezone = timezone
         self.setStyleSheet(LIGHT_STYLESHEET)
         self.setWindowTitle("보관함")
@@ -531,7 +536,7 @@ class DocumentBrowser(_ReadDialog):
         self.scope_label = CompactLabel()
         self.scope_label.setObjectName("documentScope")
         self.root.addWidget(self.scope_label)
-        self.list = QListWidget()
+        self.list = AttachmentDragListWidget()
         self.list.setObjectName("documentFileList")
         compact_file_list(self.list)
         self.list.itemChanged.connect(self._checked)
@@ -585,13 +590,40 @@ class DocumentBrowser(_ReadDialog):
         self._resolved_summary_key: tuple[str, int] | None = None
         self.kind.currentIndexChanged.connect(self.reset)
         self.all_families.toggled.connect(self.reset)
+        drag_status = QLabel(self)
+        drag_status.hide()
+        self._drag_controller = AttachmentDragController(
+            exports,
+            self,
+            self.list,
+            drag_status,
+            lambda: tuple(
+                self.entries[item.data(Qt.ItemDataRole.UserRole)]
+                for item in self.list.selectedItems()
+                if item.data(Qt.ItemDataRole.UserRole) in self.entries
+            ),
+            self._drag_references,
+            lambda: not self._closed and not self._busy(),
+        )
+        self.list.drag_controller = self._drag_controller
         self.refresh()
+
+    def _drag_references(self) -> tuple[FileReference, ...]:
+        return tuple(
+            FileReference.version(key[1])
+            if key[0] == "version"
+            else FileReference.attachment(key[1])
+            for item in self.list.selectedItems()
+            if (key := item.data(Qt.ItemDataRole.UserRole)) in self.entries
+        )
 
     def reset(self) -> None:
         self.cursors = [None]
         self.refresh()
 
     def refresh(self) -> None:
+        if self._drag_controller:
+            self._drag_controller.invalidate()
         self.scope_label.setText(
             "이 업무 전체 자료" if self.all_families.isChecked() else "선택 파일의 관련 자료"
         )
@@ -681,6 +713,8 @@ class DocumentBrowser(_ReadDialog):
     def _update_selection(self) -> None:
         if not hasattr(self, "entries"):
             return
+        if self._drag_controller:
+            self._drag_controller.select()
         items = self.list.selectedItems()
         outside = bool(self.selected.difference(self.entries))
         self.selection_status.setText(
@@ -884,6 +918,8 @@ class DocumentBrowser(_ReadDialog):
         self.exporter.choose(references)
 
     def request_shutdown(self) -> None:
+        if self._drag_controller:
+            self._drag_controller.request_shutdown()
         super().request_shutdown()
         stop_file_actions(self)
         request_shutdown(self.exporter)
