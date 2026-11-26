@@ -6,18 +6,18 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 
 ## 현재 상태
 
-3.0.18은 연결한 폴더의 이름 변경 확인·복구, 전체/예정 탭의 늦은 날짜순과 첨부 드래그 안내 제거를 포함한다.
-새 연결/직접 다시 지정한 로컬 고정 NTFS 폴더만 식별 정보를 기억하며 기존 연결은 소급 적용하지 않는다.
-구현·검증은 [96번](docs/96-folder-rename-recovery-results.md), 배포 결과는
-[97번](docs/97-release-checklist.md)을 따른다.
-**DB0018로 이행되므로 전환 전 전체 백업이 필요하다. 0018 DB/백업은 3.0.18 이상에서 사용한다.**
+3.0.19는 첨부파일 보관함에서 선택한 여러 파일을 탐색기·바탕화면으로 끌어 복사하는 기능을 추가한다.
+드래그할 강조 선택은 체크한 저장 목록과 구분하며, 기존의 안전한 사본 준비 방식을 사용한다.
+구현·검증은 [98번](docs/98-document-browser-drag-design.md), 배포 결과는
+[100번](docs/100-release-checklist.md)을 따른다.
+**DB0018·전체 백업 v3를 유지한다. 전환 전 전체 백업이 필요하며, 0018 DB/백업은 3.0.18 이상에서 사용한다.**
 
-최신 정식 버전은 [OfficeFlow 3.0.18](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.18)다.
-[Python ZIP 다운로드](https://github.com/spelld77/officeflow-v3/releases/download/v3.0.18/OfficeFlow-Python-3.0.18.zip)를
+최신 정식 버전은 [OfficeFlow 3.0.19](https://github.com/spelld77/officeflow-v3/releases/tag/v3.0.19)다.
+[Python ZIP 다운로드](https://github.com/spelld77/officeflow-v3/releases/download/v3.0.19/OfficeFlow-Python-3.0.19.zip)를
 별도 폴더에 풀고 `setup-officeflow-python.cmd` → `run-officeflow-python.cmd` 순서로 사용한다.
 
 - 단계: Phase 8 완료
-- 버전: OfficeFlow 3.0.18
+- 버전: OfficeFlow 3.0.19
 - 구현 상태: Python ZIP 실행·합성 자료 보존 검증을 마친 Windows 데스크톱 앱
 - 주요 개선: 첨부 종류 필터·작업본 출처·창 크기 기억·외부 폴더 연결·HTML/Excel 업무 보관·간편 시간 입력·캡처 이미지·썸네일
 - 대상 플랫폼: Windows 10/11
@@ -29,6 +29,13 @@ OfficeFlow v3는 개인 업무, 기간 일정, 알림, 업무일지와 첨부파
 DB0017 색인만 추가하며 전체 백업 v3와 기존 업무·첨부 내용을 유지한다.
 기존 DB는 첫 실행에서 보호 사본을 만든 뒤 필요한 이행을 순서대로 적용한다.
 0017 DB와 이 DB가 포함된 백업은 **3.0.14 이상**에서 사용한다. 구버전 복귀에는 업데이트 전 자료가 필요하다.
+
+## 3.0.19 주요 개선
+
+첨부파일 보관함의 강조 선택 행을 탐색기·바탕화면으로 끌어 복사할 수 있다.
+여러 파일을 함께 선택할 수 있으며 체크한 저장 목록은 별도로 유지한다. 준비 전 끌었다면 준비가 끝난 뒤 다시 끈다.
+관련 검사 16개와 추출 실행·합성 자료 보존을 확인했다. 실제 탐색기 드롭·회사 환경 확인은 별도다.
+응답 없음 문제의 수정 버전은 아니다. 자세한 검증·공개 결과는 [100번 체크리스트](docs/100-release-checklist.md)를 따른다.
 
 ## 3.0.18 주요 개선
 
